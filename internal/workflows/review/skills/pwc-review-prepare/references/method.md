@@ -1,0 +1,9 @@
+# Prepare 方法
+
+1. 先完整讀 request.prompt 中的 Pin、snapshots 路徑清單、Missing 清單與 worktree 路徑。這些是已取得的 acquisition，不重新呼叫最新 PR metadata 取代它們。核對 supplied snapshots 的 metadata 與 Pin；保留 target branch 原始資訊，不能假設 main/develop。從 changed-files、pinned diff 和 head code 確定 review 範圍。
+2. 先將 request.prompt 的 required_sources 原樣放入 Sources，再追加自行查得的來源。這些 Controller 提供的 ID、status、file URL、file_id 不重新命名；missing source 不能只寫在 open_questions 而漏掉 Sources。Submodule gitlinks 快照本身已取得，外部 submodule-content 則是另一筆缺失來源，兩者不能混為一筆。將提供的所有實體 snapshots 原樣拷貝到當次 evidence，包括 metadata、diff、changed-files、issue comments、inline comments、reviews；不能只複製整理後的摘要。逐檔建立 files ID 對應，逐來源建立 Source。成功且內容為空的 comments snapshot 與取得失敗不同，前者仍有 snapshot/file_id；後者保留 missing 與原因，不造空陣列冒充成功。
+3. 讀 PR body 和 comments 找明確 linked Jira ticket、design、Confluence 頁面。按需讀既有 gh/jira/confluence skill，使用唯讀 API 查原始需求、限制、設計決策及必要連結；不整份載入舊 pr-review。外部內容另外存 evidence snapshot 並登記 files，Source 保留 URL、版本／擷取時間、kind、status、file_id 與 note。頁面缺失、無權限、未知連結或部分擷取都保留 missing 記錄及 open question，不能省略失敗來源。
+4. 把 PR body 明確標記為作者 claim，不是實作已完成的 code evidence。既有 review 評語也不能直接變成已確認缺陷。需求來源以 linked 原始規格為主，PR claim 為次；不同版本、Jira 與 design 或 PR claim 衝突時並列來源及衝突，不私自認定作者意圖或選擇方便的版本。claim-only 的需求保留其權威性限制。
+5. 每項 Requirements 只包含可判定的原子 statement，kind 僅 requirement、constraint、decision，保留 source_ids。用穩定 ID，不使用 attempt ID、讀取順序或隨機值。可依來源 canonical identity 產生 src-<digest>，依 kind + 排序後 source_ids + 正規化 statement 產生 req-<digest>；相同輸入在 retry 保持相同 ID，檢查碰撞。相衝突的 statement 各有 ID，來源排序不得改變 ID。未取得規格時不能杜撰需求；允許空需求陣列，但必須保留「缺少權威需求」的 open question。
+6. 寫入當次 artifacts 的 context Markdown：版本／actual target branch、各 snapshot 的 files ID 對照、變更範圍、來源及其可信度、作者 claims、既有評論摘要、需求／限制／設計決策、帶來源的 load assumptions、缺失與衝突／open questions。它不是 reviewer 結論，不能宣稱規格已被滿足或 review 已完成。context_file 指向該 artifact 的 files ID。
+7. 依 request.output registry schema 寫 Prepared candidate。逐項核對所有 supplied snapshots 都被複製、每個實體 Source 都有正確 file_id、所有 source_ids 存在，所有 Pin 值不變。只交付本次 prepare，不啟動任何 reviewer。

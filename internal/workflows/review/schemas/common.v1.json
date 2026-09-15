@@ -1,0 +1,459 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/review/common.v1.json",
+  "$defs": {
+    "pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "repository",
+        "number",
+        "base_sha",
+        "head_sha",
+        "merge_base",
+        "diff_range",
+        "context_id"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "base_sha": {
+          "type": "string",
+          "minLength": 40,
+          "maxLength": 40,
+          "pattern": "^[0-9a-fA-F]{40}$"
+        },
+        "head_sha": {
+          "type": "string",
+          "minLength": 40,
+          "maxLength": 40,
+          "pattern": "^[0-9a-fA-F]{40}$"
+        },
+        "merge_base": {
+          "type": "string",
+          "minLength": 40,
+          "maxLength": 40,
+          "pattern": "^[0-9a-fA-F]{40}$"
+        },
+        "diff_range": {
+          "type": "string",
+          "minLength": 82,
+          "maxLength": 82,
+          "pattern": "^[0-9a-fA-F]{40}\\.\\.[0-9a-fA-F]{40}$"
+        },
+        "context_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^\\S+$"
+        }
+      }
+    },
+    "ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "attempt_id",
+        "path",
+        "schema_id",
+        "sha256",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^\\S+$"
+        },
+        "attempt_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^\\S+$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "schema_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^\\S+$"
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-fA-F]{64}$"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "url",
+        "status",
+        "file_id",
+        "note"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^\\S+$"
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "url": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 4096
+        },
+        "status": {
+          "type": "string",
+          "enum": ["available", "missing", "conflict"]
+        },
+        "file_id": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "note": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {"const": "missing"}
+            }
+          },
+          "else": {
+            "properties": {
+              "url": {"minLength": 1},
+              "file_id": {"minLength": 1}
+            }
+          }
+        }
+      ]
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "statement",
+        "source_ids"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^\\S+$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "requirement",
+            "constraint",
+            "decision"
+          ]
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "source_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^\\S+$"
+          },
+          "minItems": 1,
+          "maxItems": 16
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "line",
+        "end_line",
+        "detail"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "severity",
+        "title",
+        "location",
+        "evidence",
+        "impact"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^(code|scale|simplicity)-[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "severity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "location": {
+          "$ref": "common.v1.json#/$defs/evidence"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.json#/$defs/evidence"
+          },
+          "minItems": 1,
+          "maxItems": 4
+        },
+        "impact": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    },
+    "assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirement_id",
+        "status",
+        "evidence",
+        "reason"
+      ],
+      "properties": {
+        "requirement_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^\\S+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "satisfied",
+            "not_satisfied",
+            "unconfirmed"
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "common.v1.json#/$defs/evidence"
+          },
+          "minItems": 0,
+          "maxItems": 4
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {"enum": ["satisfied", "not_satisfied"]}
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence": {"minItems": 1}
+            }
+          }
+        }
+      ]
+    },
+    "reviewer_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "status",
+        "ref",
+        "detail"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": [
+            "code",
+            "scale",
+            "simplicity"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "succeeded",
+            "failed",
+            "missing"
+          ]
+        },
+        "ref": {
+          "anyOf": [
+            {
+              "$ref": "common.v1.json#/$defs/ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      }
+    },
+    "disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finding_id",
+        "action",
+        "target_id",
+        "reason"
+      ],
+      "properties": {
+        "finding_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^(code|scale|simplicity)-[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "confirmed",
+            "merged",
+            "excluded",
+            "unconfirmed"
+          ]
+        },
+        "target_id": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "confirmed",
+                  "merged"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "target_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^(code|scale|simplicity)-[A-Za-z0-9][A-Za-z0-9._-]*$"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "target_id": {
+                "const": ""
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

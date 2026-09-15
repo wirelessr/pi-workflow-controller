@@ -1,0 +1,14 @@
+/bin/
+/dist/
+/pi-workflow-controller
+*.test
+*.prof
+/coverage/
+/coverage.out
+/test-results/
+/tmp/
+/*.log
+.env
+.env.*
+!.env.example
+.DS_Store

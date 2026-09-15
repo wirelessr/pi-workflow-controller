@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/review/validation.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pin",
+    "context",
+    "reviewers",
+    "findings",
+    "dispositions",
+    "requirements",
+    "completeness",
+    "conclusion",
+    "limitations",
+    "report_file"
+  ],
+  "properties": {
+    "pin": {
+      "$ref": "common.v1.json#/$defs/pin"
+    },
+    "context": {
+      "$ref": "common.v1.json#/$defs/ref"
+    },
+    "reviewers": {
+      "type": "array",
+      "items": {
+        "$ref": "common.v1.json#/$defs/reviewer_result"
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "common.v1.json#/$defs/finding"
+      },
+      "minItems": 0,
+      "maxItems": 96
+    },
+    "dispositions": {
+      "type": "array",
+      "items": {
+        "$ref": "common.v1.json#/$defs/disposition"
+      },
+      "minItems": 0,
+      "maxItems": 96
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "$ref": "common.v1.json#/$defs/assessment"
+      },
+      "minItems": 0,
+      "maxItems": 64
+    },
+    "completeness": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "limited",
+        "incomplete"
+      ]
+    },
+    "conclusion": {
+      "type": "string",
+      "enum": [
+        "findings",
+        "no_confirmed_findings",
+        "undetermined"
+      ]
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "minItems": 0,
+      "maxItems": 128
+    },
+    "report_file": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^\\S+$"
+    }
+  }
+}

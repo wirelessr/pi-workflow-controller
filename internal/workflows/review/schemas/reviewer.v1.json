@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/review/reviewer.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pin",
+    "role",
+    "context",
+    "coverage",
+    "limitations",
+    "findings",
+    "requirements"
+  ],
+  "properties": {
+    "pin": {
+      "$ref": "common.v1.json#/$defs/pin"
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "code",
+        "scale",
+        "simplicity"
+      ]
+    },
+    "context": {
+      "$ref": "common.v1.json#/$defs/ref"
+    },
+    "coverage": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "minItems": 1,
+      "maxItems": 64
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "minItems": 0,
+      "maxItems": 64
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "common.v1.json#/$defs/finding"
+      },
+      "minItems": 0,
+      "maxItems": 32
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "$ref": "common.v1.json#/$defs/assessment"
+      },
+      "minItems": 0,
+      "maxItems": 64
+    }
+  }
+}

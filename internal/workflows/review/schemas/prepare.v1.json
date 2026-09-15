@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/review/prepare.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pin",
+    "sources",
+    "requirements",
+    "open_questions",
+    "context_file"
+  ],
+  "properties": {
+    "pin": {
+      "$ref": "common.v1.json#/$defs/pin"
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "$ref": "common.v1.json#/$defs/source"
+      },
+      "minItems": 1,
+      "maxItems": 64
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "$ref": "common.v1.json#/$defs/requirement"
+      },
+      "minItems": 0,
+      "maxItems": 64
+    },
+    "open_questions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "minItems": 0,
+      "maxItems": 64
+    },
+    "context_file": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^\\S+$"
+    }
+  }
+}
