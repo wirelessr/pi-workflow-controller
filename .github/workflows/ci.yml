@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PWC_BUNDLED_PI: '0'
+  PWC_LIVE_PI: '0'
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Verify target platform
+        run: |
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          test "$(go env GOOS)/$(go env GOARCH)" = darwin/arm64
+      - name: Check Go formatting
+        run: |
+          unformatted=$(git ls-files -z '*.go' | xargs -0 gofmt -l)
+          if [[ -n "$unformatted" ]]; then
+            printf 'Run gofmt on:\n%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: Go vet
+        run: go vet ./...
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.11.4
+          args: --timeout=5m --max-issues-per-linter=0 --max-same-issues=0 ./...
+
+  test:
+    name: Tests and coverage
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+      - name: Verify target platform and document scope
+        run: |
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          test "$(go env GOOS)/$(go env GOARCH)" = darwin/arm64
+          {
+            printf '## Test scope\n\n'
+            printf 'macOS arm64: Go tests, real subprocess/PTY fixtures, race detector, and Python verifier tests.\n\n'
+            printf '**Excluded:** opt-in bundled Pi and live-provider/shared-hub tests. Their skips are not passes. No model credentials are supplied.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Go tests
+        run: go test -v -count=1 -timeout=15m ./...
+      - name: Python verifier tests
+        run: python3 testdata/live/review_test.py
+      - name: Go race tests with statement coverage
+        run: |
+          mkdir -p "$RUNNER_TEMP/coverage"
+          go test -v -race -count=1 -timeout=15m -covermode=atomic \
+            -coverprofile="$RUNNER_TEMP/coverage/coverage.out" ./...
+      - name: Render coverage report
+        run: |
+          go tool cover -func="$RUNNER_TEMP/coverage/coverage.out" \
+            | tee "$RUNNER_TEMP/coverage/functions.txt"
+          go tool cover -html="$RUNNER_TEMP/coverage/coverage.out" \
+            -o "$RUNNER_TEMP/coverage/coverage.html"
+          total=$(awk '$1 == "total:" { print $3 }' "$RUNNER_TEMP/coverage/functions.txt")
+          [[ "$total" =~ ^[0-9]+([.][0-9]+)?%$ ]]
+          {
+            printf '\n## Go statement coverage\n\n'
+            printf '**%s** from the successful race-instrumented test suite.\n\n' "$total"
+            printf 'Download the go-coverage-macos-arm64 artifact for the profile, per-function totals, and HTML report.\n\n'
+            printf 'This is Go statement coverage, not branch coverage or guaranteed subprocess coverage. It excludes opt-in integrations and does not measure the embedded Python/TypeScript code. No percentage threshold is enforced.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: go-coverage-macos-arm64
+          path: |
+            ${{ runner.temp }}/coverage/coverage.out
+            ${{ runner.temp }}/coverage/functions.txt
+            ${{ runner.temp }}/coverage/coverage.html
+          if-no-files-found: error
+          retention-days: 14
+
+  build:
+    name: Build and CLI smoke
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Verify target platform
+        run: |
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          test "$(go env GOOS)/$(go env GOARCH)" = darwin/arm64
+      - name: Verify modules and build packages
+        run: |
+          go mod download
+          go mod verify
+          go build ./...
+      - name: Build executable
+        env:
+          CGO_ENABLED: '0'
+          GOOS: darwin
+          GOARCH: arm64
+        run: |
+          mkdir -p "$RUNNER_TEMP/build"
+          go build -trimpath -buildvcs=false \
+            -o "$RUNNER_TEMP/build/pi-workflow-controller" ./cmd/pi-workflow-controller
+      - name: Smoke test outside the checkout
+        run: |
+          work=$(mktemp -d "$RUNNER_TEMP/pwc-smoke.XXXXXX")
+          cd "$work"
+          "$RUNNER_TEMP/build/pi-workflow-controller" list
+          status=0
+          "$RUNNER_TEMP/build/pi-workflow-controller" run unknown "CI smoke" || status=$?
+          test "$status" -eq 2
+          test -z "$(ls -A)"

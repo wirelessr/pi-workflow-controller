@@ -1,5 +1,7 @@
 # Pi Workflow Controller
 
+[![CI](https://github.com/wirelessr/pi-workflow-controller/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wirelessr/pi-workflow-controller/actions/workflows/ci.yml?query=branch%3Amain)
+
 以 Go control flow 編排多個獨立、持久化 Pi session 的本地 Controller，提供 JSON contract 交接、檢核、retry／parallel、Bubble Tea TUI 與自有資源清理。Workflow 與角色配置寫在程式碼內，不提供外部 workflow config、DSL 或動態 DAG。
 
 ## 目前 workflows
@@ -10,6 +12,18 @@
 | `code-review` | 固定 deep 靜態 PR review：Prepare、Code／Scale-Failure／Simplicity 平行審閱、獨立 Validation，交付結構化 contract 與繁中 Markdown report |
 
 `code-review` 只讀 pinned code／來源，不執行被審 repository 的 tests/build/scripts，不發 comments 或其他外部寫入。合法 `limited` report 可以是執行成功，但不代表 PR 全面通過；必要 reviewer 失敗不能 exit 0。模型、來源及失敗語義見 [CODE-REVIEW](docs/CODE-REVIEW.md)。
+
+## CI 與 coverage
+
+[GitHub Actions CI](.github/workflows/ci.yml) 在 `main` push、pull request 與手動觸發時執行，使用 macOS arm64 runner 與 `go.mod` 指定的 Go 版本：
+
+- **Lint**：gofmt、go vet、固定版本 golangci-lint。
+- **Tests and coverage**：一般 Go tests、Python verifier tests，以及 race＋atomic statement coverage。
+- **Build and CLI smoke**：module verification、package／CGO-disabled executable build，以及 checkout 外的 CLI smoke。
+
+Coverage 百分比放在成功測試 run 的 **Summary**；`go-coverage-macos-arm64` artifact 包含 `coverage.out`、逐函式統計與可下載開啟的 HTML report，保留 14 天。不使用 Codecov、不把產出 commit 回 repo，也不將 CI status badge 當成 coverage 百分比。目前只呈現量測值，不設定最低百分比門檻。
+
+CI 不提供模型 credentials、不啟動 Pi／hub；bundled Pi 與 live-provider／shared-hub opt-in tests 明確排除，skip 不算通過。Coverage 僅量測 Go statements，不代表 branch coverage、所有 subprocess 的完整 coverage 或 embedded Python／TypeScript coverage。Bundled 環境尚未建立乾淨 runner 的固定版本相容性驗證，仍依 [VERIFICATION](docs/VERIFICATION.md) 分開執行。CI badge 只代表這份 workflow 的檢查結果，不代表真 provider 業務 E2E 或其他平台相容性。
 
 ## Build 與執行前提
 

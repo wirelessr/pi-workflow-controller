@@ -901,7 +901,13 @@ func TestStartupMissingExecutable(t *testing.T) {
 }
 
 func TestPromptAckTimeoutStartsAfterCompleteWrite(t *testing.T) {
-	f := mustFixture(t, "write-block", func(o *Options) { o.Policy.RPCTimeout = time.Second; o.Policy.PromptAckTimeout = 30 * time.Millisecond })
+	// Leave headroom for the large frame under race/coverage instrumentation,
+	// while holding the pipe longer than the entire acknowledgement budget.
+	const ackTimeout = 500 * time.Millisecond
+	f := mustFixture(t, "write-block", func(o *Options) {
+		o.Policy.RPCTimeout = 5 * time.Second
+		o.Policy.PromptAckTimeout = ackTimeout
+	})
 	d := Dispatch{Token: randomID()}
 	d.Message = "Controller " + d.Token + strings.Repeat("x", 2<<20)
 	done := make(chan executionResult, 1)
@@ -910,7 +916,7 @@ func TestPromptAckTimeoutStartsAfterCompleteWrite(t *testing.T) {
 	select {
 	case r := <-done:
 		t.Fatalf("ack timed out before full pipe write: %+v", r)
-	case <-time.After(90 * time.Millisecond):
+	case <-time.After(3 * ackTimeout):
 	}
 	f.send(control{Type: "unblock-stdin"})
 	f.next("prompt")

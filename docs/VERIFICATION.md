@@ -1,6 +1,6 @@
 # 分組驗證與發布安全方法
 
-本文件只定義測試方法與 gates，不保存執行日期、測試數、實際結果、source manifests、真實目標或逐次 review 報告。每次執行的命令、stdout/stderr、版本、skip/blocked 原因與完整採證只存 repo 外受限目錄。不得以本指南存在宣稱任何 gate 已通過。
+本文件只定義測試方法與 gates，不保存執行日期、測試數、實際結果、source manifests、真實目標或逐次 review 報告。本機／真 provider 執行的命令、stdout/stderr、版本、skip/blocked 原因與完整採證只存 repo 外受限目錄。公開 GitHub-hosted CI 僅使用匿名 fixtures，其 Actions logs、summary 與 coverage artifacts 可公開查看，不包含本機歷史或真 provider 資料，也不 commit 回 repository。不得以本指南存在宣稱任何 gate 已通過。
 
 需求與不變量見 [PRD](../PRD.md)、[DESIGN](../DESIGN.md)；source/tests 導航見 [IMPLEMENTATION](../IMPLEMENTATION.md)。新增 workflow 須另遵守 [ADDING-A-WORKFLOW](ADDING-A-WORKFLOW.md)，產品 code-review 規則見 [CODE-REVIEW](CODE-REVIEW.md)。
 
@@ -32,6 +32,17 @@ CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
 ```
 
 Gate：各必要 case 的預期行為成立，無 race；實際執行交付 binary 的 `list`，並用未知 workflow 核對 exit 2、無 task/Pi 啟動。從 source repo 外及不同可信 cwd 核對 embedded 資源不依賴原始路徑。Binary、logs、coverage/profile 不納入 Git。CGO-disabled macOS binary 不等於其他平台全靜態相容。
+
+### GitHub Actions CI
+
+[CI workflow](../.github/workflows/ci.yml) 在 `main` push、PR 與手動觸發時執行。使用 `macos-15` arm64，並檢查 runner、主機與 Go target 架構；不以 Linux 的 compile-only 結果代替 Darwin filesystem／PTY tests。
+
+- 獨立 jobs：format/vet/lint、一般 tests＋Python verifier＋race/coverage、module verification/build/CLI smoke。Go 版本讀取 `go.mod`；actions 固定 commit，golangci-lint 固定版本。
+- Repository token 僅 `contents: read`，checkout 不保留 credentials；不使用 `pull_request_target`、外部 coverage service、模型 secrets 或自動 repository writes。
+- `PWC_BUNDLED_PI=0`、`PWC_LIVE_PI=0`；這些 opt-in 情境在 summary 明列排除，verbose test logs 保留逐項 skip 與原因。其餘 required command 失敗即 job 失敗，沒有 `continue-on-error` 或自動重試掩蓋失敗。
+- `go test -v -race -count=1 -timeout=15m -covermode=atomic -coverprofile=... ./...` 成功後才產生 coverage summary／HTML 與上傳報告。一般 tests 與 Python verifier 也必須先成功；失敗 run 的部分 profile 不包裝成成功 coverage。
+- Coverage 是 Go statement 統計，不是 branch coverage、不保證涵蓋全部 subprocess，也不量測 Python／TypeScript。沒有最低百分比或 patch coverage gate；成功百分比不能代替 skipped integration gates。
+- 只上傳明列的 `coverage.out`、`functions.txt`、`coverage.html`，artifact 保留 14 天；不包含 binary、temp HOME、session history 或 auth files。Actions 自身的 logs／retention 由 GitHub 設定管理。
 
 ### Runtime／RPC／process
 
