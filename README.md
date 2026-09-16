@@ -109,6 +109,7 @@ NODE_TLS_REJECT_UNAUTHORIZED=1 pi --session "$SESSION"
 | [IMPLEMENTATION](IMPLEMENTATION.md) | 開發維護路線、責任分工與 source/tests 入口 |
 | [ADDING-A-WORKFLOW](docs/ADDING-A-WORKFLOW.md) | Workflow authoring、registry／skills／交付與清理 |
 | [CODE-REVIEW](docs/CODE-REVIEW.md) | 固定靜態 review 的業務設計 |
+| [JIRA-TRIAGE](docs/JIRA-TRIAGE.md) | 移植中的 workflow／runtime 適配，沿用既有 AGENTS.md／hooks，尚未註冊 CLI workflow |
 | [FINAL-DELIVERY](docs/FINAL-DELIVERY.md) | FinalSelection／FinalDelivery／result.json.final |
 | [VERIFICATION](docs/VERIFICATION.md) | 分組測試 gates、共享環境安全與發布 scan 方法 |
 

@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/common.v1.json",
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "file_id",
+        "reason"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "available",
+            "missing",
+            "partial",
+            "too-large",
+            "unsafe",
+            "unsupported"
+          ]
+        },
+        "file_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "attempt_id",
+        "path",
+        "schema_id",
+        "sha256",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "schema_id": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "type": "string"
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "file_id"
+      ],
+      "properties": {
+        "ref": {
+          "anyOf": [
+            {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "file_id": {
+          "type": "string"
+        }
+      }
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "evidence"
+      ],
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ticket",
+        "stack",
+        "pop",
+        "binding",
+        "tenant_ids"
+      ],
+      "properties": {
+        "ticket": {
+          "type": "string"
+        },
+        "stack": {
+          "type": "string"
+        },
+        "pop": {
+          "type": "string"
+        },
+        "binding": {
+          "type": "string"
+        },
+        "tenant_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event",
+        "original",
+        "format",
+        "source_tz",
+        "utc",
+        "offset_seconds",
+        "evidence",
+        "paired_epoch_millis",
+        "paired_evidence"
+      ],
+      "properties": {
+        "event": {
+          "type": "string"
+        },
+        "original": {
+          "type": "string"
+        },
+        "format": {
+          "enum": [
+            "rfc3339",
+            "epoch-seconds",
+            "epoch-millis",
+            "local-paired"
+          ]
+        },
+        "source_tz": {
+          "type": "string"
+        },
+        "utc": {
+          "type": "string"
+        },
+        "offset_seconds": {
+          "type": "integer",
+          "minimum": -86400,
+          "maximum": 86400
+        },
+        "evidence": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+        },
+        "paired_epoch_millis": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "paired_evidence": {
+          "anyOf": [
+            {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
