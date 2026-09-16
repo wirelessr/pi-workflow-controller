@@ -114,23 +114,82 @@ func (r *Run) OpenSession(ctx context.Context, role RoleSpec) (*SessionHandle, e
 	}
 	return h, nil
 }
-func (r *Run) CloseSession(ctx context.Context, h *SessionHandle) error {
+
+// SessionContextUsage leases an idle owned handle without holding the control
+// lock across RPC. It does not consume an attempt or add a health probe.
+func (r *Run) SessionContextUsage(ctx context.Context, h *SessionHandle) (runtime.ContextUsage, error) {
 	r.mu.Lock()
 	if err := r.checkLocked(ctx); err != nil {
 		r.mu.Unlock()
-		return err
+		return runtime.ContextUsage{}, err
 	}
-	if h == nil || h.run != r {
+	if h == nil || h.run != r || h.unusable || h.closing.Load() || h.session == nil {
 		r.mu.Unlock()
-		return newFailure(InvalidDefinition, "CloseSession", "foreign or nil handle")
+		return runtime.ContextUsage{}, newFailure(InvalidDefinition, "SessionContextUsage", "invalid or unavailable handle")
 	}
 	if h.busy {
 		r.mu.Unlock()
-		return newFailure(SessionBusy, "CloseSession", "handle leased by a step")
+		return runtime.ContextUsage{}, newFailure(SessionBusy, "SessionContextUsage", "session already leased")
+	}
+	h.busy = true
+	r.mu.Unlock()
+	op, done := r.operationContext(ctx)
+	defer done()
+	usage, err := h.session.ContextUsage(op)
+	r.mu.Lock()
+	if err == nil {
+		err = r.checkLocked(op)
+	}
+	if err != nil {
+		h.unusable = true
+	}
+	r.mu.Unlock()
+	if err != nil {
+		err = r.recordError(err)
+		_ = r.closeHandle(h)
+	}
+	r.mu.Lock()
+	h.busy = false
+	r.mu.Unlock()
+	if err != nil {
+		return runtime.ContextUsage{}, err
+	}
+	return usage, nil
+}
+
+func (r *Run) CloseSession(ctx context.Context, h *SessionHandle) error {
+	_, err := r.CloseSessionReport(ctx, h)
+	return err
+}
+
+// CloseSessionReport returns the same closeOnce outcome as CloseSession. Cleanup
+// retains its independent bounded budget even when the workflow caller cancels.
+func (r *Run) CloseSessionReport(ctx context.Context, h *SessionHandle) (runtime.CleanupReport, error) {
+	r.mu.Lock()
+	if err := r.checkLocked(ctx); err != nil {
+		r.mu.Unlock()
+		return runtime.CleanupReport{}, err
+	}
+	if h == nil || h.run != r {
+		r.mu.Unlock()
+		return runtime.CleanupReport{}, newFailure(InvalidDefinition, "CloseSession", "foreign or nil handle")
+	}
+	if h.busy {
+		r.mu.Unlock()
+		return runtime.CleanupReport{}, newFailure(SessionBusy, "CloseSession", "handle leased by a step")
 	}
 	h.unusable = true
 	r.mu.Unlock()
-	return r.closeHandle(h)
+	err := r.closeHandle(h)
+	select {
+	case <-h.closeDone:
+		report := h.report
+		report.Unconfirmed = append([]string(nil), report.Unconfirmed...)
+		report.DiscoveryRemoved = append([]string(nil), report.DiscoveryRemoved...)
+		return report, err
+	default:
+		return runtime.CleanupReport{Identity: runtime.Identity{HandleID: h.id}, Unconfirmed: []string{"Close outcome not available before cleanup deadline"}}, err
+	}
 }
 func (r *Run) closeHandle(h *SessionHandle) error {
 	ctx, cancel := context.WithTimeout(context.Background(), r.definition.Policy.Runtime.CleanupTimeout)

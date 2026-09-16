@@ -113,6 +113,8 @@ func Serve() error {
 		switch command.Type {
 		case "get_state":
 			err = reply(state)
+		case "get_session_stats":
+			err = reply(map[string]any{"sessionId": sid, "sessionFile": history, "contextUsage": map[string]any{"tokens": 95000, "contextWindow": 100000, "percent": 95}})
 		case "get_entries":
 			if holdEntries {
 				if err := controlOut.Encode(Control{Type: "entries-held"}); err != nil {

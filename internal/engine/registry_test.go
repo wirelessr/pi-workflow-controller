@@ -114,35 +114,38 @@ func TestRegistryRequiresEveryPolicyValuePositive(t *testing.T) {
 			for j := 0; j < field.Type.NumField(); j++ {
 				fields = append(fields, field.Name+"."+field.Type.Field(j).Name)
 			}
-		} else {
+		} else if field.Type.Kind() != reflect.Bool {
 			fields = append(fields, field.Name)
 		}
 	}
-	for _, field := range fields {
-		for _, value := range []int64{-1, 0, 1} {
-			t.Run(fmt.Sprintf("%s/%d", field, value), func(t *testing.T) {
-				definition := registryDefinition("policy")
-				v := reflect.ValueOf(&definition.Policy).Elem()
-				for _, part := range strings.Split(field, ".") {
-					v = v.FieldByName(part)
-				}
-				v.SetInt(value)
-				r, err := engine.NewRegistry([]engine.Definition{definition})
-				if value > 0 {
-					if err != nil {
-						t.Fatal(err)
+	for _, disabled := range []bool{false, true} {
+		for _, field := range fields {
+			for _, value := range []int64{-1, 0, 1} {
+				t.Run(fmt.Sprintf("disabled=%t/%s/%d", disabled, field, value), func(t *testing.T) {
+					definition := registryDefinition("policy")
+					definition.Policy.DisableRunTimeout = disabled
+					v := reflect.ValueOf(&definition.Policy).Elem()
+					for _, part := range strings.Split(field, ".") {
+						v = v.FieldByName(part)
 					}
-					got, err := r.Lookup(definition.Name)
-					if err != nil || got.Policy != definition.Policy {
-						t.Fatalf("explicit positive policy changed: %+v, %v", got.Policy, err)
+					v.SetInt(value)
+					r, err := engine.NewRegistry([]engine.Definition{definition})
+					if value > 0 {
+						if err != nil {
+							t.Fatal(err)
+						}
+						got, err := r.Lookup(definition.Name)
+						if err != nil || got.Policy != definition.Policy {
+							t.Fatalf("explicit positive policy changed: %+v, %v", got.Policy, err)
+						}
+						return
 					}
-					return
-				}
-				requireInvalidDefinition(t, err)
-				if r != nil || !strings.Contains(err.Error(), field) {
-					t.Fatalf("expected rejection identifying %s, got registry=%v error=%v", field, r, err)
-				}
-			})
+					requireInvalidDefinition(t, err)
+					if r != nil || !strings.Contains(err.Error(), field) {
+						t.Fatalf("expected rejection identifying %s, got registry=%v error=%v", field, r, err)
+					}
+				})
+			}
 		}
 	}
 }

@@ -146,6 +146,8 @@ func TestPiSubprocess(t *testing.T) {
 	var prompt map[string]any
 	var held []map[string]any
 	holdState := false
+	holdStats := false
+	stats := map[string]any{"sessionId": sid, "sessionFile": file}
 	var entriesResponse map[string]any
 	stateCount := 0
 	entriesCount, fullQueries := 0, 0
@@ -163,6 +165,12 @@ func TestPiSubprocess(t *testing.T) {
 					_ = ctl.Encode(control{Type: "held"})
 				} else {
 					reply(c, state, true)
+				}
+			case "get_session_stats":
+				if holdStats {
+					_ = ctl.Encode(control{Type: "stats-held"})
+				} else {
+					reply(c, stats, true)
 				}
 			case "get_entries":
 				entriesCount++
@@ -346,6 +354,12 @@ func TestPiSubprocess(t *testing.T) {
 				state["isStreaming"] = false
 				emit(map[string]any{"type": "agent_end", "messages": []any{}, "willRetry": false})
 				emit(map[string]any{"type": "agent_settled"})
+			case "stats":
+				for k, v := range c.State {
+					stats[k] = v
+				}
+			case "hold-stats":
+				holdStats = true
 			case "hold-state":
 				holdState = true
 			case "release-one-state":
@@ -669,6 +683,110 @@ func TestExecuteAndConfirm(t *testing.T) {
 		})
 	}
 }
+func ptr[T any](value T) *T { return &value }
+
+func TestContextUsageQuery(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fields  map[string]any
+		tokens  *int64
+		window  *int64
+		percent *float64
+	}{
+		{name: "omitted"},
+		{name: "null", fields: map[string]any{"contextUsage": nil}},
+		{name: "post-compaction", fields: map[string]any{"contextUsage": map[string]any{"tokens": nil, "contextWindow": 100000, "percent": nil}}, window: ptr(int64(100000))},
+		{name: "zero", fields: map[string]any{"contextUsage": map[string]any{"tokens": 0, "contextWindow": 100000, "percent": 0}}, tokens: ptr(int64(0)), window: ptr(int64(100000)), percent: ptr(float64(0))},
+		{name: "over-capacity", fields: map[string]any{"tokens": map[string]any{"total": 9999999}, "contextUsage": map[string]any{"tokens": 105000, "contextWindow": 100000, "percent": 105}}, tokens: ptr(int64(105000)), window: ptr(int64(100000)), percent: ptr(float64(105))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := mustFixture(t, "normal", nil)
+			_, done := f.execute()
+			f.send(control{Type: "message", Message: assistant("stop")})
+			f.send(control{Type: "settle"})
+			execution := f.result(done)
+			if execution.err != nil {
+				t.Fatal(execution.err)
+			}
+			f.send(control{Type: "stats", State: tc.fields})
+			before := time.Now()
+			usage, err := f.s.ContextUsage(f.ctx)
+			if err != nil || usage.Identity != f.s.Identity() || usage.SampledAt.Before(before) || usage.Seq <= execution.receipt.SettledSeq || usage.ActivityEpoch != execution.receipt.ActivityEpoch || !reflect.DeepEqual(usage.Tokens, tc.tokens) || !reflect.DeepEqual(usage.ContextWindow, tc.window) || !reflect.DeepEqual(usage.Percent, tc.percent) {
+				t.Fatalf("usage=%+v error=%v", usage, err)
+			}
+			if _, err := f.s.Confirm(f.ctx, execution.receipt); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestContextUsageRejectsMalformedAndForeignStats(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields map[string]any
+		code   Code
+	}{
+		{"wrong-session", map[string]any{"sessionId": "foreign"}, SessionChanged},
+		{"wrong-file", map[string]any{"sessionFile": "/foreign/history.jsonl"}, SessionChanged},
+		{"missing-identity", map[string]any{"sessionId": nil}, ProtocolFailed},
+		{"wrong-identity-type", map[string]any{"sessionFile": 12}, ProtocolFailed},
+		{"usage-array", map[string]any{"contextUsage": []any{}}, ProtocolFailed},
+		{"missing-fields", map[string]any{"contextUsage": map[string]any{}}, ProtocolFailed},
+		{"missing-tokens", map[string]any{"contextUsage": map[string]any{"contextWindow": 100, "percent": 1}}, ProtocolFailed},
+		{"missing-percent", map[string]any{"contextUsage": map[string]any{"contextWindow": 100, "tokens": 1}}, ProtocolFailed},
+		{"zero-window", map[string]any{"contextUsage": map[string]any{"contextWindow": 0, "tokens": 1, "percent": 1}}, ProtocolFailed},
+		{"negative-token", map[string]any{"contextUsage": map[string]any{"contextWindow": 100, "tokens": -1, "percent": 1}}, ProtocolFailed},
+		{"wrong-token-type", map[string]any{"contextUsage": map[string]any{"contextWindow": 100, "tokens": "1", "percent": 1}}, ProtocolFailed},
+		{"negative-percent", map[string]any{"contextUsage": map[string]any{"contextWindow": 100, "tokens": 1, "percent": -1}}, ProtocolFailed},
+		{"wrong-percent-type", map[string]any{"contextUsage": map[string]any{"contextWindow": 100, "tokens": 1, "percent": "1"}}, ProtocolFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := mustFixture(t, "normal", nil)
+			f.send(control{Type: "stats", State: tc.fields})
+			usage, err := f.s.ContextUsage(f.ctx)
+			requireCode(t, err, tc.code)
+			if !reflect.DeepEqual(usage, ContextUsage{}) {
+				t.Fatalf("invalid stats returned usage: %+v", usage)
+			}
+			_, err = f.s.Snapshot(f.ctx)
+			requireCode(t, err, tc.code)
+		})
+	}
+}
+
+func TestContextUsageBoundedLifecycle(t *testing.T) {
+	for _, mode := range []string{"timeout", "cancel", "close"} {
+		t.Run(mode, func(t *testing.T) {
+			f := mustFixture(t, "normal", nil)
+			f.send(control{Type: "hold-stats"})
+			ctx, cancel := context.WithCancelCause(f.ctx)
+			defer cancel(context.Canceled)
+			done := make(chan error, 1)
+			go func() { _, err := f.s.ContextUsage(ctx); done <- err }()
+			f.next("stats-held")
+			want := RPCUnresponsive
+			if mode == "cancel" {
+				cancel(&Failure{Code: Cancelled, Origin: ControllerUser, Message: "fixture cancellation"})
+				want = Cancelled
+			}
+			if mode == "close" {
+				report, err := f.s.Close(f.ctx)
+				if err != nil || !report.WaitCompleted || !report.ProcessExited {
+					t.Fatalf("cleanup=%+v error=%v", report, err)
+				}
+				want = ProcessExited
+			}
+			select {
+			case err := <-done:
+				requireCode(t, err, want)
+			case <-f.ctx.Done():
+				t.Fatal("stats query did not return")
+			}
+		})
+	}
+}
+
 func TestSettledBeforeAckStillRequiresAck(t *testing.T) {
 	f := mustFixture(t, "event-before-ack", nil)
 	_, done := f.execute()

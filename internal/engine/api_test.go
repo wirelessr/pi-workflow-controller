@@ -26,6 +26,8 @@ func TestUninitializedOperationsFailClosed(t *testing.T) {
 			return err
 		}},
 		{"CloseSession", func(t *testing.T) error { return run.CloseSession(ctx, nil) }},
+		{"CloseSessionReport", func(t *testing.T) error { _, err := run.CloseSessionReport(ctx, nil); return err }},
+		{"SessionContextUsage", func(t *testing.T) error { _, err := run.SessionContextUsage(ctx, nil); return err }},
 		{"Child", func(t *testing.T) error {
 			child, err := scope.Child("child")
 			if child != nil {

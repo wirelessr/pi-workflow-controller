@@ -25,6 +25,7 @@ type Runtime interface {
 type Session interface {
 	Identity() Identity
 	Snapshot(context.Context) (SessionState, error)
+	ContextUsage(context.Context) (ContextUsage, error)
 	Execute(context.Context, Dispatch) (Execution, error)
 	Confirm(context.Context, Execution) (Confirmation, error)
 	Close(context.Context) (CleanupReport, error)
@@ -44,6 +45,18 @@ type SessionState struct {
 	LastResponseTime                  time.Time
 	Seq, ActivityEpoch                uint64
 }
+
+// ContextUsage is an on-demand estimate, not provider admission evidence.
+// Nil values mean unknown, including immediately after compaction, not zero.
+type ContextUsage struct {
+	Identity           Identity
+	SampledAt          time.Time
+	Seq, ActivityEpoch uint64
+	Tokens             *int64
+	ContextWindow      *int64
+	Percent            *float64
+}
+
 type Confirmation struct{ Seq, ActivityEpoch uint64 }
 type CleanupReport struct {
 	Identity                                                         Identity

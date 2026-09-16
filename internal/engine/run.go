@@ -96,10 +96,14 @@ func New(ctx context.Context, def Definition, input Input, opts Options) (*Run, 
 		_ = store.Close()
 		return nil, normalize(err, "New")
 	}
-	deadline := created.Add(p.RunTimeout)
-	deadlineCause := newFailure(TimedOut, "run", "run deadline exceeded")
-	deadlineCause.Origin = OriginRunDeadline
-	timed, deadlineCancel := context.WithDeadlineCause(ctx, deadline, deadlineCause)
+	var deadline time.Time
+	timed, deadlineCancel := ctx, context.CancelFunc(func() {})
+	if !p.DisableRunTimeout {
+		deadline = created.Add(p.RunTimeout)
+		deadlineCause := newFailure(TimedOut, "run", "run deadline exceeded")
+		deadlineCause.Origin = OriginRunDeadline
+		timed, deadlineCancel = context.WithDeadlineCause(ctx, deadline, deadlineCause)
+	}
 	life, cancel := context.WithCancelCause(timed)
 	r := &Run{definition: def, input: input, store: store, schemas: opts.Schemas, fs: fs, ctx: life, cancel: cancel, deadlineCancel: deadlineCancel, deadline: deadline, accepting: true, changed: make(chan struct{}, 1), handles: make(map[string]*SessionHandle), publications: make(map[string]publication), invocations: make(map[string]string), retryAncestors: make(map[string][]string), observations: make(chan runtime.Observation, p.Runtime.ObservationQueue), observationStop: make(chan struct{}), observationDone: make(chan struct{}), cleanupDone: make(chan struct{})}
 	r.workflowDone = make(chan struct{})
@@ -267,7 +271,7 @@ func (r *Run) Execute() Report {
 	if cause := context.Cause(r.ctx); cause != nil {
 		r.stopLocked(cause)
 	}
-	if !time.Now().Before(r.deadline) && r.rootCause() == nil {
+	if !r.deadline.IsZero() && !time.Now().Before(r.deadline) && r.rootCause() == nil {
 		f := newFailure(TimedOut, "run", "run deadline exceeded")
 		f.Origin = OriginRunDeadline
 		r.stopLocked(f)

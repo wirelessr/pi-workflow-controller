@@ -11,6 +11,7 @@ type RunPolicy struct {
 	Runtime             runtime.Policy
 	AttemptTimeout      time.Duration
 	RunTimeout          time.Duration
+	DisableRunTimeout   bool // Opt out of the Controller deadline; durations must still be positive.
 	MaxLiveSessions     int
 	MaxTotalSessions    int
 	MaxTotalAttempts    int

@@ -35,7 +35,7 @@
 - **模型：** 查證完整 provider/model ID、thinking 支援、認證與 minimal inference；configured auth 不等於 live 成功，更不等於 tool/schema 品質已驗證。模型固定於 Go RoleSpec，不繼承當前 agent 或照搬範例。
 - **Contract：** 先從下游與使用者需求設計 schema、穩定 IDs、來源／版本關係、證據引用與語意驗收；每個 Pi Step 都有輸出 Spec，最終節點也有可驗收 contract。
 - **成功／失敗：** 分開定義執行成功、業務結果、資料不足、必要角色失敗。業務 reject／發現缺陷不必然是 execution failure，缺失結果也不能偽裝成功。
-- **期限／重試／資源：** 正值 RunPolicy、Step timeout、live／total sessions／attempts，重試誰、是否可沿用 context、哪些資源需要清理／保留。
+- **期限／重試／資源：** 正值 RunPolicy、Step timeout、live／total sessions／attempts，重試誰、是否可沿用 context、哪些資源需要清理／保留。只有明確設 `DisableRunTimeout=true` 才停用 Controller 自有 run deadline，RunTimeout 等 duration 仍須正值；parent cancellation／deadline、單次期限與資源限額不變。
 - **工具／副作用：** 明確界定可讀／可寫的外部系統及授權範圍、敏感資料、不可回滾或非冪等動作；不要以重試默認安全。必要權限在啟動前確認，不設計依賴中途人工 dialog 的流程。
 - **真實驗收：** 實際輸入／環境／provider 與付費範圍。需使用者指定目標時先取得，不自行挑真 PR/ticket 或寫入目標。
 
@@ -84,8 +84,11 @@
 | `Parallel(CollectAll)` | group err==nil 不代表全部成功，逐一處理每個 BranchResult.Err；必要分支不可略過 |
 | `Retry` | 首次之外的額度，Again=true 需有效 Feedback；callback 明確把 Feedback 放入下次 Step。Provider auto retry 不是這個 budget |
 | `Decision` | 業務驗收／轉移留下理由與已 committed refs，不讓 TUI 或模型自行決定下一階段 |
-| `CloseSession` | 可在活動 workflow 中提早關閉；其餘由 run 收尾。不要用 canceled context 的 defer 呼叫取代 engine cleanup |
+| `CloseSession`／`CloseSessionReport` | 可在活動 workflow 中提早關閉，共用同一次 close 結果與獨立 cleanup budget；report 回傳 defensive copy，未完成會保留 Unconfirmed 與錯誤。不要用 canceled context 的 defer 呼叫取代 engine cleanup |
+| `SessionContextUsage` | 僅在 idle owned handle 按需取得當前 context estimate、Identity、SampledAt／Seq／ActivityEpoch；nil tokens／percent／window 表示 unknown，不是零。與 Step／Close 互斥，不增加 health polling，也不是 provider admission 保證 |
 | `AddCleanup` | 在把自有資源暴露給 Pi 前註冊；若 acquisition 部分失敗或註冊失敗，caller 仍負責 bounded cleanup。成功註冊後等待 workflow join／確認 Pi exit 才清理 |
+
+Timeout／context handoff 由 workflow 顯式編排：保留上一份 committed Ref，驗收 `CloseSessionReport` 的 identity、WaitCompleted／ProcessExited、Unconfirmed 與 cleanup errors 後，才 OpenSession fresh handle 並以 Step.Inputs 交接。新 session 不重置 run session／attempt 計數；engine 不自動 retry，不把未知 ProviderFailed 當作 overflow。本機 Wait 不證明遠端 async job 已停止，需另做 workflow-specific 安全判定。Step deadline 是取消觸發，不保證固定時刻返回；最後 durable commit 窗口沿用既有仲裁，不在已提交成功後追加相反終態。
 
 不要吞掉 StorageFailed、JournalFailed、run-level LimitExceeded 後繼續成功，也不要把不明 transport completion 自動重送。Workflow callback／工具 subprocess 必須遵守 context 並保有 ownership／Wait／cleanup，不建立 detached Go 工作或掃殺全機 process。
 

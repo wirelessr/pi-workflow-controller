@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"time"
 )
@@ -213,6 +214,58 @@ func (s *session) invalidate(err error) {
 	s.mu.Lock()
 	s.failLocked(&copy)
 	s.mu.Unlock()
+}
+
+// ContextUsage deliberately does not change health polling or execution receipts.
+func (s *session) ContextUsage(ctx context.Context) (ContextUsage, error) {
+	r, err := s.query(ctx, "get_session_stats", nil)
+	if err != nil {
+		return ContextUsage{}, err
+	}
+	var w struct {
+		SessionID   string          `json:"sessionId"`
+		SessionFile string          `json:"sessionFile"`
+		Usage       json.RawMessage `json:"contextUsage"`
+	}
+	bad := func() (ContextUsage, error) {
+		err := failure(ProtocolFailed, "get_session_stats has malformed context usage or identity")
+		s.invalidate(err)
+		return ContextUsage{}, err
+	}
+	if json.Unmarshal(r.frame.Data, &w) != nil || w.SessionID == "" || w.SessionFile == "" {
+		return bad()
+	}
+	usage := ContextUsage{}
+	if len(w.Usage) > 0 && string(w.Usage) != "null" {
+		var fields struct {
+			Tokens  json.RawMessage `json:"tokens"`
+			Window  *int64          `json:"contextWindow"`
+			Percent json.RawMessage `json:"percent"`
+		}
+		if json.Unmarshal(w.Usage, &fields) != nil || fields.Window == nil || *fields.Window <= 0 || len(fields.Tokens) == 0 || len(fields.Percent) == 0 {
+			return bad()
+		}
+		if json.Unmarshal(fields.Tokens, &usage.Tokens) != nil || json.Unmarshal(fields.Percent, &usage.Percent) != nil {
+			return bad()
+		}
+		if usage.Tokens != nil && *usage.Tokens < 0 || usage.Percent != nil && (*usage.Percent < 0 || math.IsNaN(*usage.Percent) || math.IsInf(*usage.Percent, 0)) {
+			return bad()
+		}
+		usage.ContextWindow = fields.Window
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if w.SessionID != s.id.SessionID || w.SessionFile != s.id.SessionFile {
+		err := failure(SessionChanged, "session identity changed")
+		s.failLocked(err)
+		return ContextUsage{}, err
+	}
+	if s.fatal != nil {
+		return ContextUsage{}, s.fatal
+	}
+	usage.Identity, usage.SampledAt = s.id, time.Now()
+	usage.Seq, usage.ActivityEpoch = r.seq, s.epoch
+	return usage, nil
 }
 
 type wireState struct {

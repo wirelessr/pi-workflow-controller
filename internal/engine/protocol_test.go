@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,262 @@ func TestEngineProtocolSubprocess(t *testing.T) {
 }
 
 func readProtocolJSON(path string, value any) error { return protocol.ReadJSON(path, value) }
+
+func TestEngineProtocolHandoff(t *testing.T) {
+	for _, mode := range []string{"usage", "attempt-timeout", "cleanup-error"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			bridge := filepath.Join(dir, "bridge")
+			if err := os.Mkdir(bridge, 0700); err != nil {
+				t.Fatal(err)
+			}
+			listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			deadline := time.Now().Add(20 * time.Second)
+			if err := listener.SetDeadline(deadline); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithDeadline(context.Background(), deadline)
+			defer cancel()
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy := engine.DefaultRunPolicy()
+			policy.DisableRunTimeout = true
+			policy.RunTimeout = time.Nanosecond
+			policy.AttemptTimeout = 5 * time.Second
+			policy.MaxTotalSessions = 2
+			policy.MaxTotalAttempts = 3
+			policy.Runtime.StartupTimeout = 5 * time.Second
+			policy.Runtime.RPCTimeout = time.Second
+			policy.Runtime.AbortGrace = time.Second
+			policy.Runtime.CleanupTimeout = 3 * time.Second
+			policy.Runtime.HealthInterval = time.Hour
+			var run *engine.Run
+			pi, err := runtime.New(runtime.Options{Executable: executable, Args: []string{"-test.run=^TestEngineProtocolSubprocess$", "--"}, Env: []string{"PWC_ENGINE_PROTOCOL=1", "PWC_ENGINE_CONTROL=" + listener.Addr().String(), "GORACE=atexit_sleep_ms=0"}, BridgeDir: bridge, Policy: policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return run.Observe(ctx, o) }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const uri = "https://fixture.local/handoff.json"
+			schemas, err := contract.NewRegistry([]contract.Resource{{URI: uri, JSON: json.RawMessage(`{"type":"object","required":["value","source"],"additionalProperties":false,"properties":{"value":{"type":"string"},"source":{"type":"string"}}}`)}}, []contract.SchemaDefinition{{ID: "data.v1", URI: uri}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var first, expired, resumed engine.StepResult
+			var cleaned runtime.CleanupReport
+			var timeoutErr error
+			candidate := make(chan contract.Ref, 1)
+			cleanupVerified := make(chan struct{})
+			replaced := false
+			definition := engine.Definition{Name: "handoff", Version: "v1", Policy: policy, Execute: func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
+				role := engine.RoleSpec{Name: "worker", Model: runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}}
+				h, err := r.OpenSession(ctx, role)
+				if err != nil {
+					return engine.Result{}, err
+				}
+				first, err = r.Root().Step(ctx, engine.StepSpec{Key: "committed-state", Session: h, Prompt: "saved state", Output: contract.Spec{SchemaID: "data.v1"}})
+				if err != nil {
+					return engine.Result{}, err
+				}
+				state, err := engine.Decode[protocolData](ctx, r, first.Output)
+				if err != nil || state.Value != "saved state" {
+					return engine.Result{}, fmt.Errorf("state commit: %+v %v", state, err)
+				}
+				foreign := first.Output
+				foreign.RunID = "foreign-run"
+				if _, err := engine.Decode[protocolData](ctx, r, foreign); err == nil {
+					return engine.Result{}, errors.New("foreign checkpoint accepted")
+				}
+				if mode == "attempt-timeout" {
+					expired, timeoutErr = r.Root().Step(ctx, engine.StepSpec{Key: "interrupted", Session: h, Prompt: "unfinished state", Inputs: []contract.Ref{first.Output}, Timeout: 500 * time.Millisecond, Output: contract.Spec{SchemaID: "data.v1"}})
+					var failure *engine.Failure
+					if !errors.As(timeoutErr, &failure) || failure.Code != engine.TimedOut || failure.Origin != engine.OriginAttemptDeadline || expired.Output != (contract.Ref{}) {
+						return engine.Result{}, fmt.Errorf("timeout classification: %+v %v", expired, timeoutErr)
+					}
+					var ref contract.Ref
+					select {
+					case ref = <-candidate:
+					case <-ctx.Done():
+						return engine.Result{}, context.Cause(ctx)
+					}
+					raw, err := os.ReadFile(ref.Path)
+					if err != nil {
+						return engine.Result{}, err
+					}
+					ref.SHA256 = fmt.Sprintf("%x", sha256.Sum256(raw))
+					ref.ManifestSHA256 = first.Output.ManifestSHA256
+					if _, err := engine.Decode[protocolData](ctx, r, ref); err == nil {
+						return engine.Result{}, errors.New("uncommitted candidate accepted")
+					}
+				} else {
+					usage, err := r.SessionContextUsage(ctx, h)
+					if err != nil || usage.Identity.SessionID != first.Execution.SessionID || usage.Percent == nil || *usage.Percent != 95 || usage.Tokens == nil || *usage.Tokens != 95000 {
+						return engine.Result{}, fmt.Errorf("usage: %+v %v", usage, err)
+					}
+				}
+				cleaned, err = r.CloseSessionReport(ctx, h)
+				// The fixture workflow owns the recovery policy, not the engine.
+				if err != nil {
+					return engine.Result{}, err
+				}
+				if cleaned.Identity.SessionID != first.Execution.SessionID || !cleaned.WaitCompleted || !cleaned.ProcessExited || cleaned.WaitError != "" || cleaned.KillError != "" || cleaned.DiscoveryError != "" || len(cleaned.Unconfirmed) != 0 {
+					return engine.Result{}, errors.New("cleanup evidence blocks replacement")
+				}
+				copy, err := r.CloseSessionReport(ctx, h)
+				if err != nil || !reflect.DeepEqual(copy, cleaned) {
+					return engine.Result{}, errors.New("cleanup outcome not stable")
+				}
+				copy.DiscoveryRemoved[0] = "caller mutation"
+				again, err := r.CloseSessionReport(ctx, h)
+				if err != nil || !reflect.DeepEqual(again, cleaned) {
+					return engine.Result{}, errors.New("cleanup report alias")
+				}
+				if _, err := r.SessionContextUsage(ctx, h); err == nil {
+					return engine.Result{}, errors.New("closed handle reusable")
+				}
+				close(cleanupVerified)
+				fresh, err := r.OpenSession(ctx, role)
+				if err != nil {
+					return engine.Result{}, err
+				}
+				replaced = true
+				resumed, err = r.Root().Step(ctx, engine.StepSpec{Key: "resumed", Session: fresh, Prompt: "continue from committed state", Inputs: []contract.Ref{first.Output}, Output: contract.Spec{SchemaID: "data.v1"}})
+				if err != nil {
+					return engine.Result{}, err
+				}
+				state, err = engine.Decode[protocolData](ctx, r, resumed.Output)
+				if err != nil || state != (protocolData{Value: "saved state/second", Source: first.AttemptID}) {
+					return engine.Result{}, fmt.Errorf("recovered state: %+v %v", state, err)
+				}
+				return engine.Result{Outputs: map[string]contract.Ref{"final": resumed.Output}}, nil
+			}}
+			run, err = engine.New(ctx, definition, engine.Input{Prompt: "handoff", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: schemas, Runtime: pi})
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			var report engine.Report
+			go func() { report = run.Execute(); close(done) }()
+			var connections []net.Conn
+			t.Cleanup(func() {
+				run.Cancel(engine.OriginControllerUser)
+				for _, conn := range connections {
+					_ = conn.Close()
+				}
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("handoff fixture did not join")
+				}
+			})
+			var hellos []protocolControl
+			var requests []contract.Request
+			sessions := 2
+			if mode == "cleanup-error" {
+				sessions = 1
+			}
+			for session := 0; session < sessions; session++ {
+				conn, err := listener.Accept()
+				if err != nil {
+					t.Fatal(err)
+				}
+				connections = append(connections, conn)
+				if err := conn.SetDeadline(deadline); err != nil {
+					t.Fatal(err)
+				}
+				decoder, encoder := json.NewDecoder(conn), json.NewEncoder(conn)
+				next := func(kind string) protocolControl {
+					t.Helper()
+					var c protocolControl
+					if err := decoder.Decode(&c); err != nil || c.Type != kind {
+						t.Fatalf("control want=%s got=%+v err=%v", kind, c, err)
+					}
+					return c
+				}
+				hello := next("hello")
+				hellos = append(hellos, hello)
+				if session == 1 {
+					select {
+					case <-cleanupVerified:
+					case <-ctx.Done():
+						t.Fatal("replacement without cleanup gate")
+					}
+					if !cleaned.WaitCompleted || !cleaned.ProcessExited || len(cleaned.Unconfirmed) != 0 {
+						t.Fatal("replacement started before verified Wait")
+					}
+					if hello.SessionID == hellos[0].SessionID || hello.History == hellos[0].History {
+						t.Fatal("replacement reused session identity or history")
+					}
+				}
+				prompts := 1
+				if session == 0 && mode == "attempt-timeout" {
+					prompts = 2
+				}
+				for i := 0; i < prompts; i++ {
+					message := next("prompt")
+					var request contract.Request
+					if err := readProtocolJSON(message.RequestPath, &request); err != nil {
+						t.Fatal(err)
+					}
+					requests = append(requests, request)
+					ack := "settle"
+					if mode == "cleanup-error" {
+						path := filepath.Join(bridge, hello.SessionID+".json")
+						if err := os.Rename(path, path+".recovering"); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if prompts == 2 && i == 1 {
+						ack = "hold"
+						candidate <- contract.Ref{RunID: request.Identity.RunID, AttemptID: request.Identity.AttemptID, Path: message.CandidatePath, SchemaID: "data.v1"}
+					}
+					if err := encoder.Encode(protocolControl{Type: ack}); err != nil {
+						t.Fatal(err)
+					}
+					if ack == "hold" {
+						next("held")
+					}
+				}
+			}
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal("handoff exceeded fixture deadline")
+			}
+			if mode == "cleanup-error" {
+				if replaced || report.ExitCode == 0 || cleaned.DiscoveryError == "" || !cleaned.WaitCompleted || len(report.Snapshot.Sessions) != 1 {
+					t.Fatalf("cleanup error allowed replacement: %+v cleaned=%+v", report, cleaned)
+				}
+				return
+			}
+			wantAttempts := 2
+			if mode == "attempt-timeout" {
+				wantAttempts = 3
+			}
+			if !replaced || report.ExitCode != 0 || report.Outcome != engine.Succeeded || len(report.Snapshot.Sessions) != 2 || len(report.Snapshot.Attempts) != wantAttempts {
+				t.Fatalf("handoff outcome/accounting: %+v", report)
+			}
+			if first.Output.RunID != resumed.Output.RunID || first.AttemptID == resumed.AttemptID || first.Execution.SessionID == resumed.Execution.SessionID || resumed.Execution.PromptEntryID != "e1" || !reflect.DeepEqual(requests[len(requests)-1].Inputs, []contract.Ref{first.Output}) {
+				t.Fatalf("handoff provenance first=%+v resumed=%+v requests=%+v", first, resumed, requests)
+			}
+			if mode == "attempt-timeout" {
+				attempt := report.Snapshot.Attempts[expired.AttemptID]
+				if attempt.State != engine.TimedOutState || attempt.Output != nil || attempt.Failure == nil || attempt.Failure.Origin != engine.OriginAttemptDeadline {
+					t.Fatalf("failed attempt history lost: %+v", attempt)
+				}
+			}
+			for _, cleanup := range report.Cleanup {
+				if !cleanup.WaitCompleted || !cleanup.ProcessExited || len(cleanup.Unconfirmed) != 0 {
+					t.Fatalf("cleanup incomplete: %+v", cleanup)
+				}
+			}
+		})
+	}
+}
 
 func TestEngineProtocolWorkflow(t *testing.T) {
 	for _, name := range []string{"sequential", "controller-cancel", "run-attempt-limit"} {

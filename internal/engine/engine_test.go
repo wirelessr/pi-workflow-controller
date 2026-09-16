@@ -52,6 +52,7 @@ type engTestRuntime struct {
 	execute  func(context.Context, engTestCall) engTestReply
 	confirm  func(context.Context, engTestCall, runtime.Execution) (runtime.Confirmation, error)
 	snapshot func(context.Context, runtime.SessionSpec) (runtime.SessionState, error)
+	usage    func(context.Context, runtime.Identity) (runtime.ContextUsage, error)
 	startErr error
 }
 
@@ -83,6 +84,13 @@ func (f *engTestRuntime) Start(ctx context.Context, spec runtime.SessionSpec) (r
 }
 
 func (s *engTestSession) Identity() runtime.Identity { return s.id }
+
+func (s *engTestSession) ContextUsage(ctx context.Context) (runtime.ContextUsage, error) {
+	if s.owner.usage != nil {
+		return s.owner.usage(ctx, s.id)
+	}
+	return runtime.ContextUsage{Identity: s.id, SampledAt: time.Now()}, context.Cause(ctx)
+}
 
 func (s *engTestSession) Snapshot(ctx context.Context) (runtime.SessionState, error) {
 	if s.owner.snapshot != nil {
@@ -250,6 +258,105 @@ func engTestNew(t *testing.T, base string, fake *engTestRuntime, workflow Workfl
 		t.Fatal(err)
 	}
 	return r, ctx
+}
+
+func TestEngineContextUsageLease(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			fake := &engTestRuntime{usage: func(ctx context.Context, id runtime.Identity) (runtime.ContextUsage, error) {
+				close(entered)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return runtime.ContextUsage{}, context.Cause(ctx)
+				}
+				if fail {
+					return runtime.ContextUsage{}, &runtime.Failure{Code: runtime.RPCUnresponsive, Origin: runtime.Protocol, Message: "stats unavailable"}
+				}
+				return runtime.ContextUsage{Identity: id, Seq: 42}, nil
+			}}
+			var handle *SessionHandle
+			r, _ := engTestNew(t, "", fake, func(ctx context.Context, run *Run, _ Input) (Result, error) {
+				h, err := run.OpenSession(ctx, engTestRole("worker"))
+				if err != nil {
+					return Result{}, err
+				}
+				handle = h
+				for _, invalid := range []*SessionHandle{nil, {run: &Run{}}} {
+					if _, err := run.SessionContextUsage(ctx, invalid); !engTestCode(err, InvalidDefinition) {
+						t.Errorf("invalid usage handle: %v", err)
+					}
+					if _, err := run.CloseSessionReport(ctx, invalid); !engTestCode(err, InvalidDefinition) {
+						t.Errorf("invalid close handle: %v", err)
+					}
+				}
+				done := make(chan error, 1)
+				go func() {
+					usage, err := run.SessionContextUsage(ctx, h)
+					if !fail && (usage.Identity != h.session.Identity() || usage.Seq != 42) {
+						err = fmt.Errorf("usage identity lost: %+v", usage)
+					}
+					done <- err
+				}()
+				engDeadlineReceive(t, entered)
+				// Snapshot and rejected lease requests must not wait on the RPC.
+				if len(run.Snapshot().Attempts) != 0 {
+					t.Error("usage consumed an attempt")
+				}
+				if _, err := run.SessionContextUsage(ctx, h); !engTestCode(err, SessionBusy) {
+					t.Errorf("duplicate usage: %v", err)
+				}
+				if _, err := engTestStep(ctx, run.Root(), h, "busy"); !engTestCode(err, SessionBusy) {
+					t.Errorf("Step during usage: %v", err)
+				}
+				if _, err := run.CloseSessionReport(ctx, h); !engTestCode(err, SessionBusy) {
+					t.Errorf("close during usage: %v", err)
+				}
+				close(release)
+				err = engDeadlineReceive(t, done)
+				if fail {
+					if !engTestCode(err, RPCUnresponsive) {
+						t.Errorf("usage failure: %v", err)
+					}
+					if _, err := run.SessionContextUsage(ctx, h); !engTestCode(err, InvalidDefinition) {
+						t.Errorf("failed handle reused: %v", err)
+					}
+					return Result{}, err
+				}
+				if err != nil {
+					return Result{}, err
+				}
+				step, err := engTestStep(ctx, run.Root(), h, "state")
+				if err != nil {
+					return Result{}, err
+				}
+				if _, err := run.CloseSessionReport(ctx, h); err != nil {
+					return Result{}, err
+				}
+				if _, err := run.SessionContextUsage(ctx, h); !engTestCode(err, InvalidDefinition) {
+					t.Errorf("closed handle reused: %v", err)
+				}
+				return engTestResult(step), nil
+			})
+			report := engDeadlineReceive(t, engTestExecuteAsync(t, r))
+			if fail {
+				engTestReport(t, report, Failed, 1)
+			} else {
+				engTestReport(t, report, Succeeded, 0)
+			}
+			if _, err := r.SessionContextUsage(context.Background(), handle); !engTestCode(err, InvalidDefinition) {
+				t.Errorf("usage after Execute: %v", err)
+			}
+			if _, err := r.CloseSessionReport(context.Background(), handle); !engTestCode(err, InvalidDefinition) {
+				t.Errorf("close after Execute: %v", err)
+			}
+			_, closes, _ := fake.allSessions()[0].history()
+			if closes != 1 {
+				t.Errorf("close count=%d", closes)
+			}
+		})
+	}
 }
 
 func engTestRole(name string) RoleSpec {
@@ -1132,6 +1239,12 @@ func TestEngineSessionBusyDoesNotDisturbLease(t *testing.T) {
 						}
 						if err := run.CloseSession(ctx, h); !engTestCode(err, SessionBusy) {
 							return Result{}, fmt.Errorf("busy close disturbed holder: %v", err)
+						}
+						if _, err := run.CloseSessionReport(ctx, h); !engTestCode(err, SessionBusy) {
+							return Result{}, fmt.Errorf("busy close report disturbed holder: %v", err)
+						}
+						if _, err := run.SessionContextUsage(ctx, h); !engTestCode(err, SessionBusy) {
+							return Result{}, fmt.Errorf("busy usage query disturbed holder: %v", err)
 						}
 						if len(run.Snapshot().Attempts) != 1 {
 							return Result{}, fmt.Errorf("busy refusal consumed attempt")
@@ -2107,6 +2220,8 @@ func TestEngineWorkflowAPIsRejectAfterExecute(t *testing.T) {
 					return err
 				}},
 				{"CloseSession", func() error { return r.CloseSession(ctx, h) }},
+				{"CloseSessionReport", func() error { _, err := r.CloseSessionReport(ctx, h); return err }},
+				{"SessionContextUsage", func() error { _, err := r.SessionContextUsage(ctx, h); return err }},
 			} {
 				t.Run(api.name, func(t *testing.T) {
 					err := api.call()

@@ -225,6 +225,9 @@ func (s *viewSession) Identity() runtime.Identity {
 func (s *viewSession) Snapshot(context.Context) (runtime.SessionState, error) {
 	return runtime.SessionState{Identity: s.Identity(), Health: "Online", Model: s.spec.Model}, nil
 }
+func (s *viewSession) ContextUsage(context.Context) (runtime.ContextUsage, error) {
+	return runtime.ContextUsage{}, errors.New("unexpected usage query in cancellation-only fixture")
+}
 func (s *viewSession) Execute(context.Context, runtime.Dispatch) (runtime.Execution, error) {
 	return runtime.Execution{}, errors.New("unexpected dispatch in cancellation-only fixture")
 }

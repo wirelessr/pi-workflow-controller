@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -81,107 +82,353 @@ func engDeadlineFailure(t *testing.T, err error, code Code, origin Origin) {
 }
 
 func TestEngineAttemptDeadlineCoversPreparingThroughConfirm(t *testing.T) {
-	for _, phase := range []string{"preparing", "input-read", "execute-wait", "confirm"} {
-		for _, override := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/step-timeout=%t", phase, override), func(t *testing.T) {
-				const timeout = 300 * time.Millisecond
-				policy := DefaultRunPolicy()
-				policy.AttemptTimeout = timeout
-				stepTimeout := time.Duration(0)
-				if override {
-					policy.AttemptTimeout = 5 * time.Second
-					stepTimeout = timeout
-				}
-				fake := &engTestRuntime{}
-				var observed error
-				var result StepResult
-				var timerCause error
-				barrierHit := false
-				wait := func(ctx context.Context) error {
-					barrierHit = true
-					<-ctx.Done()
-					timerCause = context.Cause(ctx)
-					return timerCause
-				}
-				if phase == "execute-wait" {
-					fake.execute = func(ctx context.Context, _ engTestCall) engTestReply {
-						return engTestReply{Err: wait(ctx)}
+	for _, disabled := range []bool{false, true} {
+		for _, phase := range []string{"preparing", "input-read", "execute-wait", "confirm"} {
+			for _, override := range []bool{false, true} {
+				t.Run(fmt.Sprintf("disabled=%t/%s/step-timeout=%t", disabled, phase, override), func(t *testing.T) {
+					const timeout = 300 * time.Millisecond
+					policy := DefaultRunPolicy()
+					policy.DisableRunTimeout = disabled
+					policy.AttemptTimeout = timeout
+					stepTimeout := time.Duration(0)
+					if override {
+						policy.AttemptTimeout = 5 * time.Second
+						stepTimeout = timeout
 					}
-				}
-				if phase == "confirm" {
-					fake.confirm = func(ctx context.Context, _ engTestCall, _ runtime.Execution) (runtime.Confirmation, error) {
-						return runtime.Confirmation{}, wait(ctx)
+					fake := &engTestRuntime{}
+					var observed error
+					var result StepResult
+					var timerCause error
+					barrierHit := false
+					wait := func(ctx context.Context) error {
+						barrierHit = true
+						<-ctx.Done()
+						timerCause = context.Cause(ctx)
+						return timerCause
 					}
-				}
-				r := engDeadlineNew(t, context.Background(), policy, fake, func(ctx context.Context, run *Run, _ Input) (Result, error) {
-					h, err := run.OpenSession(ctx, engTestRole("worker"))
-					if err != nil {
-						return Result{}, err
+					if phase == "execute-wait" {
+						fake.execute = func(ctx context.Context, _ engTestCall) engTestReply {
+							return engTestReply{Err: wait(ctx)}
+						}
 					}
-					var inputs []contract.Ref
-					if phase == "input-read" {
-						producer, err := run.Root().Step(ctx, StepSpec{Key: "producer", Session: h, Prompt: "producer", Timeout: 5 * time.Second, Output: contract.Spec{SchemaID: engTestSchema}})
+					if phase == "confirm" {
+						fake.confirm = func(ctx context.Context, _ engTestCall, _ runtime.Execution) (runtime.Confirmation, error) {
+							return runtime.Confirmation{}, wait(ctx)
+						}
+					}
+					r := engDeadlineNew(t, context.Background(), policy, fake, func(ctx context.Context, run *Run, _ Input) (Result, error) {
+						h, err := run.OpenSession(ctx, engTestRole("worker"))
 						if err != nil {
 							return Result{}, err
 						}
-						if _, err := Decode[engTestData](ctx, run, producer.Output); err != nil {
-							return Result{}, err
+						var inputs []contract.Ref
+						if phase == "input-read" {
+							producer, err := run.Root().Step(ctx, StepSpec{Key: "producer", Session: h, Prompt: "producer", Timeout: 5 * time.Second, Output: contract.Spec{SchemaID: engTestSchema}})
+							if err != nil {
+								return Result{}, err
+							}
+							if _, err := Decode[engTestData](ctx, run, producer.Output); err != nil {
+								return Result{}, err
+							}
+							inputs = []contract.Ref{producer.Output}
 						}
-						inputs = []contract.Ref{producer.Output}
+						result, observed = run.Root().Step(ctx, StepSpec{Key: "expires", Session: h, Prompt: "expires", Inputs: inputs, Timeout: stepTimeout, Output: contract.Spec{SchemaID: engTestSchema}})
+						return Result{}, observed
+					})
+					r.beforeIO = func(path, ioPhase string) {
+						if (phase != "preparing" || path != "run.json" || ioPhase != "AttemptStarted") &&
+							(phase != "input-read" || ioPhase != "step") {
+							return
+						}
+						for _, attempt := range r.state.Attempts {
+							if attempt.Key != "expires" || attempt.State != Preparing {
+								continue
+							}
+							// The hook holds r.mu. Wait on a real timer for the recorded
+							// Preparing deadline, not a sleep or a new timeout budget.
+							clock, cancel := context.WithDeadline(context.Background(), attempt.StartedAt.Add(timeout))
+							defer cancel()
+							_ = wait(clock)
+						}
 					}
-					result, observed = run.Root().Step(ctx, StepSpec{Key: "expires", Session: h, Prompt: "expires", Inputs: inputs, Timeout: stepTimeout, Output: contract.Spec{SchemaID: engTestSchema}})
-					return Result{}, observed
+					report := engDeadlineReceive(t, engTestExecuteAsync(t, r))
+					engTestReport(t, report, TimedOutState, 1)
+					engTestPersisted(t, r, report)
+					engDeadlineFailure(t, observed, TimedOut, OriginAttemptDeadline)
+					engDeadlineFailure(t, report.Failure, TimedOut, OriginAttemptDeadline)
+					if !barrierHit || result.AttemptID == "" || result.Output != (contract.Ref{}) {
+						t.Fatalf("barrier=%t, expired result=%+v", barrierHit, result)
+					}
+					if phase == "execute-wait" || phase == "confirm" {
+						if !errors.Is(observed, timerCause) || !errors.Is(report.Failure, timerCause) {
+							t.Error("attempt timer cause was not retained")
+						}
+					}
+					attempt := report.Snapshot.Attempts[result.AttemptID]
+					if attempt.State != TimedOutState || attempt.Number != 1 || attempt.Output != nil {
+						t.Errorf("expired attempt = %+v", attempt)
+					}
+					calls, closes, confirms := fake.allSessions()[0].history()
+					wantCalls, wantConfirms := 1, 0
+					if phase == "preparing" {
+						wantCalls = 0
+					}
+					if phase == "input-read" || phase == "confirm" {
+						wantConfirms = 1
+					}
+					if len(calls) != wantCalls || confirms != wantConfirms || closes != 1 {
+						t.Errorf("Execute/Confirm/Close = %d/%d/%d, want %d/%d/1", len(calls), confirms, closes, wantCalls, wantConfirms)
+					}
+					if (phase == "preparing" || phase == "input-read") && attempt.DispatchAccepted != AcceptedNo {
+						t.Errorf("pre-dispatch timeout accepted = %s", attempt.DispatchAccepted)
+					}
 				})
-				r.beforeIO = func(path, ioPhase string) {
-					if (phase != "preparing" || path != "run.json" || ioPhase != "AttemptStarted") &&
-						(phase != "input-read" || ioPhase != "step") {
-						return
-					}
-					for _, attempt := range r.state.Attempts {
-						if attempt.Key != "expires" || attempt.State != Preparing {
-							continue
-						}
-						// The hook holds r.mu. Wait on a real timer for the recorded
-						// Preparing deadline, not a sleep or a new timeout budget.
-						clock, cancel := context.WithDeadline(context.Background(), attempt.StartedAt.Add(timeout))
-						defer cancel()
-						_ = wait(clock)
-					}
-				}
-				report := engDeadlineReceive(t, engTestExecuteAsync(t, r))
-				engTestReport(t, report, TimedOutState, 1)
-				engTestPersisted(t, r, report)
-				engDeadlineFailure(t, observed, TimedOut, OriginAttemptDeadline)
-				engDeadlineFailure(t, report.Failure, TimedOut, OriginAttemptDeadline)
-				if !barrierHit || result.AttemptID == "" || result.Output != (contract.Ref{}) {
-					t.Fatalf("barrier=%t, expired result=%+v", barrierHit, result)
-				}
-				if phase == "execute-wait" || phase == "confirm" {
-					if !errors.Is(observed, timerCause) || !errors.Is(report.Failure, timerCause) {
-						t.Error("attempt timer cause was not retained")
-					}
-				}
-				attempt := report.Snapshot.Attempts[result.AttemptID]
-				if attempt.State != TimedOutState || attempt.Number != 1 || attempt.Output != nil {
-					t.Errorf("expired attempt = %+v", attempt)
-				}
-				calls, closes, confirms := fake.allSessions()[0].history()
-				wantCalls, wantConfirms := 1, 0
-				if phase == "preparing" {
-					wantCalls = 0
-				}
-				if phase == "input-read" || phase == "confirm" {
-					wantConfirms = 1
-				}
-				if len(calls) != wantCalls || confirms != wantConfirms || closes != 1 {
-					t.Errorf("Execute/Confirm/Close = %d/%d/%d, want %d/%d/1", len(calls), confirms, closes, wantCalls, wantConfirms)
-				}
-				if (phase == "preparing" || phase == "input-read") && attempt.DispatchAccepted != AcceptedNo {
-					t.Errorf("pre-dispatch timeout accepted = %s", attempt.DispatchAccepted)
-				}
-			})
+			}
 		}
 	}
+}
+
+// Characterize the existing commit/deadline arbitration, without adding a
+// contradictory terminal event after durable AttemptSucceeded.
+func TestEngineAttemptDeadlineDuringFinalCommit(t *testing.T) {
+	for _, phase := range []string{"AttemptSucceeded", "attempt_terminal"} {
+		t.Run(phase, func(t *testing.T) {
+			policy := DefaultRunPolicy()
+			policy.DisableRunTimeout = true
+			policy.AttemptTimeout = 300 * time.Millisecond
+			fake := &engTestRuntime{}
+			var result StepResult
+			r := engDeadlineNew(t, context.Background(), policy, fake, func(ctx context.Context, run *Run, _ Input) (Result, error) {
+				h, err := run.OpenSession(ctx, engTestRole("worker"))
+				if err != nil {
+					return Result{}, err
+				}
+				result, err = engTestStep(ctx, run.Root(), h, "commit")
+				if err != nil {
+					return Result{}, err
+				}
+				if _, err := Decode[engTestData](ctx, run, result.Output); err != nil {
+					return Result{}, err
+				}
+				return engTestResult(result), nil
+			})
+			hit := false
+			r.beforeIO = func(path, ioPhase string) {
+				if hit || ioPhase != phase || (phase == "AttemptSucceeded" && path != "events.jsonl") {
+					return
+				}
+				hit = true
+				for _, attempt := range r.state.Attempts {
+					clock, cancel := context.WithDeadline(context.Background(), attempt.StartedAt.Add(policy.AttemptTimeout))
+					<-clock.Done()
+					cancel()
+				}
+			}
+			report := engDeadlineReceive(t, engTestExecuteAsync(t, r))
+			engTestReport(t, report, Succeeded, 0)
+			engTestPersisted(t, r, report)
+			if !hit || result.Output == (contract.Ref{}) {
+				t.Fatalf("final commit barrier=%t result=%+v", hit, result)
+			}
+			terminal := 0
+			for _, event := range engTestEvents(t, r) {
+				if event.Kind == "AttemptSucceeded" {
+					terminal++
+				}
+				if event.Kind == "AttemptTimedOut" {
+					t.Fatal("committed success acquired contradictory timeout")
+				}
+			}
+			if terminal != 1 {
+				t.Fatalf("terminal commits=%d", terminal)
+			}
+		})
+	}
+}
+
+func TestEngineDisabledRunDeadlineKeepsParentAndFatalStops(t *testing.T) {
+	for _, mode := range []string{"none", "parent-cancel", "parent-deadline", "signal", "limit"} {
+		t.Run(mode, func(t *testing.T) {
+			parent, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if mode == "parent-deadline" {
+				var expire context.CancelFunc
+				parent, expire = context.WithTimeout(parent, 300*time.Millisecond)
+				defer expire()
+			}
+			policy := DefaultRunPolicy()
+			policy.DisableRunTimeout = true
+			policy.RunTimeout = time.Nanosecond
+			if mode == "limit" {
+				policy.MaxTotalSessions = 1
+			}
+			fake := &engTestRuntime{}
+			base := t.TempDir()
+			r, err := New(parent, Definition{Name: "disabled", Version: "v1", Policy: policy, Execute: func(ctx context.Context, run *Run, _ Input) (Result, error) {
+				_, hasDeadline := ctx.Deadline()
+				if hasDeadline != (mode == "parent-deadline") {
+					return Result{}, fmt.Errorf("unexpected deadline: %t", hasDeadline)
+				}
+				h, err := run.OpenSession(ctx, engTestRole("worker"))
+				if err != nil {
+					return Result{}, err
+				}
+				switch mode {
+				case "parent-cancel":
+					cancel()
+				case "parent-deadline":
+					<-ctx.Done()
+				case "signal":
+					run.Cancel(OriginSignalTERM)
+				case "limit":
+					_, _ = run.OpenSession(ctx, engTestRole("over-limit"))
+				}
+				if mode != "none" {
+					return Result{}, nil
+				} // A swallowed stop must still win.
+				step, err := engTestStep(ctx, run.Root(), h, "state")
+				return engTestResult(step), err
+			}}, Input{Prompt: "deadline", LaunchCWD: base}, Options{BaseDir: base, Schemas: engTestSchemas(t), Runtime: fake})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !r.deadline.IsZero() {
+				t.Fatal("disabled policy created a Controller deadline")
+			}
+			report := engDeadlineReceive(t, engTestExecuteAsync(t, r))
+			switch mode {
+			case "none":
+				engTestReport(t, report, Succeeded, 0)
+			case "parent-cancel":
+				engDeadlineFailure(t, report.Failure, Cancelled, OriginControllerUser)
+			case "parent-deadline":
+				engDeadlineFailure(t, report.Failure, TimedOut, OriginRunDeadline)
+			case "signal":
+				engDeadlineFailure(t, report.Failure, Cancelled, OriginSignalTERM)
+			case "limit":
+				engDeadlineFailure(t, report.Failure, LimitExceeded, OriginDefinition)
+			}
+			engTestPersisted(t, r, report)
+			engPersistClosed(t, fake, report, 1)
+		})
+	}
+}
+
+func TestEngineCleanupReportRecoveryGate(t *testing.T) {
+	for _, mode := range []string{"clean", "unconfirmed", "discovery-error", "wait-unconfirmed", "wait-error"} {
+		t.Run(mode, func(t *testing.T) {
+			fake := &engDeadlineRuntime{engTestRuntime: &engTestRuntime{}}
+			fake.close = func(ctx context.Context, s runtime.Session) (runtime.CleanupReport, error) {
+				report, err := s.Close(ctx)
+				report.DiscoveryRemoved = []string{"owned-discovery"}
+				switch mode {
+				case "unconfirmed":
+					report.Unconfirmed = []string{"fixture unconfirmed"}
+				case "discovery-error":
+					report.DiscoveryError = "fixture discovery error"
+				case "wait-unconfirmed":
+					report.WaitCompleted = false
+				case "wait-error":
+					report.WaitError = "fixture wait error"
+				}
+				return report, err
+			}
+			policy := DefaultRunPolicy()
+			policy.DisableRunTimeout = true
+			var cleaned runtime.CleanupReport
+			var closeErr error
+			replacement := false
+			r := engDeadlineNew(t, context.Background(), policy, fake, func(ctx context.Context, run *Run, _ Input) (Result, error) {
+				h, err := run.OpenSession(ctx, engTestRole("worker"))
+				if err != nil {
+					return Result{}, err
+				}
+				step, err := engTestStep(ctx, run.Root(), h, "state")
+				if err != nil {
+					return Result{}, err
+				}
+				cleaned, closeErr = run.CloseSessionReport(ctx, h)
+				copy, secondErr := run.CloseSessionReport(ctx, h)
+				if !reflect.DeepEqual(copy, cleaned) || !errors.Is(secondErr, closeErr) {
+					t.Errorf("close outcome changed: %+v %v", copy, secondErr)
+				}
+				copy.DiscoveryRemoved[0] = "mutated"
+				if len(copy.Unconfirmed) > 0 {
+					copy.Unconfirmed[0] = "mutated"
+				}
+				again, err := run.CloseSessionReport(ctx, h)
+				if !reflect.DeepEqual(again, cleaned) || !errors.Is(err, closeErr) {
+					t.Error("caller mutated retained cleanup report")
+				}
+				if err := run.CloseSession(ctx, h); !errors.Is(err, closeErr) {
+					t.Errorf("legacy error changed: %v", err)
+				}
+				// This stricter gate is workflow policy, not engine automatic retry.
+				if closeErr != nil || cleaned.Identity != h.session.Identity() || !cleaned.ProcessExited || !cleaned.WaitCompleted || cleaned.WaitError != "" || cleaned.KillError != "" || cleaned.DiscoveryError != "" || len(cleaned.Unconfirmed) != 0 {
+					return Result{}, errors.New("replacement blocked by cleanup evidence")
+				}
+				replacement = true
+				_, err = run.OpenSession(ctx, engTestRole("replacement"))
+				return engTestResult(step), err
+			})
+			report := engDeadlineReceive(t, engTestExecuteAsync(t, r))
+			wantSessions := 1
+			if mode == "clean" {
+				wantSessions = 2
+			}
+			if replacement != (mode == "clean") || len(report.Snapshot.Sessions) != wantSessions {
+				t.Fatalf("unsafe replacement=%t sessions=%d", replacement, len(report.Snapshot.Sessions))
+			}
+			wantCloseError := mode == "unconfirmed" || mode == "discovery-error"
+			if (closeErr != nil) != wantCloseError {
+				t.Errorf("legacy CloseSession error semantics changed: %v", closeErr)
+			}
+			for _, s := range fake.allSessions() {
+				_, closes, _ := s.history()
+				if closes != 1 {
+					t.Errorf("Close repeated: %d", closes)
+				}
+			}
+		})
+	}
+}
+
+func TestEngineCleanupReportPendingIsNotClean(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	fake := &engDeadlineRuntime{engTestRuntime: &engTestRuntime{}}
+	fake.close = func(ctx context.Context, s runtime.Session) (runtime.CleanupReport, error) {
+		close(entered)
+		// A boundary that returns late must not expose a provisional clean report.
+		<-release
+		return s.Close(ctx)
+	}
+	policy := DefaultRunPolicy()
+	policy.Runtime.CleanupTimeout = 50 * time.Millisecond
+	r := engDeadlineNew(t, context.Background(), policy, fake, func(ctx context.Context, run *Run, _ Input) (Result, error) {
+		h, err := run.OpenSession(ctx, engTestRole("worker"))
+		if err != nil {
+			return Result{}, err
+		}
+		step, err := engTestStep(ctx, run.Root(), h, "state")
+		if err != nil {
+			return Result{}, err
+		}
+		pending, err := run.CloseSessionReport(ctx, h)
+		engDeadlineReceive(t, entered)
+		if err == nil || pending.ProcessExited || pending.WaitCompleted || len(pending.Unconfirmed) == 0 || pending.Identity.HandleID != h.id {
+			t.Errorf("pending close reported clean: %+v %v", pending, err)
+		}
+		releaseOnce.Do(func() { close(release) })
+		engDeadlineReceive(t, h.closeDone)
+		complete, err := run.CloseSessionReport(ctx, h)
+		if err != nil || !complete.WaitCompleted || !complete.ProcessExited {
+			t.Errorf("completed report unavailable: %+v %v", complete, err)
+		}
+		return engTestResult(step), nil
+	})
+	engTestReport(t, engDeadlineReceive(t, engTestExecuteAsync(t, r)), Succeeded, 0)
 }
 
 func TestEngineRunDeadlineIncludesOpenSession(t *testing.T) {

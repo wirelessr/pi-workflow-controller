@@ -126,6 +126,7 @@ type Runtime interface {
 type Session interface {
     Identity() Identity
     Snapshot(context.Context) (SessionState, error)
+    ContextUsage(context.Context) (ContextUsage, error)
     Execute(context.Context, Dispatch) (Execution, error)
     Confirm(context.Context, Execution) (Confirmation, error)
     Close(context.Context) (CleanupReport, error)
@@ -238,6 +239,8 @@ type RetryAction struct {
 ```go
 func (r *Run) OpenSession(ctx context.Context, role RoleSpec) (*SessionHandle, error)
 func (r *Run) CloseSession(ctx context.Context, h *SessionHandle) error
+func (r *Run) CloseSessionReport(ctx context.Context, h *SessionHandle) (runtime.CleanupReport, error)
+func (r *Run) SessionContextUsage(ctx context.Context, h *SessionHandle) (runtime.ContextUsage, error)
 func (r *Run) Root() *Scope
 func (r *Run) AddCleanup(ctx context.Context, name string,
     close func(context.Context) error) error
@@ -516,7 +519,7 @@ Run 終態仲裁：第一個已登記的 root stop cause（取消、deadline、r
 
 ### 7.3 工程預設
 
-全部寫在程式碼的 Policy，workflow 可在編譯時指定其他正值，不增加 CLI flags。StepSpec.Timeout=0 表示使用 Policy.AttemptTimeout，負值為 InvalidDefinition；effective deadline 取 step 與 run deadline 較早者。Role 的 provider/model/thinking 必須明確指定，不接受空值繼承。
+全部寫在程式碼的 Policy，workflow 可在編譯時指定其他正值，不增加 CLI flags。`RunPolicy.DisableRunTimeout=true` 明確停用 Controller 自有 run deadline；所有 duration（包括此時未使用的 RunTimeout）仍須正值，預設不變。Parent context 的 deadline／取消、attempt／startup／RPC／cleanup 期限及資源 hard caps 仍生效，不代表無限執行。StepSpec.Timeout=0 表示使用 Policy.AttemptTimeout，負值為 InvalidDefinition；effective deadline 取 step 與仍啟用的 run／parent deadline 較早者。Role 的 provider/model/thinking 必須明確指定，不接受空值繼承。
 
 | 項目 | 預設值 | 起算／耗盡語義 |
 |---|---:|---|
