@@ -20,12 +20,12 @@ import (
 )
 
 type acquisitionOptions struct {
-	BaseURL       string
-	Authorization string
-	MaxBytes      int64
-	MaxFiles      int
-	MaxTotalBytes int64
-	MaxPages      int
+	BaseURL       string `json:"base_url"`
+	Authorization string `json:"authorization"`
+	MaxBytes      int64  `json:"max_bytes"`
+	MaxFiles      int    `json:"max_files"`
+	MaxTotalBytes int64  `json:"max_total_bytes"`
+	MaxPages      int    `json:"max_pages"`
 }
 
 var acquisitionKey = regexp.MustCompile(`^[A-Z][A-Z0-9_]*-[1-9][0-9]*$`)

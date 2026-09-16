@@ -36,7 +36,7 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 
 ## 匿名 intake → context 切片
 
-切片的初始階段使用三個獨立 Step／session，沿用真 engine、Store、committed resolver 與 RPC protocol harness。匿名 HTTP 案例在 provider 邊界實際呼叫 workflow-owned acquisition helper，將其原始檔案直接交給同一 candidate／Store 路徑；其他 Agent 分析、wiki 與 DB receipt 仍為匿名 fixtures。沒有通用 orchestrator、工具 adapter 層、共通 instructions 或正式 launcher。Private `executeSlice`／`resolveSlice` 目前由匿名測試 caller 串接；GLM binding、thinking 與每次啟動前 shared-discovery preflight 尚未接到產品入口，不提供未驗證的預設值。
+切片的初始階段使用三個獨立 Step／session，沿用真 engine、Store、committed resolver 與 RPC protocol harness。匿名 HTTP 案例在 provider 邊界啟動 workflow-owned acquisition helper subprocess，將其產生的 candidate 與原始檔案直接交給同一 Store 路徑；其他 Agent 分析、wiki 與 DB receipt 仍為匿名 fixtures。沒有通用 orchestrator、工具 adapter 層、共通 instructions 或正式 launcher。Private `executeSlice`／`resolveSlice` 目前由匿名測試 caller 串接；GLM binding、thinking 與每次啟動前 shared-discovery preflight 尚未接到產品入口，不提供未驗證的預設值。
 
 - `triage.intake.v1`：完整 issue/raw fields、field metadata、各 comment 原始頁、linked issue snapshots、附件 content／analysis manifest、來源 URL／取得時間及 gaps。Go 核對 raw key、必要欄位、分頁 offset／total／唯一 comment IDs、linked／attachment inventory 及附件 byte size；拒絕省略 inventory、截斷檔案或偽稱 complete。部分／缺失／unsafe／too-large／未完成分析保留為明確缺口，不等於空結果。
 - `triage.wiki.v1`：綁定 exact intake Ref，保存搜尋詞、wiki-only scope、搜尋證據與已讀頁面；區分完成有結果、完成無結果、partial、unavailable、not-run。未完成不得偽裝 no matches。本次開發只使用匿名 wiki fixtures，不存取實際 vault。
@@ -49,7 +49,20 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 
 ### Workflow-owned acquisition helper
 
-`acquireIntake` 補足既有 Jira formatted-view helper 的缺口，不是 Controller 逐工具 adapter，尚無 production launcher／credential discovery 或 Agent shell 入口。
+`acquireIntake` 補足既有 Jira formatted-view helper 的缺口，不是 Controller 逐工具 adapter。獨立 `cmd/jira-triage-acquire` 提供 Agent 可用 shell 呼叫的入口；尚無 production workflow launcher 或 credential discovery。
+
+先建置 helper executable，再由 private slice caller 提供其絕對路徑；intake task 的 `acquisition_helper` 傳遞該路徑。使用方式：
+
+```sh
+go build -p 1 -o /path/to/run-owned/jira-triage-acquire ./cmd/jira-triage-acquire
+/path/to/run-owned/jira-triage-acquire /path/to/attempt/request.json < /path/to/run-owned/configuration.json
+```
+
+Configuration 是 JSON，`base_url` 為明確授權的 Jira origin；可選 `authorization` 是既有工具取得的完整 Authorization header 值，只經 stdin 傳遞，不放 argv／prompt。可選 `max_bytes`、`max_total_bytes`、`max_files`、`max_pages` 只能調低上限。Credential discovery 沿用正常 Agent 工具，不由 Controller broker 提供。
+
+Helper 讀取初始 intake request 的 scope／identity，直接在同 attempt 的 evidence 寫 raw／metadata，成功時 exclusive create `candidate.json`。部分來源是帶 gaps 的合法 candidate，acquisition 非零 exit 不交新 candidate；candidate 寫入／關閉失敗會移除本次建立的檔案，清理失敗併入原錯誤，不宣稱此時沒有殘留。等待 stdin EOF 時保留預設 signal 終止行為，尚未開始 acquisition；SIGINT／SIGTERM 在 acquisition 階段取消 HTTP 並保留可寫入的 metadata。既有 candidate／evidence 不覆蓋。它不驗證 request 是 Controller 授權的 committed state，也不自行 commit；真 engine／Store 與業務驗收仍是下游權威。Agent 不應手工覆蓋 helper 產物以宣稱 complete。
+
+匿名 tests 從不同 cwd 啟動真正 executable，執行 localhost HTTP／ZIP acquisition 並經 engine commit；RPC fixture 仍替代 Agent，尚未證明真 Agent 會自主正確使用 helper。Standalone helper 本身不啟 Pi、不派工、不註冊 `jira-triage` workflow。
 
 - 請求 `/rest/api/3/issue/<key>?fields=*all`、field metadata、獨立 comments endpoint 的所有頁及 linked issue snapshots；從 issue 原始 inventory 取得附件。保留 unabridged JSON／ADF／raw pages；總數變動、錯 offset、重複 IDs、缺頁、HTTP failure／截斷、malformed response 都留下 partial 與 gaps，不當成空結果。
 - Body 從第一筆直接串流寫入 attempt evidence，以 generated IDs exclusive create，不用來源 filename 當落盤路徑。純文字通過格式檢查後由 analysis 引用原 content，不另存相同副本。不先落別處或以摘要替換 raw。`acquisition` Source 指向受限額計算的 metadata evidence，包含 HTTP status、取得時間、logical source ID、origin、comment offset、partial diagnostics，以及 ZIP filename → extracted file ID 對照。
@@ -67,7 +80,7 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 4. 新 context 以 `previous` 綁定舊版本。移除舊 gap 必須提供 `resolved_gaps` evidence，且包含本次新 evidence 或新版 wiki evidence；上游仍存在的 gaps 不可刪除。舊版與新版 evidence 都是顯式 Step inputs。這是 provenance／readiness 驗收，不是對證據語意的獨立事實證明。
 5. 所有 session／attempt 沿用同 run accounting；provider failure／timeout／取消／hard cap／cleanup failure 原樣返回，不補交未 committed candidate，也不替換最後已驗收 state。新 context 仍只是 supporting state，remaining gaps 不等於結案。
 
-此局部 cycle **尚不修補 comments／附件等 acquisition gap**，保留缺口等待下一個 workflow-owned 增量；不因 wiki 重試成功就偽稱 intake complete。每個 cycle 會重驗完整 lineage 與 evidence digests，同一 intake 在歷史中會被重複讀取；長歷史的驗證成本尚未最佳化，不宣稱已適合完整 Planner 的長期執行。已解析前提若出現新矛盾，需後續 invalidation／reframe 路徑，本切片不靜默改寫。尚未接 live wiki／DB、原始 lookup acquisition、Sumo／Prism query readiness、production helper 呼叫或完整調查 loop。
+此局部 cycle **尚不修補 comments／附件等 acquisition gap**，保留缺口等待下一個 workflow-owned 增量；不因 wiki 重試成功就偽稱 intake complete。每個 cycle 會重驗完整 lineage 與 evidence digests，同一 intake 在歷史中會被重複讀取；長歷史的驗證成本尚未最佳化，不宣稱已適合完整 Planner 的長期執行。已解析前提若出現新矛盾，需後續 invalidation／reframe 路徑，本切片不靜默改寫。尚未接 live wiki／DB、原始 lookup acquisition、Sumo／Prism query readiness、真 Agent helper 呼叫或完整調查 loop。
 
 ## 驗證與下一步
 
