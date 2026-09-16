@@ -1,5 +1,7 @@
 # 新增 workflow：接手 agent 指南
 
+先讀 repo 根目錄的 [專案憲法](../AGENTS.md)，以下流程與個別 workflow 設計不得默默改變其責任邊界。
+
 本文件是新增 predefined workflow 的工作入口，不是新 DSL、全域 skill 或安裝器。Workflow 使用 Go control flow；新 workflow 的業務選擇由使用者確認，不從當前 agent、smoke-echo 或 code-review 默默繼承。
 
 ## 1. 接手基線與閱讀順序

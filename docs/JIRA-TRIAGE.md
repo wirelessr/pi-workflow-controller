@@ -4,6 +4,8 @@
 
 ## 責任邊界
 
+以下遵循 repo 根目錄的 [專案憲法](../AGENTS.md)。該文件規範本專案的開發／review，不是另行注入 workflow nodes 的共通指令或工具限制。
+
 Controller 負責 workflow 編排、角色／模型、session 生命週期、Step／contract／committed Ref 驗收、timeout、checkpoint／handoff、錯誤與 cleanup，不負責逐條審批 shell、限制工具清單或替每種調查工具建立 adapter。
 
 Agent 沿用正常 Pi 載入的既有 `AGENTS.md`、hooks、skills 與工具，可以使用 shell、查詢和分析程式進行 troubleshooting。不修改全域資源，也不另外新增或複製共通安全 instructions、AGENTS.md、hooks、capability manifest 或 credential broker。既有 hooks 的實際涵蓋範圍不能假定完整；軟性操作規則不構成 sandbox 或強制防護保證。
