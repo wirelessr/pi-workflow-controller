@@ -60,6 +60,9 @@ func hasFile(files []file, id string) bool {
 	return false
 }
 func checkSource(s Source, files []file) (bool, error) {
+	if s.Ref != nil {
+		return false, fmt.Errorf("retained source requires intake lineage")
+	}
 	if s.Status == "available" {
 		if !hasFile(files, s.FileID) {
 			return false, fmt.Errorf("missing evidence file %q", s.FileID)
@@ -126,11 +129,26 @@ func rawJSON(ctx context.Context, ref contract.Ref, files []file, id string, val
 }
 
 func checkIntake(ctx context.Context, r *engine.Run, ref contract.Ref, ticket string) (Intake, error) {
-	p, err := read[Intake](ctx, r, ref, IntakeSchema)
-	if err != nil {
-		return p.Data, err
-	}
+	h, err := loadIntakeHistory(ctx, r, ref, ticket)
+	return h.value, err
+}
+
+func checkIntakePublication(ctx context.Context, ref contract.Ref, p publication[Intake], ticket string, sources map[contract.Ref][]file, priorInventory *Source) (Intake, error) {
 	v := p.Data
+	owner := func(s Source) (contract.Ref, []file) {
+		if s.Ref != nil {
+			return *s.Ref, sources[*s.Ref]
+		}
+		return ref, p.Files
+	}
+	readSource := func(s Source) ([]byte, error) {
+		ref, files := owner(s)
+		return rawFile(ctx, ref, files, s.FileID)
+	}
+	decodeSource := func(s Source, value any) error {
+		ref, files := owner(s)
+		return rawJSON(ctx, ref, files, s.FileID, value)
+	}
 	u, err := url.Parse(v.URL)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/browse/"+ticket || v.Ticket != ticket {
 		return v, fmt.Errorf("ticket/source mismatch")
@@ -140,7 +158,9 @@ func checkIntake(ctx context.Context, r *engine.Run, ref contract.Ref, ticket st
 	}
 	complete := true
 	check := func(s Source) error {
-		ok, err := checkSource(s, p.Files)
+		_, files := owner(s)
+		s.Ref = nil
+		ok, err := checkSource(s, files)
 		complete = complete && ok
 		return err
 	}
@@ -160,7 +180,7 @@ func checkIntake(ctx context.Context, r *engine.Run, ref contract.Ref, ticket st
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		}
-		if err := rawJSON(ctx, ref, p.Files, v.Fields.FileID, &fields); err != nil {
+		if err := decodeSource(v.Fields, &fields); err != nil {
 			return v, err
 		}
 		seen := map[string]bool{}
@@ -176,7 +196,7 @@ func checkIntake(ctx context.Context, r *engine.Run, ref contract.Ref, ticket st
 	}
 	var issue acquisitionIssue
 	if v.Issue.Status == "available" {
-		if err := rawJSON(ctx, ref, p.Files, v.Issue.FileID, &issue); err != nil {
+		if err := decodeSource(v.Issue, &issue); err != nil {
 			return v, err
 		}
 		if issue.Key != ticket {
@@ -221,7 +241,7 @@ func checkIntake(ctx context.Context, r *engine.Run, ref contract.Ref, ticket st
 				Body json.RawMessage `json:"body"`
 			} `json:"comments"`
 		}
-		if err := rawJSON(ctx, ref, p.Files, page.Source.FileID, &raw); err != nil {
+		if err := decodeSource(page.Source, &raw); err != nil {
 			return v, err
 		}
 		if raw.Start == nil || raw.Total == nil || raw.Comments == nil || *raw.Total < 0 || *raw.Start != page.Start {
@@ -246,13 +266,21 @@ func checkIntake(ctx context.Context, r *engine.Run, ref contract.Ref, ticket st
 		}
 	}
 	complete = complete && total >= 0 && next == total && len(ids) == total && embedded.Total != nil && total == *embedded.Total
-	var links []acquisitionLink
-	var attachments []acquisitionAttachment
-	if issue.Fields != nil {
-		if err := json.Unmarshal(issue.Fields["issuelinks"], &links); err != nil {
+	// A failed replacement does not erase the historical inventory. Use its
+	// exact raw owner for structural checks only; the new issue remains a gap.
+	inventory := issue
+	if v.Issue.Status != "available" && priorInventory != nil {
+		if err := decodeSource(*priorInventory, &inventory); err != nil {
 			return v, err
 		}
-		if err := json.Unmarshal(issue.Fields["attachment"], &attachments); err != nil {
+	}
+	var links []acquisitionLink
+	var attachments []acquisitionAttachment
+	if inventory.Fields != nil {
+		if err := json.Unmarshal(inventory.Fields["issuelinks"], &links); err != nil {
+			return v, err
+		}
+		if err := json.Unmarshal(inventory.Fields["attachment"], &attachments); err != nil {
 			return v, err
 		}
 	}
@@ -276,7 +304,7 @@ func checkIntake(ctx context.Context, r *engine.Run, ref contract.Ref, ticket st
 		}
 		if l.Source.Status == "available" {
 			var raw acquisitionIssue
-			if err := rawJSON(ctx, ref, p.Files, l.Source.FileID, &raw); err != nil {
+			if err := decodeSource(l.Source, &raw); err != nil {
 				return v, err
 			}
 			if raw.Key != l.Key || len(raw.Fields) == 0 {
@@ -309,7 +337,7 @@ func checkIntake(ctx context.Context, r *engine.Run, ref contract.Ref, ticket st
 			return v, err
 		}
 		if a.Content.Status == "available" {
-			raw, err := rawFile(ctx, ref, p.Files, a.Content.FileID)
+			raw, err := readSource(a.Content)
 			if err != nil {
 				return v, err
 			}
@@ -465,12 +493,20 @@ func checkContext(ctx context.Context, r *engine.Run, ref contract.Ref, scope Sc
 	if err != nil {
 		return v, err
 	}
-	sources := map[contract.Ref][]file{intakeRef: ip.Files, wikiRef: wp.Files}
+	ih, err := loadIntakeHistory(ctx, r, intakeRef, scope.Ticket)
+	if err != nil {
+		return v, err
+	}
+	sources := ih.sources
+	sources[intakeRef], sources[wikiRef] = ip.Files, wp.Files
 	if len(history) == 0 {
 		if v.Previous != nil || len(v.ResolvedGaps) != 0 {
 			return v, fmt.Errorf("initial context cannot invent resolution lineage")
 		}
 	} else {
+		if v.Intake != history[0].value.Intake && (intake.Previous == nil || *intake.Previous != history[0].value.Intake || wikiRef == history[0].value.Wiki) {
+			return v, fmt.Errorf("context intake revision must extend prior intake and bind new wiki")
+		}
 		if v.Previous == nil || *v.Previous != history[0].ref {
 			return v, fmt.Errorf("context revision must bind exact previous input")
 		}

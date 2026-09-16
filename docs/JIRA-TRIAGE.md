@@ -22,6 +22,8 @@ Agent 先載入既有領域 skill，沿用其中的 scripts、CLI、REST 與其�
 
 完整性要求仍保留：取得 raw issue／metadata／comments、下載及檢查附件、保存 partial 與診斷，全部直接落本 run 的 evidence。Formatted Markdown 不是 raw 證據，附件清單不是已下載，單頁 comments 不是全量。Controller 驗收這些結果及 exact committed Refs，不接管逐項工具操作。
 
+版本／ownership 驗收不等於內容適用性判讀。Agent 決定歷史 wiki、facts 與時間證據是否仍適用；Controller 不依 wiki 內容、evidence schema 或 fact status 新增認列規則。Exact 引用歷史 evidence 可以保留其原始 provenance，但不能把舊 wiki contract 的 intake binding 改稱新版。既有 receipt／UTC／completeness 驗收仍保留。
+
 ## 模型與預算
 
 機械拉取角色固定 `fireworks/accounts/fireworks/models/deepseek-v4p1-flash`；Planner／驗證／報告使用 GLM-5.3，一般分析使用 GLM-5.3 flash。完整角色 binding、thinking 與 live 能力仍須驗證，不默換模型。
@@ -38,7 +40,7 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 
 ## 匿名 intake → context 切片
 
-切片的初始階段使用三個獨立 Step／session，沿用真 engine、Store、committed resolver 與 RPC protocol harness。匿名 HTTP 案例在 provider 邊界實際呼叫 workflow-owned acquisition helper，將其原始檔案直接交給同一 candidate／Store 路徑；其他 Agent 分析、wiki 與 DB receipt 仍為匿名 fixtures。沒有通用 orchestrator、工具 adapter 層、共通 instructions 或正式 launcher。Private `executeSlice`／`resolveSlice` 目前由匿名測試 caller 串接；GLM binding、thinking 與每次啟動前 shared-discovery preflight 尚未接到產品入口，不提供未驗證的預設值。
+切片的初始階段使用三個獨立 Step／session，沿用真 engine、Store、committed resolver 與 RPC protocol harness。匿名 HTTP 案例在 provider 邊界實際呼叫 workflow-owned acquisition helper，將其原始檔案直接交給同一 candidate／Store 路徑；其他 Agent 分析、wiki 與 DB receipt 仍為匿名 fixtures。沒有通用 orchestrator、工具 adapter 層、共通 instructions 或正式 launcher。Private `executeSlice`／`resolveSlice`／`refreshSlice` 目前由匿名測試 caller 串接；GLM binding、thinking 與每次啟動前 shared-discovery preflight 尚未接到產品入口，不提供未驗證的預設值。
 
 - `triage.intake.v1`：完整 issue/raw fields、field metadata、各 comment 原始頁、linked issue snapshots、附件 content／analysis manifest、來源 URL／取得時間及 gaps。Go 核對 raw key、必要欄位、分頁 offset／total／唯一 comment IDs、linked／attachment inventory 及附件 byte size；拒絕省略 inventory、截斷檔案或偽稱 complete。部分／缺失／unsafe／too-large／未完成分析保留為明確缺口，不等於空結果。
 - `triage.wiki.v1`：綁定 exact intake Ref，保存搜尋詞、wiki-only scope、搜尋證據與已讀頁面；區分完成有結果、完成無結果、partial、unavailable、not-run。未完成不得偽裝 no matches。本次開發只使用匿名 wiki fixtures，不存取實際 vault。
@@ -71,7 +73,19 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 4. 新 context 以 `previous` 綁定舊版本。移除舊 gap 必須提供 `resolved_gaps` evidence，且包含本次新 evidence 或新版 wiki evidence；上游仍存在的 gaps 不可刪除。舊版與新版 evidence 都是顯式 Step inputs。這是 provenance／readiness 驗收，不是對證據語意的獨立事實證明。
 5. 所有 session／attempt 沿用同 run accounting；provider failure／timeout／取消／hard cap／cleanup failure 原樣返回，不補交未 committed candidate，也不替換最後已驗收 state。新 context 仍只是 supporting state，remaining gaps 不等於結案。
 
-此局部 cycle **尚不修補 comments／附件等 acquisition gap**，保留缺口等待 Agent 局部補取與 intake 版本交接的增量；不因 wiki 重試成功就偽稱 intake complete。每個 cycle 會重驗完整 lineage 與 evidence digests，同一 intake 在歷史中會被重複讀取；長歷史的驗證成本尚未最佳化，不宣稱已適合完整 Planner 的長期執行。已解析前提若出現新矛盾，需後續 invalidation／reframe 路徑，本切片不靜默改寫。尚未接 live wiki／DB、原始 lookup acquisition、Sumo／Prism query readiness、真 Agent 依既有 skill 取得資料或完整調查 loop。
+此局部 cycle 本身不修補 comments／附件等 acquisition gap，改由下節 `refreshSlice` 指定來源補取；不因 wiki 重試成功就偽稱 intake complete。每個 cycle 會重驗完整 lineage 與 evidence digests，同一 intake 在歷史中會被重複讀取；長歷史的驗證成本尚未最佳化，不宣稱已適合完整 Planner 的長期執行。同 intake 的已解析前提若出現新矛盾，仍需後續 invalidation／reframe 路徑，本切片不靜默改寫。尚未接 live wiki／DB、原始 lookup acquisition、Sumo／Prism query readiness、真 Agent 依既有 skill 取得資料或完整調查 loop。
+
+### Committed incomplete intake 的局部版本交接
+
+Private `refreshSlice` 從既有 committed context／incomplete intake 執行一個指定 cycle，三個 fresh Step/session 依序產生 intake revision、wiki revision、context revision。Caller 明列 source selectors 與缺少／失效原因，Controller 不從內容推斷失效，也不替 Agent 選工具。
+
+- Intake 以 `previous` 綁定 exact prior intake，`work` 保存此次指定來源與原因。Selectors 為 `issue`、`fields`、`comment:<startAt>`、`linked:<key>`、`attachment-content:<id>`、`attachment-analysis:<id>`。可补缺少的 comment page；其他 slots 必須已在原 inventory，任意 inventory 增刪與完整 intake 的重新 acquisition 尚不支援。
+- 每個指定 slot 保存本次 local result，包括失敗／partial 狀態；本次 `acquisition` 必須有自有 metadata／diagnostics evidence。其餘 slots 保持原狀，有檔案者以 `Source.ref`＋`file_id` 指向真正的歷史 owner，不重複宣告舊附檔。歷史 raw／失敗資料仍留在原 committed contract。Issue 補取失敗時，沿 exact 歷史 issue inventory 檢查保留 slots 的結構／byte metadata；不把 inventory 當成本次成功的 issue，也不因此改標 complete。Agent 的 metadata 內容判讀不由 Controller 重寫。
+- 新版 wiki 必須綁定新版 intake，重新交付本次搜尋的 local evidence 與實際完成狀態；partial／unavailable／not-run 仍是缺口。舊 wiki 是顯式歷史 input，不是新版搜尋的替身。
+- Context 同時綁定新版 intake/wiki 與 previous context。Agent 保留仍適用的資訊、重評受影響身份／時間／observations；Controller 只接來源／版本關係並保留既有 receipt、UTC、scope、gap 驗收，不自行建立歷史 wiki 的適用性或 facts 認列機制。跨 intake 可更新原先 resolved 的資料，原版仍保留，resolution attempt history 不可丟棄。同 intake `resolveSlice` 的原有保留規則不变。
+- 所有保留的 intake/context/wiki evidence owners 都是 exact committed Step inputs。失敗不替換 caller 的最後已驗收 context；中途已 committed 的 revision 保留在 run history，但尚未形成完整 handoff，不當作自動 checkpoint recovery。每一步仍先確認 `CloseSessionReport`，不重置計數、不吞 timeout／cancel／fatal／cleanup error。
+
+匿名 RPC fixtures 經真 engine／Store 驗收，局部補頁／附件會讀指定 localhost HTTP 來源；Agent 判讀與 skills 操作仍是 provider fixtures。這不是 Agent 已成功載入技能或自主 acquisition 的 live 證明，也沒有新增工具入口或 CLI 註冊。
 
 ## 驗證與下一步
 
@@ -83,6 +97,6 @@ go test -p 1 -count=1 ./internal/workflows/triage ./internal/runtime ./internal/
 
 完整回歸與發布方法見 [VERIFICATION](VERIFICATION.md)。既有 shared-discovery 的 parent pid／`.recovering`／ownership gate 保留，屬於 runtime 對自有 process 的安全責任，不因 Agent 操作規則採軟性提示而取消。
 
-下一步是 Agent 依既有 skill／工具只補指定缺頁／缺附件，Controller 驗收新 evidence、保留有效來源的 exact prior Refs，並處理新版 intake 對 wiki／context 的依賴；不以舊 wiki Ref 冒充新版證據，未完成搜尋仍須補救。這條局部補取／版本交接尚未實作，不重抓全部有效資料，也不以新增 executable 代替；再補 identity/time 的實際 supporting-source acquisition 與 query readiness。不重做已完成 intake 或將第一次缺欄位當作結案。之後才加入 Planner／bounded workers、reframe、每 Step 可重建狀態／每三輪 checkpoint、同版三方驗證與 deterministic report。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
+局部來源補取／版本交接已有上述 private 匿名切片；下一步仍需 Agent 技能操作的授權 live 驗收、較廣的 inventory 變更、identity/time 的實際 supporting-source acquisition 與 query readiness。不以新增 executable 代替，也不重做已完成 intake 或將第一次缺欄位當作結案。之後才加入 Planner／bounded workers、reframe、每 Step 可重建狀態／每三輪 checkpoint、同版三方驗證與 deterministic report。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
 
 不提供 OS sandbox、任意 detached 子孫清理、crash resume、exactly-once 或外部副作用 rollback；保留 [DESIGN](../DESIGN.md) 的既有非保證範圍。

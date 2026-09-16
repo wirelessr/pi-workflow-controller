@@ -28,6 +28,7 @@ type stageTask struct {
 	RuntimeResolutionAllowed bool          `json:"runtime_resolution_allowed"`
 	Previous                 *contract.Ref `json:"previous,omitempty"`
 	Gaps                     []string      `json:"gaps,omitempty"`
+	SourceWork               []intakeWork  `json:"source_work,omitempty"`
 	ResolutionKinds          []string      `json:"resolution_kinds,omitempty"`
 }
 
@@ -39,7 +40,7 @@ func slicePolicy() engine.RunPolicy {
 
 func sliceStep(ctx context.Context, r *engine.Run, models sliceModels, key string, task stageTask, schema string, inputs []contract.Ref) (contract.Ref, error) {
 	model := models.Analysis
-	if task.Stage == "intake" {
+	if task.Stage == "intake" || task.Stage == "intake-revision" {
 		model = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: models.FetchThinking}
 	}
 	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + task.Stage, CWD: filepath.Join(r.Dir(), "triage-work"), Model: model})

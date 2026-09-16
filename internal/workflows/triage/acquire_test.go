@@ -60,6 +60,10 @@ func acquireFixture(t *testing.T, mode string, bundle []byte, mime string, obser
 			if mode == "malformed-issue" {
 				body = []byte(`{"key":`)
 			}
+			if mode == "issue-failure" {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				body = []byte("issue source unavailable")
+			}
 		case "/rest/api/3/field":
 			body = raw["fields"]
 			if mode == "malformed-fields" {

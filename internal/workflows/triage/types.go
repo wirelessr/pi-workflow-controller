@@ -21,9 +21,10 @@ type Scope struct {
 }
 
 type Source struct {
-	Status string `json:"status"`
-	FileID string `json:"file_id"`
-	Reason string `json:"reason"`
+	Ref    *contract.Ref `json:"ref,omitempty"`
+	Status string        `json:"status"`
+	FileID string        `json:"file_id"`
+	Reason string        `json:"reason"`
 }
 
 type CommentPage struct {
@@ -42,7 +43,16 @@ type Attachment struct {
 	Analysis Source `json:"analysis"`
 }
 
+// intakeWork identifies one source slot, not a command or an applicability rule.
+// Reason is supplied by the caller/agent, including explicit invalidation reasons.
+type intakeWork struct {
+	Source string `json:"source"`
+	Reason string `json:"reason"`
+}
+
 type Intake struct {
+	Previous    *contract.Ref `json:"previous,omitempty"`
+	Work        []intakeWork  `json:"work,omitempty"`
 	Acquisition *Source       `json:"acquisition,omitempty"`
 	Ticket      string        `json:"ticket"`
 	URL         string        `json:"url"`

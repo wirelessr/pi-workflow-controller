@@ -11,6 +11,9 @@
         "reason"
       ],
       "properties": {
+        "ref": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+        },
         "status": {
           "enum": [
             "available",

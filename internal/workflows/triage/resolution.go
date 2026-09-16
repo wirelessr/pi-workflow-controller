@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
-	"sort"
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
@@ -19,7 +18,7 @@ type contextHistory struct {
 }
 
 // Revalidate committed lineage, never discover state by scanning candidates or
-// publications. This local slice keeps the same intake throughout remediation.
+// publications. Intake revisions remain explicit links, not discovered files.
 func loadContextHistory(ctx context.Context, r *engine.Run, scope Scope, ref contract.Ref) (contextHistory, error) {
 	h := contextHistory{sources: map[contract.Ref][]file{}}
 	chain := []contract.Ref{}
@@ -56,9 +55,6 @@ func loadContextHistory(ctx context.Context, r *engine.Run, scope Scope, ref con
 		}
 		var history []contextHistory
 		if i < len(chain)-1 {
-			if v.Intake != h.value.Intake {
-				return h, fmt.Errorf("local resolution cannot replace intake")
-			}
 			history = append(history, h)
 		}
 		if _, err := checkContext(ctx, r, ref, scope, v.Intake, v.Wiki, intake, wiki, history...); err != nil {
@@ -70,6 +66,13 @@ func loadContextHistory(ctx context.Context, r *engine.Run, scope Scope, ref con
 				return h, err
 			}
 			h.sources[input] = inputFiles.Files
+		}
+		ih, err := loadIntakeHistory(ctx, r, v.Intake, scope.Ticket)
+		if err != nil {
+			return h, err
+		}
+		for input, files := range ih.sources {
+			h.sources[input] = files
 		}
 		h.sources[ref] = p.Files
 		h.ref, h.value = ref, v
@@ -118,18 +121,22 @@ func qualifiedContext(v Context, ref contract.Ref) Context {
 
 func checkRevision(v Context, h contextHistory, fact func(Fact) error, wikiRef contract.Ref) error {
 	old := qualifiedContext(h.value, h.ref)
-	if v.Intake != old.Intake || v.Problem != old.Problem {
-		return fmt.Errorf("local resolution changed intake/problem")
+	if v.Problem != old.Problem {
+		return fmt.Errorf("local resolution changed problem")
 	}
-	if old.Identity.Status == "resolved" && !reflect.DeepEqual(v.Identity, old.Identity) {
-		return fmt.Errorf("local resolution replaced valid identity")
-	}
-	if old.Time.Status == "resolved" && !reflect.DeepEqual(v.Time, old.Time) {
-		return fmt.Errorf("local resolution replaced valid incident anchors")
-	}
-	for _, observation := range old.Observations {
-		if !slices.ContainsFunc(v.Observations, func(f Fact) bool { return reflect.DeepEqual(f, observation) }) {
-			return fmt.Errorf("context revision dropped prior observation")
+	// Cross-intake applicability is the agent's work. The prior contract stays
+	// committed history; same-intake remediation retains its existing rules.
+	if v.Intake == old.Intake {
+		if old.Identity.Status == "resolved" && !reflect.DeepEqual(v.Identity, old.Identity) {
+			return fmt.Errorf("local resolution replaced valid identity")
+		}
+		if old.Time.Status == "resolved" && !reflect.DeepEqual(v.Time, old.Time) {
+			return fmt.Errorf("local resolution replaced valid incident anchors")
+		}
+		for _, observation := range old.Observations {
+			if !slices.ContainsFunc(v.Observations, func(f Fact) bool { return reflect.DeepEqual(f, observation) }) {
+				return fmt.Errorf("context revision dropped prior observation")
+			}
 		}
 	}
 	for _, attempt := range old.Attempts {
@@ -147,7 +154,7 @@ func checkRevision(v Context, h contextHistory, fact func(Fact) error, wikiRef c
 		}
 		fresh := false
 		for _, e := range f.Evidence {
-			fresh = fresh || e.Ref == nil || (wikiRef != old.Wiki && e.Ref != nil && *e.Ref == wikiRef)
+			fresh = fresh || e.Ref == nil || (wikiRef != old.Wiki && e.Ref != nil && *e.Ref == wikiRef) || (v.Intake != old.Intake && e.Ref != nil && *e.Ref == v.Intake)
 		}
 		if !fresh {
 			return fmt.Errorf("gap resolution requires new evidence")
@@ -192,7 +199,8 @@ func resolveSlice(ctx context.Context, r *engine.Run, scope Scope, models sliceM
 	}
 	wikiRef := previous.Wiki
 	if !wikiComplete(wiki) {
-		wikiRef, err = sliceStep(ctx, r, models, key+"-wiki", stageTask{Stage: "wiki-resolution", Scope: scope, Gaps: wiki.Gaps, Previous: &previous.Context, Requirements: `Remedy the required wiki search using committed intake and previous wiki/context inputs. Perform a new read-only wiki-only search with existing tools; save raw search results and page evidence. Do not read other WIP/session history or write back. Preserve failed/partial status and diagnostics; unavailable/not-run/partial is never no matches. Bind intake to request.inputs[0]. Do not repeat Jira acquisition or expand production scope.`}, WikiSchema, []contract.Ref{previous.Intake, previous.Wiki, previous.Context})
+		wikiInputs := appendSourceInputs([]contract.Ref{previous.Intake, previous.Wiki, previous.Context}, h.sources)
+		wikiRef, err = sliceStep(ctx, r, models, key+"-wiki", stageTask{Stage: "wiki-resolution", Scope: scope, Gaps: wiki.Gaps, Previous: &previous.Context, Requirements: `Remedy the required wiki search using committed intake and previous wiki/context inputs. Perform a new read-only wiki-only search with existing tools; save raw search results and page evidence. Do not read other WIP/session history or write back. Preserve failed/partial status and diagnostics; unavailable/not-run/partial is never no matches. Bind intake to request.inputs[0]. Do not repeat Jira acquisition or expand production scope.`}, WikiSchema, wikiInputs)
 		if err != nil {
 			return result, err
 		}
@@ -204,14 +212,7 @@ func resolveSlice(ctx context.Context, r *engine.Run, scope Scope, models sliceM
 	inputs := []contract.Ref{previous.Intake, wikiRef, previous.Context}
 	// Include every retained evidence source explicitly; no implicit cross-Step
 	// file access or copied ownership of another attempt's evidence.
-	var retained []contract.Ref
-	for ref := range h.sources {
-		if !slices.Contains(inputs, ref) {
-			retained = append(retained, ref)
-		}
-	}
-	sort.Slice(retained, func(i, j int) bool { return retained[i].AttemptID < retained[j].AttemptID })
-	inputs = append(inputs, retained...)
+	inputs = appendSourceInputs(inputs, h.sources)
 	kinds := []string{}
 	if h.value.Identity.Status != "resolved" {
 		kinds = append(kinds, "identity")

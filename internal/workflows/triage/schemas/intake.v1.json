@@ -16,6 +16,21 @@
     "gaps"
   ],
   "properties": {
+    "previous": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+    },
+    "work": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "reason"],
+        "properties": {
+          "source": {"type": "string"},
+          "reason": {"type": "string"}
+        }
+      }
+    },
     "acquisition": {
       "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/source"
     },

@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -417,6 +419,157 @@ func resolutionFixture(name, mode string, scope Scope, inputs []contract.Ref, in
 	return v, files
 }
 
+func assertRetainedInputOwners(t *testing.T, inputs []contract.Ref) {
+	t.Helper()
+	var visit func(any)
+	visit = func(value any) {
+		switch node := value.(type) {
+		case []any:
+			for _, child := range node {
+				visit(child)
+			}
+		case map[string]any:
+			if owner, ok := node["ref"]; ok && owner != nil {
+				var ref contract.Ref
+				if err := json.Unmarshal(testJSON(owner), &ref); err != nil {
+					t.Fatal(err)
+				}
+				if !slices.Contains(inputs, ref) {
+					t.Fatalf("retained owner absent from explicit inputs: %+v", ref)
+				}
+				var p publication[json.RawMessage]
+				if err := protocol.ReadJSON(ref.Path, &p); err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, f := range p.Files {
+					if f.ID == node["file_id"] {
+						if _, err := os.ReadFile(filepath.Join(filepath.Dir(ref.Path), f.Path)); err != nil {
+							t.Fatal(err)
+						}
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("retained file absent from owner")
+				}
+			}
+			for _, child := range node {
+				visit(child)
+			}
+		}
+	}
+	for _, ref := range inputs {
+		var p publication[any]
+		if err := protocol.ReadJSON(ref.Path, &p); err != nil {
+			t.Fatal(err)
+		}
+		visit(p.Data)
+	}
+}
+
+// This is an external provider fixture, not a replacement Step/validator or a
+// product acquisition entry. Only explicitly selected localhost sources are read.
+func refreshIntakeFixture(t *testing.T, ctx context.Context, name string, count int, inputs []contract.Ref, task stageTask, base string) (Intake, map[string][]byte) {
+	t.Helper()
+	var prior publication[Intake]
+	if err := protocol.ReadJSON(inputs[0].Path, &prior); err != nil {
+		t.Fatal(err)
+	}
+	v := prior.Data
+	v.Previous, v.Work = &inputs[0], task.SourceWork
+	v.FetchedAt = "2025-01-04T00:00:00Z"
+	qualify := func(s *Source) {
+		if s.FileID != "" && s.Ref == nil {
+			s.Ref = &inputs[0]
+		}
+	}
+	qualify(&v.Issue)
+	qualify(&v.Fields)
+	for i := range v.Comments {
+		qualify(&v.Comments[i].Source)
+	}
+	for i := range v.Linked {
+		qualify(&v.Linked[i].Source)
+	}
+	for i := range v.Attachments {
+		qualify(&v.Attachments[i].Content)
+		qualify(&v.Attachments[i].Analysis)
+	}
+	files := map[string][]byte{}
+	var receipts []map[string]any
+	fetch := func(id, endpoint string) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+endpoint, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil || closeErr != nil {
+			t.Fatalf("fixture response: %v %v", readErr, closeErr)
+		}
+		files[id] = raw
+		receipts = append(receipts, map[string]any{"file_id": id, "http_status": resp.StatusCode, "source": endpoint})
+	}
+	for _, item := range task.SourceWork {
+		switch item.Source {
+		case "issue":
+			fetch("new-issue", "/rest/api/3/issue/CASE-17?fields=*all")
+			v.Issue = Source{Status: "partial", FileID: "new-issue", Reason: "issue response incomplete"}
+			if name == "refresh-issue-missing" {
+				v.Issue.Status = "missing"
+			}
+		case "comment:1":
+			fetch("new-page", "/rest/api/3/issue/CASE-17/comment?startAt=1")
+			if len(v.Comments) == 1 {
+				v.Comments = append(v.Comments, CommentPage{Start: 1})
+			}
+			v.Comments[1].Source = available("new-page")
+		case "attachment-content:a1":
+			fetch("new-bundle", "/attachment")
+			v.Attachments[0].Content = available("new-bundle")
+		case "attachment-analysis:a1":
+			v.Attachments[0].Analysis = available("new-bundle")
+		default:
+			t.Fatal("unexpected fixture work")
+		}
+	}
+	v.Complete, v.Gaps = true, []string{}
+	if strings.HasPrefix(name, "refresh-issue-") {
+		v.Complete, v.Gaps = false, append(append([]string{}, prior.Data.Gaps...), "issue response incomplete")
+	}
+	if (name == "refresh-repeat" && count == 4) || name == "refresh-false-complete" {
+		v.Comments[1].Source.Status, v.Comments[1].Source.Reason = "partial", "source still incomplete"
+		if name != "refresh-false-complete" {
+			v.Complete, v.Gaps = false, []string{"source still incomplete"}
+		}
+	}
+	files["revision-metadata"] = testJSON(map[string]any{"records": receipts, "gaps": v.Gaps})
+	v.Acquisition = &Source{Status: "available", FileID: "revision-metadata"}
+	switch name {
+	case "refresh-unselected-copy":
+		files["copied-fields"] = []byte(`[{"id":"description","name":"Description"}]`)
+		v.Fields = available("copied-fields")
+	case "refresh-foreign-ref":
+		bad := inputs[0]
+		bad.RunID = "foreign"
+		v.Fields.Ref = &bad
+	case "refresh-wrong-previous":
+		v.Previous = &inputs[1]
+	case "refresh-work-changed":
+		v.Work = append(append([]intakeWork{}, v.Work...), intakeWork{Source: "fields", Reason: "unrequested expansion"})
+	case "refresh-no-metadata":
+		v.Acquisition = nil
+	case "refresh-dropped-source":
+		v.Linked = []LinkedIssue{}
+	}
+	return v, files
+}
+
 func TestIntakeToContext(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -424,6 +577,12 @@ func TestIntakeToContext(t *testing.T) {
 		failure bool
 		ready   bool
 	}{
+		{"refresh-issue-partial", 6, false, false}, {"refresh-issue-missing", 6, false, false}, {"refresh-issue-repeat", 9, false, false},
+		{"refresh-page", 6, false, true}, {"refresh-attachment", 6, false, true}, {"refresh-invalidated", 6, false, true},
+		{"refresh-historical-wiki", 6, false, true}, {"refresh-wiki-partial", 6, false, false}, {"refresh-repeat", 9, false, true}, {"refresh-then-resolve", 8, false, true},
+		{"refresh-unselected-copy", 4, true, false}, {"refresh-foreign-ref", 4, true, false}, {"refresh-wrong-previous", 4, true, false}, {"refresh-work-changed", 4, true, false}, {"refresh-no-metadata", 4, true, false}, {"refresh-dropped-source", 4, true, false}, {"refresh-false-complete", 4, true, false},
+		{"refresh-old-wiki-binding", 5, true, false}, {"refresh-false-no-matches", 5, true, false}, {"refresh-drop-gap", 6, true, false}, {"refresh-dropped-history", 6, true, false}, {"refresh-context-foreign-ref", 6, true, false},
+		{"refresh-provider-failure", 4, true, false}, {"refresh-cancel", 4, true, false}, {"refresh-timeout", 4, true, false}, {"refresh-cleanup-failure", 4, true, false}, {"refresh-attempt-cap", 3, true, false}, {"refresh-uncommitted-input", 3, true, false},
 		{"missing-attachment-size", 1, true, false},
 		{"blank-stack", 3, true, false}, {"blank-pop", 3, true, false}, {"blank-binding", 3, true, false}, {"blank-target", 3, true, false}, {"whitespace-target", 3, true, false},
 		{"duplicate-attachment", 1, true, false}, {"conflicting-attachment", 1, true, false}, {"duplicate-empty-attachment", 1, true, false}, {"null-comment", 1, true, false}, {"http-page-null", 3, false, false},
@@ -444,8 +603,12 @@ func TestIntakeToContext(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resolving := strings.HasPrefix(tc.name, "resolve-")
-			acquiring := resolving || strings.HasPrefix(tc.name, "http-")
+			refreshing := strings.HasPrefix(tc.name, "refresh-")
+			acquiring := resolving || refreshing || strings.HasPrefix(tc.name, "http-")
 			mode := tc.name
+			if refreshing {
+				mode = "wiki-matches"
+			}
 			if resolving {
 				mode = "wiki-partial"
 				switch tc.name {
@@ -480,7 +643,8 @@ func TestIntakeToContext(t *testing.T) {
 				scope.Stack, scope.Pop, scope.Binding = " ", " ", " "
 			}
 			targetAuthorized := strings.TrimSpace(scope.Stack) != "" && strings.TrimSpace(scope.Pop) != "" && strings.TrimSpace(scope.Binding) != "" && len(scope.TenantIDs) > 0
-			var requests atomic.Int32
+			var requests, newRequests atomic.Int32
+			var revisionURL string
 			var acquisition acquisitionOptions
 			if acquiring {
 				_, raw := intakeFixture("complete")
@@ -505,11 +669,36 @@ func TestIntakeToContext(t *testing.T) {
 					bundle = []byte(strings.Repeat("x", 8193))
 				}
 				httpMode := strings.TrimPrefix(tc.name, "http-")
-				if tc.name == "resolve-acquisition-gap" {
+				if tc.name == "resolve-acquisition-gap" || refreshing {
 					httpMode = "page-failure"
+				}
+				if tc.name == "refresh-attachment" {
+					httpMode = "attachment-partial"
 				}
 				server := acquireFixture(t, httpMode, bundle, mime, func(*http.Request) { requests.Add(1) })
 				acquisition = acquisitionOptions{BaseURL: server.URL}
+				if refreshing {
+					revisionMode := "complete"
+					if strings.HasPrefix(tc.name, "refresh-issue-") {
+						revisionMode = "malformed-issue"
+					}
+					if tc.name == "refresh-issue-missing" {
+						revisionMode = "issue-failure"
+					}
+					revisionServer := acquireFixture(t, revisionMode, bundle, mime, func(req *http.Request) {
+						newRequests.Add(1)
+						if strings.HasPrefix(tc.name, "refresh-issue-") {
+							if req.URL.Path != "/rest/api/3/issue/CASE-17" {
+								t.Error("revision fetched an unrequested source")
+							}
+							return
+						}
+						if req.URL.Path != "/attachment" && (req.URL.Path != "/rest/api/3/issue/CASE-17/comment" || req.URL.Query().Get("startAt") != "1") {
+							t.Error("revision fetched an unrequested source")
+						}
+					})
+					revisionURL = revisionServer.URL
+				}
 				if tc.name == "http-oversized" {
 					acquisition.MaxBytes = 8192
 				}
@@ -598,7 +787,7 @@ func TestIntakeToContext(t *testing.T) {
 			if tc.name == "attempt-cap" {
 				policy.MaxTotalAttempts = 1
 			}
-			if tc.name == "resolve-attempt-cap" {
+			if tc.name == "resolve-attempt-cap" || tc.name == "refresh-attempt-cap" {
 				policy.MaxTotalAttempts = 3
 			}
 			exe, err := os.Executable()
@@ -627,6 +816,29 @@ func TestIntakeToContext(t *testing.T) {
 						result, err = resolveSlice(ctx, run, scope, models, result)
 					}
 				}
+				if err == nil && refreshing {
+					beforeResolution = result
+					if tc.name == "refresh-uncommitted-input" {
+						result.Context.Path = filepath.Join(filepath.Dir(result.Context.Path), "candidate.json")
+					}
+					work := []intakeWork{{Source: "comment:1", Reason: "retry missing comment page"}}
+					if tc.name == "refresh-attachment" {
+						work = []intakeWork{{Source: "attachment-content:a1", Reason: "retry truncated attachment"}, {Source: "attachment-analysis:a1", Reason: "extract replacement content"}}
+					}
+					if tc.name == "refresh-invalidated" {
+						work = append(work, intakeWork{Source: "attachment-content:a1", Reason: "caller declared prior attachment stale"}, intakeWork{Source: "attachment-analysis:a1", Reason: "extract replacement content"})
+					}
+					if strings.HasPrefix(tc.name, "refresh-issue-") {
+						work = []intakeWork{{Source: "issue", Reason: "caller declared issue snapshot stale"}}
+					}
+					result, err = refreshSlice(ctx, run, scope, models, result, work)
+					if err == nil && (tc.name == "refresh-repeat" || tc.name == "refresh-issue-repeat") {
+						result, err = refreshSlice(ctx, run, scope, models, result, work)
+					}
+					if err == nil && tc.name == "refresh-then-resolve" {
+						result, err = resolveSlice(ctx, run, scope, models, result)
+					}
+				}
 				outputs := map[string]contract.Ref{}
 				// No final selection: these are supporting refs, not a report.
 				if err == nil {
@@ -635,7 +847,7 @@ func TestIntakeToContext(t *testing.T) {
 				return engine.Result{Outputs: outputs}, err
 			}}
 			var transport runtime.Runtime = pi
-			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" {
+			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" {
 				transport = deadlineRuntime{pi}
 			}
 			r, err = engine.New(ctx, def, engine.Input{Prompt: "CASE-17", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
@@ -651,6 +863,8 @@ func TestIntakeToContext(t *testing.T) {
 			var initialIntake contract.Ref
 			var acquiredFiles []file
 			var acquiredRequests int32
+			var refreshRequests int32
+			var revisionIntake contract.Ref
 		loop:
 			for {
 				select {
@@ -671,7 +885,7 @@ func TestIntakeToContext(t *testing.T) {
 						hellos[e.m.SessionID] = e.m
 						continue
 					}
-					if (tc.name == "cancel" || tc.name == "attempt-timeout" || tc.name == "resolve-cancel" || tc.name == "resolve-timeout") && e.m.Type == "held" {
+					if (tc.name == "cancel" || tc.name == "attempt-timeout" || tc.name == "resolve-cancel" || tc.name == "resolve-timeout" || tc.name == "refresh-cancel" || tc.name == "refresh-timeout") && e.m.Type == "held" {
 						continue
 					}
 					if e.m.Type != "prompt" {
@@ -733,11 +947,85 @@ func TestIntakeToContext(t *testing.T) {
 						}
 						data = expectedContext
 					default:
-						if !resolving || req.Inputs[0] != initialIntake || task.Previous == nil || requests.Load() != acquiredRequests {
+						if refreshing && task.Stage != "wiki-resolution" && task.Stage != "context-resolution" {
+							switch task.Stage {
+							case "intake-revision":
+								intake, files = refreshIntakeFixture(t, ctx, tc.name, count, req.Inputs, task, revisionURL)
+								refreshRequests++
+								if tc.name == "refresh-attachment" || tc.name == "refresh-invalidated" {
+									if tc.name == "refresh-attachment" {
+										refreshRequests--
+									}
+									refreshRequests++
+								}
+								data = intake
+							case "wiki-revision":
+								revisionIntake = req.Inputs[0]
+								wikiMode := "wiki-matches"
+								if tc.name == "refresh-wiki-partial" || tc.name == "refresh-then-resolve" {
+									wikiMode = "wiki-partial"
+								}
+								if tc.name == "refresh-false-no-matches" {
+									wikiMode = "wiki-false-empty"
+								}
+								wiki, files = wikiFixture(wikiMode, req.Inputs[0])
+								if tc.name == "refresh-old-wiki-binding" {
+									wiki.Intake = initialIntake
+								}
+								data = wiki
+							case "context-revision":
+								var prior publication[Context]
+								if err := protocol.ReadJSON(req.Inputs[2].Path, &prior); err != nil {
+									t.Fatal(err)
+								}
+								expectedContext, files = resolutionFixture("", mode, scope, req.Inputs, intake, wiki, prior.Data)
+								// Provider fixture qualifies retained source ownership independently.
+								for n := len(prior.Data.Attempts); n < len(expectedContext.Attempts); n++ {
+									if expectedContext.Attempts[n].Kind == "time" {
+										expectedContext.Attempts[n].Evidence = []Evidence{{FileID: "remediation"}}
+									}
+								}
+								if prior.Data.Time.Status != "resolved" {
+									for n := range expectedContext.Time.Anchors {
+										expectedContext.Time.Anchors[n].Evidence = Evidence{Ref: &req.Inputs[0], FileID: "new-bundle"}
+									}
+								}
+								if tc.name == "refresh-invalidated" {
+									expectedContext.Time.Anchors[0].Event = "reassessed event"
+									expectedContext.Time.Anchors[0].Evidence = Evidence{Ref: &req.Inputs[0], FileID: "new-bundle"}
+								}
+								if tc.name == "refresh-historical-wiki" {
+									expectedContext.Observations = append(expectedContext.Observations, Fact{Value: "Agent retained a prior wiki pattern", Evidence: []Evidence{{Ref: &prior.Data.Wiki, FileID: "wiki-page"}}})
+								}
+								if tc.name == "refresh-drop-gap" {
+									expectedContext.ResolvedGaps = nil
+								}
+								if tc.name == "refresh-dropped-history" {
+									expectedContext.Attempts = expectedContext.Attempts[len(prior.Data.Attempts):]
+								}
+								if tc.name == "refresh-context-foreign-ref" {
+									bad := prior.Data.Wiki
+									bad.RunID = "foreign"
+									expectedContext.Observations[0].Evidence[0].Ref = &bad
+								}
+								data = expectedContext
+							default:
+								t.Fatal("unexpected revision stage")
+							}
+							if requests.Load() != acquiredRequests || newRequests.Load() != refreshRequests {
+								t.Fatal("revision repeated original acquisition or missed designated work")
+							}
+							break
+						}
+						expectedIntake := initialIntake
+						if refreshing {
+							expectedIntake = revisionIntake
+						}
+						if (!resolving && !refreshing) || req.Inputs[0] != expectedIntake || task.Previous == nil || requests.Load() != acquiredRequests {
 							t.Fatal("resolution reacquired intake or lost committed input")
 						}
 						if task.Stage == "wiki-resolution" {
-							if len(req.Inputs) != 3 || *task.Previous != req.Inputs[2] || req.Inputs[1].SchemaID != WikiSchema {
+							if len(req.Inputs) < 3 || *task.Previous != req.Inputs[2] || req.Inputs[1].SchemaID != WikiSchema {
 								t.Fatal("wiki remediation inputs")
 							}
 							wikiMode := "wiki-matches"
@@ -768,10 +1056,20 @@ func TestIntakeToContext(t *testing.T) {
 								t.Fatal("resolution prerequisite gate mismatch")
 							}
 							expectedContext, files = resolutionFixture(tc.name, mode, scope, req.Inputs, intake, wiki, prior.Data)
+							if refreshing {
+								for n := len(prior.Data.Attempts); n < len(expectedContext.Attempts); n++ {
+									if expectedContext.Attempts[n].Kind == "time" {
+										expectedContext.Attempts[n].Evidence = []Evidence{{FileID: "remediation"}}
+									}
+								}
+							}
 							data = expectedContext
 						} else {
 							t.Fatal("unexpected extra step")
 						}
+					}
+					if count > 3 {
+						assertRetainedInputOwners(t, req.Inputs)
 					}
 					for _, ref := range req.Inputs {
 						a := r.Snapshot().Attempts[ref.AttemptID]
@@ -785,17 +1083,17 @@ func TestIntakeToContext(t *testing.T) {
 						writeCandidate(t, e.m, req, data, files, tc.name == "file-escape")
 					}
 					ack := "settle"
-					if tc.name == "provider-failure" || (tc.name == "resolve-provider-failure" && count == 4) {
+					if tc.name == "provider-failure" || ((tc.name == "resolve-provider-failure" || tc.name == "refresh-provider-failure") && count == 4) {
 						ack = "provider-error"
 					}
-					if tc.name == "attempt-timeout" || (tc.name == "resolve-timeout" && count == 4) {
+					if tc.name == "attempt-timeout" || ((tc.name == "resolve-timeout" || tc.name == "refresh-timeout") && count == 4) {
 						ack = "hold"
 					}
-					if tc.name == "cancel" || (tc.name == "resolve-cancel" && count == 4) {
+					if tc.name == "cancel" || ((tc.name == "resolve-cancel" || tc.name == "refresh-cancel") && count == 4) {
 						ack = "hold"
 						r.Cancel(engine.OriginControllerUser)
 					}
-					if tc.name == "cleanup-failure" || (tc.name == "resolve-cleanup-failure" && count == 4) {
+					if tc.name == "cleanup-failure" || ((tc.name == "resolve-cleanup-failure" || tc.name == "refresh-cleanup-failure") && count == 4) {
 						for sid := range hellos {
 							path := filepath.Join(bridge, sid+".json")
 							if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -829,14 +1127,14 @@ func TestIntakeToContext(t *testing.T) {
 					t.Fatal("committed context lost provenance/state")
 				}
 			}
-			if tc.name != "cleanup-failure" && tc.name != "resolve-cleanup-failure" {
+			if tc.name != "cleanup-failure" && tc.name != "resolve-cleanup-failure" && tc.name != "refresh-cleanup-failure" {
 				for _, c := range report.Cleanup {
 					if !c.WaitCompleted || !c.ProcessExited || len(c.Unconfirmed) > 0 {
 						t.Fatalf("cleanup incomplete: %+v", c)
 					}
 				}
 			}
-			if (tc.name == "cleanup-failure" || tc.name == "resolve-cleanup-failure") && len(report.CleanupErrors) == 0 {
+			if (tc.name == "cleanup-failure" || tc.name == "resolve-cleanup-failure" || tc.name == "refresh-cleanup-failure") && len(report.CleanupErrors) == 0 {
 				t.Fatal("cleanup failure not retained")
 			}
 			if tc.name == "attempt-timeout" || tc.name == "provider-failure" {
@@ -856,7 +1154,7 @@ func TestIntakeToContext(t *testing.T) {
 					}
 				}
 			}
-			if resolving && tc.name != "resolve-uncommitted-input" {
+			if (resolving || refreshing) && tc.name != "resolve-uncommitted-input" && tc.name != "refresh-uncommitted-input" {
 				if requests.Load() != acquiredRequests || acquiredRequests == 0 {
 					t.Fatal("resolution repeated HTTP acquisition")
 				}
@@ -870,15 +1168,15 @@ func TestIntakeToContext(t *testing.T) {
 					}
 				}
 			}
-			if tc.name == "resolve-provider-failure" || tc.name == "resolve-timeout" {
+			if tc.name == "resolve-provider-failure" || tc.name == "resolve-timeout" || tc.name == "refresh-provider-failure" || tc.name == "refresh-timeout" {
 				var failure *engine.Failure
 				if !errors.As(report.Failure, &failure) {
 					t.Fatal("resolution lost typed execution failure")
 				}
-				if tc.name == "resolve-provider-failure" && failure.Code != engine.ProviderFailed {
+				if (tc.name == "resolve-provider-failure" || tc.name == "refresh-provider-failure") && failure.Code != engine.ProviderFailed {
 					t.Fatalf("resolution provider failure reclassified: %+v", failure)
 				}
-				if tc.name == "resolve-timeout" && (failure.Code != engine.TimedOut || failure.Origin != engine.OriginAttemptDeadline) {
+				if (tc.name == "resolve-timeout" || tc.name == "refresh-timeout") && (failure.Code != engine.TimedOut || failure.Origin != engine.OriginAttemptDeadline) {
 					t.Fatalf("resolution timeout reclassified: %+v", failure)
 				}
 				for _, a := range report.Snapshot.Attempts {
@@ -888,14 +1186,14 @@ func TestIntakeToContext(t *testing.T) {
 				}
 			}
 			for _, s := range report.Snapshot.Sessions {
-				if s.Role.Name == "triage-intake" && (s.Role.Model.Provider != "fireworks" || s.Role.Model.ID != "accounts/fireworks/models/deepseek-v4p1-flash") {
+				if (s.Role.Name == "triage-intake" || s.Role.Name == "triage-intake-revision") && (s.Role.Model.Provider != "fireworks" || s.Role.Model.ID != "accounts/fireworks/models/deepseek-v4p1-flash") {
 					t.Fatal("mechanical model binding changed")
 				}
 			}
-			if (tc.name == "cancel" || tc.name == "resolve-cancel") && report.Outcome != engine.CancelledState {
+			if (tc.name == "cancel" || tc.name == "resolve-cancel" || tc.name == "refresh-cancel") && report.Outcome != engine.CancelledState {
 				t.Fatal("cancellation swallowed")
 			}
-			if (tc.name == "attempt-cap" || tc.name == "resolve-attempt-cap") && !strings.Contains(fmt.Sprint(report.Failure), "LimitExceeded") {
+			if (tc.name == "attempt-cap" || tc.name == "resolve-attempt-cap" || tc.name == "refresh-attempt-cap") && !strings.Contains(fmt.Sprint(report.Failure), "LimitExceeded") {
 				t.Fatal("hard cap swallowed")
 			}
 		})
