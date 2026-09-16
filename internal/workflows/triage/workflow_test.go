@@ -418,7 +418,6 @@ func resolutionFixture(name, mode string, scope Scope, inputs []contract.Ref, in
 }
 
 func TestIntakeToContext(t *testing.T) {
-	helper := buildAcquisitionHelper(t)
 	for _, tc := range []struct {
 		name    string
 		stages  int
@@ -428,7 +427,7 @@ func TestIntakeToContext(t *testing.T) {
 		{"missing-attachment-size", 1, true, false},
 		{"blank-stack", 3, true, false}, {"blank-pop", 3, true, false}, {"blank-binding", 3, true, false}, {"blank-target", 3, true, false}, {"whitespace-target", 3, true, false},
 		{"duplicate-attachment", 1, true, false}, {"conflicting-attachment", 1, true, false}, {"duplicate-empty-attachment", 1, true, false}, {"null-comment", 1, true, false}, {"http-page-null", 3, false, false},
-		{"http-zip", 3, false, true}, {"http-complete", 3, false, true}, {"http-page-failure", 3, false, false}, {"http-page-total", 3, false, false}, {"http-page-empty", 3, false, false}, {"http-page-offset", 3, false, false}, {"http-page-duplicate", 3, false, false}, {"http-page-short", 3, false, false}, {"http-page-partial", 3, false, false}, {"http-malformed-issue", 3, false, false}, {"http-malformed-fields", 3, false, false}, {"http-linked-failure", 3, false, false}, {"http-attachment-partial", 3, false, false}, {"http-unsafe-zip", 3, false, false}, {"http-oversized", 3, false, false}, {"http-metadata-limit", 3, false, false},
+		{"http-complete", 3, false, true}, {"http-page-failure", 3, false, false}, {"http-page-total", 3, false, false}, {"http-page-empty", 3, false, false}, {"http-page-offset", 3, false, false}, {"http-page-duplicate", 3, false, false}, {"http-page-short", 3, false, false}, {"http-page-partial", 3, false, false}, {"http-malformed-issue", 3, false, false}, {"http-malformed-fields", 3, false, false}, {"http-linked-failure", 3, false, false}, {"http-attachment-partial", 3, false, false}, {"http-unsafe-zip", 3, false, false}, {"http-oversized", 3, false, false}, {"http-metadata-limit", 3, false, false},
 		{"resolve-ready", 3, false, true}, {"resolve-acquisition-gap", 5, false, false},
 		{"resolve-wiki", 5, false, true}, {"resolve-wiki-unavailable", 5, false, true}, {"resolve-wiki-not-run", 5, false, true}, {"resolve-wiki-partial-again", 5, false, false}, {"resolve-repeat", 7, false, true}, {"resolve-time", 4, false, true}, {"resolve-identity", 4, false, true}, {"resolve-ticket-only", 4, false, false},
 		{"resolve-drop-gap", 5, true, false}, {"resolve-foreign-evidence", 5, true, false}, {"resolve-replace-valid-time", 5, true, false}, {"resolve-wrong-previous", 5, true, false}, {"resolve-old-evidence", 5, true, false}, {"resolve-dropped-history", 5, true, false},
@@ -486,21 +485,15 @@ func TestIntakeToContext(t *testing.T) {
 			if acquiring {
 				_, raw := intakeFixture("complete")
 				bundle, mime := raw["bundle"], "text/plain"
-				if tc.name == "http-unsafe-zip" || tc.name == "http-zip" {
+				if tc.name == "http-unsafe-zip" {
 					var archive bytes.Buffer
 					writer := zip.NewWriter(&archive)
-					names := []string{"../escape"}
-					if tc.name == "http-zip" {
-						names = []string{"folder/event.txt", "epoch.txt"}
+					entry, err := writer.Create("../escape")
+					if err != nil {
+						t.Fatal(err)
 					}
-					for _, name := range names {
-						entry, err := writer.Create(name)
-						if err != nil {
-							t.Fatal(err)
-						}
-						if _, err := entry.Write(bundle); err != nil {
-							t.Fatal(err)
-						}
+					if _, err := entry.Write([]byte("unsafe")); err != nil {
+						t.Fatal(err)
 					}
 					if err := writer.Close(); err != nil {
 						t.Fatal(err)
@@ -623,7 +616,7 @@ func TestIntakeToContext(t *testing.T) {
 			def := engine.Definition{Name: "anonymous-triage-slice", Version: "1", Policy: policy, Execute: func(ctx context.Context, run *engine.Run, _ engine.Input) (engine.Result, error) {
 				var err error
 				models := sliceModels{FetchThinking: "high", Analysis: runtime.ModelSpec{Provider: "fixture", ID: "analysis", Thinking: "high"}}
-				result, err = executeSlice(ctx, run, scope, models, helper)
+				result, err = executeSlice(ctx, run, scope, models)
 				if err == nil && resolving {
 					beforeResolution = result
 					if tc.name == "resolve-uncommitted-input" {
@@ -704,15 +697,10 @@ func TestIntakeToContext(t *testing.T) {
 							t.Fatal("intake inputs")
 						}
 						if acquiring {
-							if task.AcquisitionHelper != helper {
-								t.Fatal("helper executable not delivered to intake task")
-							}
-							invokeAcquisitionHelper(t, ctx, helper, e.m.RequestPath, acquisition)
-							var candidate publication[Intake]
-							if err := protocol.ReadJSON(e.m.CandidatePath, &candidate); err != nil {
+							intake, acquiredFiles, err = acquireIntake(ctx, filepath.Dir(e.m.CandidatePath), scope, acquisition)
+							if err != nil {
 								t.Fatal(err)
 							}
-							intake, acquiredFiles = candidate.Data, candidate.Files
 							acquiredRequests = requests.Load()
 						} else {
 							intake, files = intakeFixture(mode)
@@ -723,29 +711,6 @@ func TestIntakeToContext(t *testing.T) {
 							t.Fatal("wiki inputs")
 						}
 						initialIntake = req.Inputs[0]
-						if tc.name == "http-zip" {
-							var p publication[Intake]
-							if err := protocol.ReadJSON(initialIntake.Path, &p); err != nil {
-								t.Fatal(err)
-							}
-							metadata := acquireMetadata(t, filepath.Dir(initialIntake.Path))
-							mapped := map[string]string{}
-							for _, record := range metadata.Records {
-								if record.Kind == "zip-entry" {
-									if record.ArchiveFileID != "bundle" || !hasFile(p.Files, record.Source.FileID) {
-										t.Fatal("committed ZIP mapping lost")
-									}
-									mapped[record.Filename] = record.Source.FileID
-									raw, err := rawFile(ctx, initialIntake, p.Files, record.Source.FileID)
-									if err != nil || string(raw) != "event=sample at 2025-01-02T00:30:00+02:00\n" {
-										t.Fatal("committed extracted bytes changed")
-									}
-								}
-							}
-							if len(mapped) != 2 || mapped["folder/event.txt"] != "extracted" || mapped["epoch.txt"] != "extracted-entry-1" {
-								t.Fatal("committed ZIP inventory incomplete")
-							}
-						}
 						wiki, files = wikiFixture(mode, req.Inputs[0])
 						data = wiki
 					case 3:
@@ -814,7 +779,9 @@ func TestIntakeToContext(t *testing.T) {
 							t.Fatal("noncommitted input")
 						}
 					}
-					if !(acquiring && count == 1) {
+					if acquiring && count == 1 {
+						writeEnvelope(t, e.m, req, data, acquiredFiles)
+					} else {
 						writeCandidate(t, e.m, req, data, files, tc.name == "file-escape")
 					}
 					ack := "settle"

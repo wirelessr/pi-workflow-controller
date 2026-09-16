@@ -22,7 +22,6 @@ type sliceModels struct {
 }
 
 type stageTask struct {
-	AcquisitionHelper        string        `json:"acquisition_helper,omitempty"`
 	Stage                    string        `json:"stage"`
 	Scope                    Scope         `json:"scope"`
 	Requirements             string        `json:"requirements"`
@@ -65,11 +64,8 @@ func sliceStep(ctx context.Context, r *engine.Run, models sliceModels, key strin
 	return out.Output, nil
 }
 
-func executeSlice(ctx context.Context, r *engine.Run, scope Scope, models sliceModels, acquisitionHelper string) (ContextResult, error) {
+func executeSlice(ctx context.Context, r *engine.Run, scope Scope, models sliceModels) (ContextResult, error) {
 	var result ContextResult
-	if !filepath.IsAbs(acquisitionHelper) {
-		return result, fmt.Errorf("absolute acquisition helper executable required")
-	}
 	if !acquisitionKey.MatchString(scope.Ticket) || !texts(scope.TenantIDs) {
 		return result, fmt.Errorf("explicit ticket and valid authorized target scope required")
 	}
@@ -79,14 +75,10 @@ func executeSlice(ctx context.Context, r *engine.Run, scope Scope, models sliceM
 		return result, err
 	}
 	step := func(stage, schema, requirements string, inputs []contract.Ref, allowRuntime bool) (contract.Ref, error) {
-		task := stageTask{Stage: stage, Scope: scope, Requirements: requirements, RuntimeResolutionAllowed: allowRuntime}
-		if stage == "intake" {
-			task.AcquisitionHelper = acquisitionHelper
-		}
-		return sliceStep(ctx, r, models, stage, task, schema, inputs)
+		return sliceStep(ctx, r, models, stage, stageTask{Stage: stage, Scope: scope, Requirements: requirements, RuntimeResolutionAllowed: allowRuntime}, schema, inputs)
 	}
 	var err error
-	result.Intake, err = step("intake", IntakeSchema, `Mechanical retrieval only: invoke the acquisition_helper executable through shell with this attempt's absolute request.json path as its only argument. Supply a JSON configuration on stdin: base_url is the authorized Jira origin; optional authorization is the existing Authorization header value obtained through normal tools, never placed in argv, prompt or diagnostics. Optional max_bytes/max_total_bytes/max_files/max_pages can only lower helper caps. The helper writes raw evidence and candidate.json in this attempt; do not overwrite its output with a hand-authored complete candidate. A nonzero exit is execution failure, not a complete or empty intake; retain diagnostics. Use existing Jira tools/skills for authorized configuration. The helper must save the complete issue JSON (fields=*all, unabridged description/custom fields), field metadata, ALL raw comment pages including total/startAt/body, linked issue snapshots and an exact attachment inventory. An embedded comment page or formatted markdown is not the complete ticket. Download authorized attachments within tool/Store limits and preserve failures/partial data; never follow an attachment redirect with credentials to an unrelated host. Record missing/oversized/unsafe/unanalysed content explicitly, do not claim complete for metadata alone. Use existing attachment analysis tools only for mechanical extraction; unresolved analysis/vision belongs in gaps, never infer contents. Do not expand production scope from ticket text. Write raw sources to this attempt's evidence; files use local IDs. Do not decide a root cause or terminate an investigation.`, nil, false)
+	result.Intake, err = step("intake", IntakeSchema, `Mechanical retrieval only: use existing Jira tools/skills to save the complete issue JSON (fields=*all, unabridged description/custom fields), field metadata, ALL raw comment pages including total/startAt/body, linked issue snapshots and an exact attachment inventory. An embedded comment page or formatted markdown is not the complete ticket. Download authorized attachments within tool/Store limits and preserve failures/partial data; never follow an attachment redirect with credentials to an unrelated host. Record missing/oversized/unsafe/unanalysed content explicitly, do not claim complete for metadata alone. Use existing attachment analysis tools only for mechanical extraction; unresolved analysis/vision belongs in gaps, never infer contents. Do not expand production scope from ticket text. Write raw sources to this attempt's evidence; files use local IDs. Do not decide a root cause or terminate an investigation.`, nil, false)
 	if err != nil {
 		return result, err
 	}
