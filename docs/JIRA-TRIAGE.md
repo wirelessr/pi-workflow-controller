@@ -131,7 +131,23 @@ Private `startPlanner` 從 exact committed supporting context（ready 或 needs-
 - Fresh session 明列上一份完整 Planner state、supporting context 及所有歷史 evidence owners，不靠舊對話、目錄掃描或複製 raw files。成功驗收及 Decision 持久化後才替換 caller 的 last state。無效 contract 或執行失敗使該 caller 停止，不交出失敗 candidate，也不自動 recovery；原始 fatal／取消／限額／cleanup 錯誤仍返回。
 - 匿名 RPC fixtures 覆蓋同 session 多 Step、fresh handoff、revised intake 歷史 owner、supporting query inputs、ready／incomplete、非法 Ref／schema／scope、失敗與會計。這不是正常 Pi 技能操作或指定 GLM live 驗證。
 
-這只是 Planner 接收／保存／交接狀態的局部接線。尚未接自主選擇 supporting remediation、context 改版、workers、容量訊號觸發／timeout recovery、兩輪無進展 reframe、每三 dispatch cycles checkpoint、同版三方驗證或報告。`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。
+`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；調查 workers、容量訊號觸發／timeout recovery、兩輪無進展 reframe、每三 dispatch cycles checkpoint、同版三方驗證與報告仍未實作。
+
+### Planner proposal → 既有 supporting 任務 → 新 Planner state
+
+Planner snapshot 可省略 `supporting_work`，或提出一項結構化工作：`kind`、`reason`、`basis` evidence 及 `sources`。Proposal 綁定該 snapshot 的 exact context 與既有 caller scope，不另接受 model、commands、session 或任意下一節點。`pending` 自由文字仍不是派工授權。
+
+- `resolve`：沿既有任務補必要 wiki 及 unresolved identity/time；要求 needs-resolution context，不是 ready context 上的一般假說蒐證。
+- `refresh`：沿既有 incomplete intake 限制，明列來源 selectors／理由；不能升格完整更新。
+- `update`：完整 intake 更新任務，complete/incomplete 均可；Agent 在任務內自主處理 inventory，`sources` 必須為空，不要求逐項批准。
+
+Private `plannerCaller.support` 只消費最後已驗收 Planner snapshot 的 proposal，重驗 exact committed context、basis owners、任務種類及原有前提，再確認舊 Planner session identity／Wait／cleanup，記錄 Decision 並派送一次既有局部任務。每個 supporting Step 都明列 proposal Ref 與歷史 supporting owners，讓 Agent 讀取理由／basis，實際 acquisition、query 策略與適用性仍由 Agent 處理。Controller 不從 pending、hypothesis assessment 或來源內容猜測應派哪個工作。
+
+完整 supporting context 驗收後記錄結果 Decision，再建立 fresh Planner，交付新 context、原 Planner snapshot 及真正的歷史 evidence owners。接下來成功的 Planner Step 才提交新的完整規劃狀態；Agent 重評假說、問題與 gaps，不自動升格成 verified claim。新 Planner state 的 `previous` 指向提出工作那版 snapshot，`context` 指向該工作產生的直接後繼 context；同 context 的後續規劃仍可重用 session。Fresh handoff 逐版以真正 context 驗 Planner 歷史，不把舊 state／evidence 重綁新版。後續工作須由新 snapshot 再明確提出，舊 caller 不可重複派送。
+
+失敗使 caller 停止並保留 last accepted Planner Ref；中途已提交的 intake/wiki/context 留在 run history，不自動作為 recovery checkpoint。沒有重試或重置同 run 額度，不吞 execution、cancel、fatal、限額與 cleanup failure。`support` 返回 fresh caller 尚不表示已有新 Planner snapshot，仍須成功執行其 `step`。
+
+匿名 localhost HTTP／既有 RPC subprocess 測試涵蓋三種派送、完整與不完整結果、多次 context 改版及 fresh handoff、proposal／selector／Refs 拒絕、歷史 owner、失敗停止與同 run 會計。它們使用真 engine/Store/validators，不是真 Agent skills、指定模型或 live 操作證明。這不是完整 adaptive loop，也未新增 ready context 的一般 logs/metrics 假說蒐證 worker。
 
 ## 驗證與下一步
 
@@ -143,6 +159,6 @@ go test -p 1 -count=1 ./internal/workflows/triage ./internal/runtime ./internal/
 
 完整回歸與發布方法見 [VERIFICATION](VERIFICATION.md)。既有 shared-discovery 的 parent pid／`.recovering`／ownership gate 保留，屬於 runtime 對自有 process 的安全責任，不因 Agent 操作規則採軟性提示而取消。
 
-局部補取、完整任務內 inventory 更新，以及 identity/time supporting-source／query 工作紀錄已有上述 private 匿名切片；下一步仍需 Agent 技能操作的授權 live 驗收，以及最小 Planner caller 之後的受驗收工作派送與 supporting state 更新。不以新增 executable 代替，也不重做已完成 intake 或將第一次缺欄位當作結案。之後逐單元加入 bounded workers、reframe、包含工作結果／feedback 的每 Step 可重建狀態與每三輪 checkpoint、同版三方驗證及 deterministic report。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
+局部補取、完整任務內 inventory 更新，以及 identity/time supporting-source／query 工作紀錄已有上述 private 匿名切片；Planner 已能以受驗收 proposal 派送上述既有 supporting 任務並接回新版規劃狀態。下一步仍需 Agent 技能操作的授權 live 驗收。不以新增 executable 代替，也不重做已完成 intake 或將第一次缺欄位當作結案。之後逐單元加入 bounded workers、reframe、包含工作結果／feedback 的每 Step 可重建狀態與每三輪 checkpoint、同版三方驗證及 deterministic report。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
 
 不提供 OS sandbox、任意 detached 子孫清理、crash resume、exactly-once 或外部副作用 rollback；保留 [DESIGN](../DESIGN.md) 的既有非保證範圍。

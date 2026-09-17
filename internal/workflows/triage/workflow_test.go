@@ -1109,6 +1109,74 @@ func plannerFixture(t *testing.T, mode string, req contract.Request, task stageT
 	return v
 }
 
+// Only the provider chooses the work kind; the Controller consumes the emitted
+// contract, including evidence retained across inventory changes.
+func plannerWorkFixture(t *testing.T, name, kind string, req contract.Request, task stageTask, step int, initial contract.Ref) PlannerState {
+	t.Helper()
+	var current publication[Context]
+	if err := protocol.ReadJSON(req.Inputs[0].Path, &current); err != nil {
+		t.Fatal(err)
+	}
+	v := plannerFixture(t, "", req, task, step, initial)
+	v.Context, v.Gaps = req.Inputs[0], slices.Clone(current.Data.Gaps)
+	v.SupportingWork = nil
+	if step == 1 || (name == "work-repeat" && step == 2) {
+		v.SupportingWork = &SupportingWork{Kind: kind, Reason: "Recheck supporting inputs before further investigation", Basis: []Evidence{{Ref: &initial, FileID: "issue"}}, Sources: []intakeWork{}}
+		if kind == "refresh" {
+			v.SupportingWork.Sources = []intakeWork{{Source: "comment:1", Reason: "missing comment page"}}
+		}
+	}
+	if step > 1 {
+		v.Hypotheses[0].Evidence = []Evidence{{Ref: &initial, FileID: "issue"}}
+		v.Rationale = "Reassessed new supporting context; historical evidence retains its original owner"
+		if name == "work-wrong-result-context" {
+			var prior publication[PlannerState]
+			if err := protocol.ReadJSON(req.Inputs[1].Path, &prior); err != nil {
+				t.Fatal(err)
+			}
+			v.Context = prior.Data.Context
+		}
+		if name == "work-drop-gap" {
+			v.Gaps = []string{}
+		}
+		return v
+	}
+	w := v.SupportingWork
+	switch name {
+	case "work-no-proposal", "work-unproposed-transition":
+		v.SupportingWork = nil
+	case "work-bad-kind":
+		w.Kind = "logs"
+	case "work-blank-reason":
+		w.Reason = " "
+	case "work-no-basis":
+		w.Basis = []Evidence{}
+	case "work-local-basis":
+		w.Basis[0].Ref = nil
+	case "work-foreign-basis", "work-uncommitted-basis":
+		bad := initial
+		if name == "work-foreign-basis" {
+			bad.RunID = "foreign"
+		} else {
+			bad.Path = filepath.Join(filepath.Dir(bad.Path), "candidate.json")
+		}
+		w.Basis[0].Ref = &bad
+	case "work-missing-file":
+		w.Basis[0].FileID = "absent"
+	case "work-refresh-empty":
+		w.Sources = []intakeWork{}
+	case "work-unknown-source":
+		w.Sources[0].Source = "linked:CASE-99"
+	case "work-duplicate-source":
+		w.Sources = append(w.Sources, w.Sources[0])
+	case "work-blank-source-reason":
+		w.Sources[0].Reason = " "
+	case "work-extra-sources":
+		w.Sources = []intakeWork{{Source: "issue", Reason: "not an update approval list"}}
+	}
+	return v
+}
+
 func assertPlannerOutcome(report engine.Report, name string, failed bool, ref, first contract.Ref, expected PlannerState) error {
 	if !failed {
 		var p publication[PlannerState]
@@ -1183,6 +1251,22 @@ func TestIntakeToContext(t *testing.T) {
 		failure bool
 		ready   bool
 	}{
+		{"work-unproposed-transition", 7, true, false}, {"work-skipped-context", 10, true, false},
+		{"work-wrong-task", 7, true, false}, {"work-resolve-changed-intake", 7, true, false}, {"work-refresh-work-mismatch", 7, true, false},
+		{"work-reuse", 9, false, true},
+		{"work-resolve", 7, false, true}, {"work-time", 6, false, true}, {"work-refresh", 8, false, true}, {"work-update", 8, false, true},
+		{"work-update-incomplete", 8, false, true}, {"work-update-partial", 8, false, false}, {"work-ticket-only", 6, false, false},
+		{"work-handoff", 9, false, true}, {"work-repeat", 13, false, true},
+		{"work-no-proposal", 4, true, false}, {"work-bad-kind", 4, true, false}, {"work-blank-reason", 4, true, false}, {"work-no-basis", 4, true, false},
+		{"work-local-basis", 4, true, false}, {"work-foreign-basis", 4, true, false}, {"work-uncommitted-basis", 4, true, false}, {"work-missing-file", 4, true, false},
+		{"work-resolve-ready", 4, true, false}, {"work-refresh-ready", 4, true, false}, {"work-refresh-empty", 4, true, false}, {"work-unknown-source", 4, true, false},
+		{"work-duplicate-source", 4, true, false}, {"work-blank-source-reason", 4, true, false}, {"work-extra-sources", 4, true, false}, {"work-extra-control", 4, true, false},
+		{"work-wrong-result-context", 8, true, false}, {"work-drop-gap", 8, true, false},
+		{"work-worker-provider-failure", 5, true, false}, {"work-worker-timeout", 5, true, false}, {"work-worker-cancel", 5, true, false},
+		{"work-planner-provider-failure", 8, true, false}, {"work-planner-timeout", 8, true, false},
+		{"work-cleanup-failure", 4, true, false}, {"work-worker-cleanup-failure", 5, true, false},
+		{"work-attempt-cap", 4, true, false}, {"work-final-cap", 7, true, false}, {"work-session-cap", 4, true, false},
+		{"work-tamper-proposal", 4, true, false}, {"work-tamper-history", 8, true, false},
 		{"planner-ready", 4, false, true}, {"planner-incomplete", 4, false, false}, {"planner-ticket-only", 4, false, false}, {"planner-empty", 4, false, true}, {"planner-no-evidence", 4, false, true}, {"planner-reuse-handoff", 6, false, true},
 		{"planner-reuse", 5, false, true}, {"planner-handoff", 5, false, true}, {"planner-history", 8, false, true}, {"planner-support", 5, false, true},
 		{"planner-wrong-context", 4, true, false}, {"planner-wrong-previous", 5, true, false}, {"planner-invented-previous", 4, true, false}, {"planner-drop-gap", 4, true, false},
@@ -1234,11 +1318,26 @@ func TestIntakeToContext(t *testing.T) {
 		{"attempt-timeout", 1, true, false}, {"provider-failure", 1, true, false}, {"cancel", 1, true, false}, {"cleanup-failure", 1, true, false}, {"attempt-cap", 1, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			working := strings.HasPrefix(tc.name, "work-")
+			transitionProbe := slices.Contains([]string{"work-unproposed-transition", "work-skipped-context", "work-wrong-task", "work-resolve-changed-intake", "work-refresh-work-mismatch"}, tc.name)
+			workKind, workFixture := "update", "update-replace"
+			switch tc.name {
+			case "work-resolve", "work-time", "work-ticket-only", "work-resolve-ready", "work-resolve-changed-intake":
+				workKind = "resolve"
+			case "work-refresh", "work-refresh-ready", "work-refresh-empty", "work-unknown-source", "work-duplicate-source", "work-blank-source-reason", "work-refresh-work-mismatch":
+				workKind, workFixture = "refresh", "refresh-page"
+			case "work-wrong-task":
+				workKind, workFixture = "refresh", "update-page"
+			case "work-update-partial", "work-drop-gap":
+				workFixture = "update-partial"
+			case "work-update-incomplete":
+				workFixture = "update-page"
+			}
 			supporting := strings.HasPrefix(tc.name, "support-")
-			resolving := strings.HasPrefix(tc.name, "resolve-") || strings.HasPrefix(tc.name, "support-resolve-")
-			refreshing := strings.HasPrefix(tc.name, "refresh-")
-			planning := strings.HasPrefix(tc.name, "planner-")
-			updating := strings.HasPrefix(tc.name, "update-") || tc.name == "planner-history"
+			resolving := strings.HasPrefix(tc.name, "resolve-") || strings.HasPrefix(tc.name, "support-resolve-") || (working && workKind == "resolve")
+			refreshing := strings.HasPrefix(tc.name, "refresh-") || (working && workKind == "refresh")
+			planning := strings.HasPrefix(tc.name, "planner-") || working
+			updating := strings.HasPrefix(tc.name, "update-") || tc.name == "planner-history" || (working && workKind == "update") || tc.name == "work-wrong-task" || tc.name == "work-resolve-changed-intake"
 			revising := refreshing || updating
 			acquiring := (resolving && !supporting) || revising || strings.HasPrefix(tc.name, "http-")
 			mode := tc.name
@@ -1282,6 +1381,17 @@ func TestIntakeToContext(t *testing.T) {
 					mode = "wiki-partial"
 				}
 				if tc.name == "planner-ticket-only" {
+					mode = "ticket-only"
+				}
+			}
+			if working {
+				mode = "complete"
+				switch tc.name {
+				case "work-resolve", "work-resolve-changed-intake":
+					mode = "wiki-partial"
+				case "work-time":
+					mode = "time-unresolved"
+				case "work-ticket-only":
 					mode = "ticket-only"
 				}
 			}
@@ -1339,6 +1449,12 @@ func TestIntakeToContext(t *testing.T) {
 				if tc.name == "refresh-attachment" || tc.name == "update-retain-gap" || tc.name == "update-drop-gap" || tc.name == "update-resolve-gap" {
 					httpMode = "attachment-partial"
 				}
+				if working && (tc.name == "work-update-incomplete" || (workKind == "refresh" && tc.name != "work-refresh-ready")) {
+					httpMode = "page-failure"
+				}
+				if tc.name == "work-refresh-ready" {
+					httpMode = "complete"
+				}
 				server := acquireFixture(t, httpMode, bundle, mime, func(*http.Request) { requests.Add(1) })
 				acquisition = acquisitionOptions{BaseURL: server.URL}
 				if refreshing {
@@ -1370,7 +1486,11 @@ func TestIntakeToContext(t *testing.T) {
 					revisionURL = revisionServer.URL
 				}
 				if updating {
-					revisionURL = updateHTTPFixture(t, tc.name, func(*http.Request) { newRequests.Add(1) }).URL
+					name := tc.name
+					if working {
+						name = workFixture
+					}
+					revisionURL = updateHTTPFixture(t, name, func(*http.Request) { newRequests.Add(1) }).URL
 				}
 				if tc.name == "http-oversized" {
 					acquisition.MaxBytes = 8192
@@ -1466,10 +1586,13 @@ func TestIntakeToContext(t *testing.T) {
 			if tc.name == "resolve-attempt-cap" || tc.name == "refresh-attempt-cap" || tc.name == "update-attempt-cap" || tc.name == "support-resolve-attempt-cap" {
 				policy.MaxTotalAttempts = 3
 			}
-			if tc.name == "planner-attempt-cap" {
+			if tc.name == "planner-attempt-cap" || tc.name == "work-attempt-cap" {
 				policy.MaxTotalAttempts = 4
 			}
-			if tc.name == "planner-session-cap" {
+			if tc.name == "work-final-cap" {
+				policy.MaxTotalAttempts = 7
+			}
+			if tc.name == "planner-session-cap" || tc.name == "work-session-cap" {
 				policy.MaxTotalSessions = 4
 				policy.MaxLiveSessions = 4
 			}
@@ -1489,7 +1612,7 @@ func TestIntakeToContext(t *testing.T) {
 				var err error
 				models := sliceModels{FetchThinking: "high", Analysis: runtime.ModelSpec{Provider: "fixture", ID: "analysis", Thinking: "high"}}
 				result, err = executeSlice(ctx, run, scope, models)
-				if err == nil && resolving {
+				if err == nil && resolving && !working {
 					beforeResolution = result
 					if tc.name == "resolve-uncommitted-input" {
 						result.Context.Path = filepath.Join(filepath.Dir(result.Context.Path), "candidate.json")
@@ -1499,7 +1622,7 @@ func TestIntakeToContext(t *testing.T) {
 						result, err = resolveSlice(ctx, run, scope, models, result)
 					}
 				}
-				if err == nil && revising {
+				if err == nil && revising && !working {
 					beforeResolution = result
 					if tc.name == "refresh-uncommitted-input" || tc.name == "update-uncommitted-input" {
 						result.Context.Path = filepath.Join(filepath.Dir(result.Context.Path), "candidate.json")
@@ -1547,11 +1670,75 @@ func TestIntakeToContext(t *testing.T) {
 					if tc.name == "planner-wrong-scope" {
 						plannerScope.Pop = "other-pop"
 					}
+					if working {
+						beforeResolution = result
+					}
 					var planner *plannerCaller
 					planner, err = startPlanner(ctx, run, plannerScope, model, input)
 					if err == nil {
 						plannerRef, err = planner.step(ctx)
 						firstPlannerRef = plannerRef
+					}
+					if err == nil && transitionProbe {
+						err = planner.close(ctx)
+						other := result
+						if err == nil && tc.name == "work-refresh-work-mismatch" {
+							other, err = refreshSlice(ctx, run, scope, models, other, []intakeWork{{Source: "comment:1", Reason: "missing comment page"}, {Source: "attachment-content:a1", Reason: "separate caller task"}, {Source: "attachment-analysis:a1", Reason: "mechanical extraction"}})
+						} else if err == nil {
+							other, err = updateSlice(ctx, run, scope, models, other)
+						}
+						if err == nil && tc.name == "work-skipped-context" {
+							other, err = updateSlice(ctx, run, scope, models, other)
+						}
+						if err == nil {
+							sessions := len(run.Snapshot().Sessions)
+							_, err = openPlanner(ctx, run, scope, model, other.Context, &plannerRef)
+							if err == nil || len(run.Snapshot().Sessions) != sessions {
+								t.Error("unapproved context transition opened a Planner session")
+							}
+						}
+					}
+					if err == nil && working {
+						if tc.name == "work-tamper-proposal" {
+							err = os.WriteFile(plannerRef.Path, []byte("{}"), 0600)
+						}
+						cycles := 1
+						if tc.name == "work-repeat" {
+							cycles = 2
+						}
+						for cycle := 0; cycle < cycles && err == nil; cycle++ {
+							var next *plannerCaller
+							next, err = planner.support(ctx, models)
+							if err == nil {
+								if _, reused := planner.support(ctx, models); reused == nil {
+									t.Error("consumed supporting proposal was dispatched twice")
+								}
+								planner = next
+								var accepted contract.Ref
+								accepted, err = planner.step(ctx)
+								if err == nil {
+									plannerRef = accepted
+								}
+							}
+						}
+						if err == nil && tc.name == "work-reuse" {
+							plannerRef, err = planner.step(ctx)
+						}
+						if err == nil && tc.name == "work-tamper-history" {
+							err = os.WriteFile(firstPlannerRef.Path, []byte("{}"), 0600)
+						}
+						if err == nil && (tc.name == "work-handoff" || tc.name == "work-repeat" || tc.name == "work-tamper-history") {
+							var next *plannerCaller
+							next, err = planner.handoff(ctx)
+							if err == nil {
+								planner = next
+								plannerRef, err = planner.step(ctx)
+							}
+						}
+						if err == nil {
+							h := planner.history
+							result = ContextResult{Intake: h.value.Intake, Wiki: h.value.Wiki, Context: h.ref, Ready: h.value.Readiness == "ready"}
+						}
 					}
 					if err == nil && tc.name == "planner-tampered-handoff" {
 						// Filesystem boundary corruption must be detected before launch.
@@ -1587,6 +1774,9 @@ func TestIntakeToContext(t *testing.T) {
 						if _, stopped := planner.step(ctx); stopped == nil || !strings.Contains(stopped.Error(), "planner session is stopped") {
 							t.Error("failed Planner caller allowed another Step")
 						}
+						if _, stopped := planner.support(ctx, models); stopped == nil || !strings.Contains(stopped.Error(), "supporting dispatch requires") {
+							t.Error("failed Planner caller allowed supporting work")
+						}
 						if _, stopped := planner.handoff(ctx); stopped == nil || !strings.Contains(stopped.Error(), "planner handoff requires") {
 							t.Error("failed Planner caller allowed handoff")
 						}
@@ -1603,7 +1793,7 @@ func TestIntakeToContext(t *testing.T) {
 				return engine.Result{Outputs: outputs}, err
 			}}
 			var transport runtime.Runtime = pi
-			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" || tc.name == "planner-timeout" {
+			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" || tc.name == "planner-timeout" || tc.name == "work-worker-timeout" || tc.name == "work-planner-timeout" {
 				transport = deadlineRuntime{pi}
 			}
 			r, err = engine.New(ctx, def, engine.Input{Prompt: "CASE-17", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
@@ -1663,9 +1853,33 @@ func TestIntakeToContext(t *testing.T) {
 					if !reflect.DeepEqual(task.Scope, scope) {
 						t.Fatal("scope not in prompt")
 					}
+					if working && !transitionProbe && count > 4 && task.Stage != "planner" {
+						if task.SupportingProposal == nil || !slices.Contains(req.Inputs, *task.SupportingProposal) {
+							t.Fatal("supporting task lost exact proposal input")
+						}
+						var latest contract.Ref
+						var seq uint64
+						for _, attempt := range r.Snapshot().Attempts {
+							if attempt.Output != nil && attempt.Output.SchemaID == PlannerSchema && attempt.State == engine.Succeeded && attempt.LastSeq > seq {
+								latest, seq = *attempt.Output, attempt.LastSeq
+							}
+						}
+						if *task.SupportingProposal != latest {
+							t.Fatal("supporting task received a stale proposal instead of the latest accepted Planner Ref")
+						}
+						var proposal publication[PlannerState]
+						if err := protocol.ReadJSON(task.SupportingProposal.Path, &proposal); err != nil {
+							t.Fatal(err)
+						}
+						if proposal.Data.SupportingWork == nil || proposal.Data.SupportingWork.Kind != workKind {
+							t.Fatal("supporting dispatch differs from accepted proposal")
+						}
+					}
 					if task.Stage != "planner" {
 						for _, ref := range req.Inputs {
-							observedSupportingRefs[ref] = true
+							if ref.SchemaID != PlannerSchema {
+								observedSupportingRefs[ref] = true
+							}
 						}
 					}
 					var data any
@@ -1725,14 +1939,22 @@ func TestIntakeToContext(t *testing.T) {
 									t.Fatalf("planner did not receive historical supporting owner %s/%s", ref.SchemaID, ref.AttemptID)
 								}
 							}
-							expectedPlanner = plannerFixture(t, tc.name, req, task, plannerSteps, initialIntake)
+							if working {
+								expectedPlanner = plannerWorkFixture(t, tc.name, workKind, req, task, plannerSteps, initialIntake)
+							} else {
+								expectedPlanner = plannerFixture(t, tc.name, req, task, plannerSteps, initialIntake)
+							}
 							data = expectedPlanner
-							if tc.name == "planner-extra-control" {
+							if tc.name == "planner-extra-control" || tc.name == "work-extra-control" {
 								var extra map[string]any
 								if err := json.Unmarshal(testJSON(data), &extra); err != nil {
 									t.Fatal(err)
 								}
-								extra["model"] = "agent-selected-model"
+								if working {
+									extra["supporting_work"].(map[string]any)["model"] = "agent-selected-model"
+								} else {
+									extra["model"] = "agent-selected-model"
+								}
 								data = extra
 							}
 							break
@@ -1744,7 +1966,11 @@ func TestIntakeToContext(t *testing.T) {
 									t.Fatal("update turned into per-source dispatch")
 								}
 								var fetched int32
-								intake, files, fetched = refreshIntakeFixture(t, ctx, tc.name, count, req.Inputs, task, revisionURL)
+								name := tc.name
+								if working {
+									name = workFixture
+								}
+								intake, files, fetched = refreshIntakeFixture(t, ctx, name, count, req.Inputs, task, revisionURL)
 								refreshRequests += fetched
 								if task.Stage == "intake-update" && count == 4 && (tc.name == "update-add" || tc.name == "update-replace") && fetched != 3 {
 									t.Fatal("new issue/link/attachment were not acquired in one Step")
@@ -1911,17 +2137,36 @@ func TestIntakeToContext(t *testing.T) {
 							r.Cancel(engine.OriginControllerUser)
 						}
 					}
-					if tc.name == "provider-failure" || ((resolving || revising) && strings.HasSuffix(tc.name, "-provider-failure") && count == 4) {
+					if !working && (tc.name == "provider-failure" || ((resolving || revising) && strings.HasSuffix(tc.name, "-provider-failure") && count == 4)) {
 						ack = "provider-error"
 					}
-					if tc.name == "attempt-timeout" || ((resolving || revising) && strings.HasSuffix(tc.name, "-timeout") && count == 4) {
+					if !working && (tc.name == "attempt-timeout" || ((resolving || revising) && strings.HasSuffix(tc.name, "-timeout") && count == 4)) {
 						ack = "hold"
 					}
-					if tc.name == "cancel" || ((resolving || revising) && strings.HasSuffix(tc.name, "-cancel") && count == 4) {
+					if !working && (tc.name == "cancel" || ((resolving || revising) && strings.HasSuffix(tc.name, "-cancel") && count == 4)) {
 						ack = "hold"
 						r.Cancel(engine.OriginControllerUser)
 					}
-					if tc.name == "cleanup-failure" || ((resolving || revising || planning) && strings.HasSuffix(tc.name, "-cleanup-failure") && count == 4) {
+					workFailureAt := 5
+					if strings.HasPrefix(tc.name, "work-planner-") {
+						workFailureAt = 8
+					}
+					if working && count == workFailureAt {
+						switch {
+						case strings.HasSuffix(tc.name, "-provider-failure"):
+							ack = "provider-error"
+						case strings.HasSuffix(tc.name, "-timeout"):
+							ack = "hold"
+						case strings.HasSuffix(tc.name, "-cancel"):
+							ack = "hold"
+							r.Cancel(engine.OriginControllerUser)
+						}
+					}
+					cleanupAt := 4
+					if tc.name == "work-worker-cleanup-failure" {
+						cleanupAt = 5
+					}
+					if tc.name == "cleanup-failure" || ((resolving || revising || planning) && strings.HasSuffix(tc.name, "-cleanup-failure") && count == cleanupAt) {
 						for sid := range hellos {
 							path := filepath.Join(bridge, sid+".json")
 							if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -1962,7 +2207,65 @@ func TestIntakeToContext(t *testing.T) {
 			if (tc.name == "support-resolve-dropped-history" || tc.name == "support-resolve-altered-query" || tc.name == "support-resolve-retag-basis") && !strings.Contains(fmt.Sprint(report.Failure), "context revision dropped resolution history") {
 				t.Fatalf("wrong rejection for dropped query history: %v", report.Failure)
 			}
-			if planning {
+			if working {
+				wantError := map[string]string{
+					"work-unproposed-transition":  "planner context change requires prior supporting proposal and direct context successor",
+					"work-skipped-context":        "planner context change requires prior supporting proposal and direct context successor",
+					"work-wrong-task":             "supporting result differs from proposed intake task",
+					"work-refresh-work-mismatch":  "supporting result differs from proposed intake task",
+					"work-resolve-changed-intake": "supporting resolve result changed intake or wiki task binding",
+					"work-no-proposal":            "structured supporting_work",
+					"work-bad-kind":               "ContractInvalid",
+					"work-blank-reason":           "supporting work requires reason and basis",
+					"work-no-basis":               "supporting work requires reason and basis",
+					"work-local-basis":            "supporting work basis must name an exact supporting input owner/file",
+					"work-foreign-basis":          "supporting work basis must name an exact supporting input owner/file",
+					"work-uncommitted-basis":      "supporting work basis must name an exact supporting input owner/file",
+					"work-missing-file":           "supporting work basis must name an exact supporting input owner/file",
+					"work-resolve-ready":          "supporting resolve requires needs-resolution context",
+					"work-refresh-ready":          "local intake revision requires incomplete intake and explicit work",
+					"work-refresh-empty":          "local intake revision requires incomplete intake and explicit work",
+					"work-unknown-source":         "unknown source work selector",
+					"work-duplicate-source":       "source work requires unique selectors and reasons",
+					"work-blank-source-reason":    "source work requires unique selectors and reasons",
+					"work-extra-sources":          "only refresh accepts source selectors",
+					"work-extra-control":          "ContractInvalid",
+					"work-wrong-result-context":   "planner context/previous mismatch",
+					"work-drop-gap":               "planning cannot remove supporting context gaps",
+					"work-attempt-cap":            "LimitExceeded", "work-final-cap": "LimitExceeded", "work-session-cap": "LimitExceeded",
+					"work-tamper-proposal": "ReferenceInvalid", "work-tamper-history": "ReferenceInvalid",
+				}[tc.name]
+				if wantError != "" && !strings.Contains(fmt.Sprint(report.Failure), wantError) {
+					t.Fatalf("supporting failure missing %q: %v", wantError, report.Failure)
+				}
+				if !tc.failure {
+					var state, first publication[PlannerState]
+					if err := protocol.ReadJSON(plannerRef.Path, &state); err != nil {
+						t.Fatal(err)
+					}
+					if err := protocol.ReadJSON(firstPlannerRef.Path, &first); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(state.Data, expectedPlanner) || state.Data.Context != result.Context || first.Data.Context != beforeResolution.Context || state.Data.Context == first.Data.Context || state.Data.SupportingWork != nil {
+						t.Fatal("supporting work lost planning state/context binding or replayed consumed proposal")
+					}
+					if state.Data.Hypotheses[0].Evidence[0].Ref == nil || *state.Data.Hypotheses[0].Evidence[0].Ref != initialIntake || !slices.Contains(state.Data.Pending[0].Requirements, "Preserve the prior question when handing off") {
+						t.Fatal("supporting work lost historical owners or planning questions")
+					}
+					for _, session := range report.Snapshot.Sessions {
+						if session.Role.Name == "triage-planner" && session.Role.Model != (runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}) {
+							t.Fatal("supporting handoff changed planner model")
+						}
+					}
+				}
+				if plannerRef.AttemptID != "" {
+					accepted := report.Snapshot.Attempts[plannerRef.AttemptID]
+					if accepted.State != engine.Succeeded || accepted.Output == nil || *accepted.Output != plannerRef {
+						t.Fatal("supporting failure lost last accepted Planner state")
+					}
+				}
+			}
+			if planning && !working {
 				if err := assertPlannerOutcome(report, tc.name, tc.failure, plannerRef, firstPlannerRef, expectedPlanner); err != nil {
 					t.Fatal(err)
 				}
@@ -1972,7 +2275,7 @@ func TestIntakeToContext(t *testing.T) {
 			}
 			if !tc.failure {
 				sessions := tc.stages
-				if tc.name == "planner-reuse" || tc.name == "planner-reuse-handoff" {
+				if tc.name == "planner-reuse" || tc.name == "planner-reuse-handoff" || tc.name == "work-reuse" {
 					sessions--
 				}
 				if result.Ready != tc.ready || result.Context.RunID != result.Intake.RunID || len(report.Snapshot.Attempts) != tc.stages || len(report.Snapshot.Sessions) != sessions {

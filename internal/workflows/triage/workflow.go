@@ -28,6 +28,7 @@ type stageTask struct {
 	RuntimeResolutionAllowed bool          `json:"runtime_resolution_allowed"`
 	Previous                 *contract.Ref `json:"previous,omitempty"`
 	Gaps                     []string      `json:"gaps,omitempty"`
+	SupportingProposal       *contract.Ref `json:"supporting_proposal,omitempty"`
 	SourceWork               []intakeWork  `json:"source_work,omitempty"`
 	ResolutionKinds          []string      `json:"resolution_kinds,omitempty"`
 }
@@ -53,6 +54,10 @@ func sliceStep(ctx context.Context, r *engine.Run, models sliceModels, key strin
 	}
 	if schema == ContextSchema {
 		task.Requirements += "\n\n" + supportingResolutionRequirements
+	}
+	if task.SupportingProposal != nil {
+		inputs = append(inputs, *task.SupportingProposal)
+		task.Requirements += "\n\nRead the exact supporting_proposal Planner input for the accepted supporting_work reason and basis. Perform this stage of that task within the supplied scope and completion conditions. Other pending text and hypotheses are planning context, not additional dispatch authorization."
 	}
 	prompt, err := json.Marshal(task)
 	if err != nil {

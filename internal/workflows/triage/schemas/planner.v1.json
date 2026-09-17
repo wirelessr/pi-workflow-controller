@@ -5,6 +5,28 @@
   "additionalProperties": false,
   "required": ["context", "previous", "hypotheses", "pending", "gaps", "rationale"],
   "properties": {
+    "supporting_work": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reason", "basis", "sources"],
+      "properties": {
+        "kind": {"enum": ["resolve", "refresh", "update"]},
+        "reason": {"type": "string"},
+        "basis": {"type": "array", "items": {"$ref": "common.v1.json#/$defs/evidence"}},
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "reason"],
+            "properties": {
+              "source": {"type": "string"},
+              "reason": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
     "context": {"$ref": "common.v1.json#/$defs/ref"},
     "previous": {
       "anyOf": [{"$ref": "common.v1.json#/$defs/ref"}, {"type": "null"}]

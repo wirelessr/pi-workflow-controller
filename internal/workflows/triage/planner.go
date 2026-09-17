@@ -19,12 +19,13 @@ const PlannerSchema = "triage.planner.v1"
 // dispatch authorization, verified claim, report or crash-resume checkpoint.
 // Assessments and requirements are agent reasoning, never Go verdicts.
 type PlannerState struct {
-	Context    contract.Ref        `json:"context"`
-	Previous   *contract.Ref       `json:"previous"`
-	Hypotheses []PlannerHypothesis `json:"hypotheses"`
-	Pending    []PlannerQuestion   `json:"pending"`
-	Gaps       []string            `json:"gaps"`
-	Rationale  string              `json:"rationale"`
+	Context        contract.Ref        `json:"context"`
+	Previous       *contract.Ref       `json:"previous"`
+	Hypotheses     []PlannerHypothesis `json:"hypotheses"`
+	Pending        []PlannerQuestion   `json:"pending"`
+	Gaps           []string            `json:"gaps"`
+	Rationale      string              `json:"rationale"`
+	SupportingWork *SupportingWork     `json:"supporting_work,omitempty"`
 }
 
 type PlannerHypothesis struct {
@@ -40,11 +41,12 @@ type PlannerQuestion struct {
 	Basis        []Evidence `json:"basis"`
 }
 
-const plannerRequirements = `Read the exact committed supporting context and all needed evidence owners in request.inputs. This task only plans from those inputs; it does not dispatch workers, perform new acquisition or produce a final report. Load relevant existing skills for interpretation. If previous is supplied, reconstruct the current decision state from that committed Planner snapshot and its explicit inputs, not session memory, directory scans or other tasks' history. Submit a full current snapshot, not a delta: context, exact previous (null initially), hypotheses with stable IDs, statements, assessments and evidence refs, pending questions with concrete evidence requirements and basis refs, remaining gaps, and rationale explaining the current direction and any changes. Empty hypothesis/evidence lists are legitimate when prerequisites or evidence are missing; do not invent support. Keep supporting-context gaps visible: planning alone does not resolve them. Judge evidence applicability yourself and preserve true owners; cite only supplied committed ref+file_id, not local copies or invented files. Preserve partial/unavailable supporting-query limitations; small-window empty results and execution timeout are not incident-wide disproof. Ready context is not confirmed root cause, wiki patterns and model agreement are not runtime proof. Hypotheses/assessments remain unverified planning, not accepted claims. Pending work is a proposal, not permission to execute commands or select models, sessions or next workflow nodes. No drafts, publication, wiki write-back or final selection.`
+const plannerRequirements = `Read the exact committed supporting context and all needed evidence owners in request.inputs. This task only plans from those inputs; it does not dispatch workers, perform new acquisition or produce a final report. Load relevant existing skills for interpretation. If previous is supplied, reconstruct the current decision state from that committed Planner snapshot and its explicit inputs, not session memory, directory scans or other tasks' history. Submit a full current snapshot, not a delta: context, exact previous (null initially), hypotheses with stable IDs, statements, assessments and evidence refs, pending questions with concrete evidence requirements and basis refs, remaining gaps, and rationale explaining the current direction and any changes. Empty hypothesis/evidence lists are legitimate when prerequisites or evidence are missing; do not invent support. Keep supporting-context gaps visible: planning alone does not resolve them. Judge evidence applicability yourself and preserve true owners; cite only supplied committed ref+file_id, not local copies or invented files. Preserve partial/unavailable supporting-query limitations; small-window empty results and execution timeout are not incident-wide disproof. Ready context is not confirmed root cause, wiki patterns and model agreement are not runtime proof. Hypotheses/assessments remain unverified planning, not accepted claims. Pending free text is not dispatch authorization. To request one existing supporting task, optionally submit supporting_work with kind (resolve, refresh or update), reason, basis citing supplied committed evidence, and sources (nonempty selectors/reasons only for refresh, empty for the other kinds). Resolve remedies required wiki and unresolved identity/time on a needs-resolution context; it is not general hypothesis evidence acquisition. Refresh is narrow source work on incomplete intake. Update authorizes the complete intake update task, including agent-directed inventory changes, not per-source approvals. The Controller validates and dispatches the proposed task; do not execute it yourself or select commands, models or sessions. A changed context is the result of the previous snapshot's supporting_work; read that snapshot and new context, reassess planning yourself, and explicitly propose any further task rather than blindly copying consumed work. No drafts, publication, wiki write-back or final selection.`
 
 // plannerCaller keeps one session across successful planning Steps. The only
 // fresh-session continuation here closes and verifies the old owner first.
-// Worker dispatch, context revision and failure recovery are separate units.
+// Supporting work uses the existing local tasks; investigation workers and
+// failure recovery remain separate units.
 type plannerCaller struct {
 	r       *engine.Run
 	scope   Scope
@@ -82,10 +84,24 @@ func openPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime.
 	}
 	var prior *contract.Ref
 	for i := len(chain) - 1; i >= 0; i-- {
-		if err := checkPlanner(ctx, r, chain[i], h, prior); err != nil {
+		state, err := read[PlannerState](ctx, r, chain[i], PlannerSchema)
+		if err != nil {
+			return nil, err
+		}
+		owner := h
+		if state.Data.Context != h.ref {
+			owner, err = loadContextHistory(ctx, r, scope, state.Data.Context)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if err := checkPlanner(ctx, r, chain[i], owner, prior); err != nil {
 			return nil, err
 		}
 		prior = &chain[i]
+	}
+	if err := checkPlannerContextChange(ctx, r, h, prior); err != nil {
+		return nil, err
 	}
 	handle, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-planner", Model: model, CWD: filepath.Join(r.Dir(), "triage-work")})
 	if err != nil {
@@ -102,6 +118,9 @@ func checkPlanner(ctx context.Context, r *engine.Run, ref contract.Ref, h contex
 	v := p.Data
 	if v.Context != h.ref || (v.Previous == nil) != (previous == nil) || (previous != nil && *v.Previous != *previous) {
 		return fmt.Errorf("planner context/previous mismatch")
+	}
+	if err := checkPlannerContextChange(ctx, r, h, previous); err != nil {
+		return err
 	}
 	if !nonblank(v.Rationale) || !texts(v.Gaps) {
 		return fmt.Errorf("planner requires rationale and nonblank gaps")
@@ -137,7 +156,7 @@ func checkPlanner(ctx context.Context, r *engine.Run, ref contract.Ref, h contex
 			return err
 		}
 	}
-	return nil
+	return checkSupportingWork(ctx, r, h, v.SupportingWork)
 }
 
 func (p *plannerCaller) step(ctx context.Context) (contract.Ref, error) {
