@@ -19,11 +19,15 @@ Agent 負責：
 
 Planner Agent 可以提出下一步工作；Controller 依已批准的 contract、scope、Refs、預算與轉移規則驗收後派工。這不是把任意程式、模型或下一節點的控制權交給 Agent。
 
+派工以完整任務為單位，不把任務內的領域操作拆成 Controller 的微型審批流程。在已授權 scope、角色與完成條件內，Agent 自主選擇工具、處理新發現的來源並回報實際工作、結果與缺項；不能只因發現新附件或 linked issue，就要求先停止、提交申請再由 Controller 批准取得。超出授權範圍、需要其他角色或後續 Step 時，才由 Controller 接續派工。明確的局部補取可以保留為窄任務，但不能成為所有更新工作的唯一形式。
+
 ## 二、版本驗收不等於領域認列
 
 - Exact 引用舊 evidence，不等於冒充新版 evidence。保留真正 owner 與歷史 binding；不得因為來源較舊就一律拒絕，也不得把舊產物重新標成新版取得或驗證。
 - Controller 驗來源／版本／ownership、結構與既定完成條件；不自行判斷歷史 wiki 內容、facts 或時間證據能否支持新的領域結論。
 - 不新增依 evidence schema、fact status 等條件替 Agent 認列內容的規則，例如 validFacts、validAnchors、retainedConfirmed。必要的領域判讀應成為 Agent 工作及可追溯的輸出。
+- Inventory 增刪與來源更新由 Agent 在任務內處理；Controller 接版本、exact ownership、歷史及下游 dependencies，不強制 Agent 宣告領域上的 old → new 替換關係，也不從名稱、大小或內容猜測它。新版來源不自動證明舊分析失效，不因來源更新就強制另派 analysis；Agent 判斷適用性，歷史產物保持真正 binding，不冒充新版取得或分析。
+- 來源移除不自動關閉調查缺口；Agent 決定保留缺口或依既有 contract 交代其不再適用。沿用既有 gap／evidence 驗收，不為 inventory 接線另造領域狀態分類，也不將 gap 已交代誤認為資料已取得。
 - 此界線不授權刪除既有已批准的 contracts／驗收，包括 completeness、scope、receipt、UTC 算術與 Ref 檢查。新增接線若碰到限制，先指出具體衝突與必要最小改動，不以憲法為由大刪或重構。
 
 ## 三、沿用工具，不把移植變成工具重造
