@@ -1030,6 +1030,152 @@ func supportingContextFixture(t *testing.T, ctx context.Context, base, name stri
 	return v, files
 }
 
+func plannerFixture(t *testing.T, mode string, req contract.Request, task stageTask, step int, initialIntake contract.Ref) PlannerState {
+	t.Helper()
+	var supporting publication[Context]
+	if len(req.Inputs) < 3 || req.Inputs[0].SchemaID != ContextSchema {
+		t.Fatal("planner lost supporting context")
+	}
+	if err := protocol.ReadJSON(req.Inputs[0].Path, &supporting); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(task.Gaps, supporting.Data.Gaps) {
+		t.Fatal("planner lost supporting gaps")
+	}
+	basis := supporting.Data.Observations[0].Evidence[0]
+	if basis.Ref == nil {
+		basis.Ref = &req.Inputs[0]
+	}
+	if mode == "planner-history" {
+		if supporting.Data.Intake == initialIntake || !slices.Contains(req.Inputs, initialIntake) {
+			t.Fatal("planner lost the original intake owner after revision")
+		}
+		basis = Evidence{Ref: &initialIntake, FileID: "issue"}
+	}
+	v := PlannerState{Context: req.Inputs[0], Hypotheses: []PlannerHypothesis{{ID: "h1", Statement: "A request may have stalled", Assessment: "Unverified; compare runtime evidence", Evidence: []Evidence{basis}}}, Pending: []PlannerQuestion{{Question: "Where did the request stop?", Requirements: []string{"Correlate the same request across authorized sources"}, Basis: []Evidence{basis}}}, Gaps: slices.Clone(supporting.Data.Gaps), Rationale: "Preserve prerequisites before choosing evidence work"}
+	if step == 1 {
+		if task.Previous != nil {
+			t.Fatal("initial planner invented prior state")
+		}
+	} else {
+		if task.Previous == nil || len(req.Inputs) < 4 || *task.Previous != req.Inputs[1] {
+			t.Fatal("planner continuation lost exact prior state")
+		}
+		var prior publication[PlannerState]
+		if err := protocol.ReadJSON(req.Inputs[1].Path, &prior); err != nil {
+			t.Fatal(err)
+		}
+		v = prior.Data
+		v.Previous = &req.Inputs[1]
+		v.Rationale += "; continued from committed snapshot"
+		v.Pending[0].Requirements = append(v.Pending[0].Requirements, "Preserve the prior question when handing off")
+	}
+	switch mode {
+	case "planner-empty":
+		v.Hypotheses, v.Pending = []PlannerHypothesis{}, []PlannerQuestion{}
+	case "planner-no-evidence":
+		v.Hypotheses[0].Evidence, v.Pending[0].Basis = []Evidence{}, []Evidence{}
+	case "planner-wrong-context":
+		v.Context = supporting.Data.Intake
+	case "planner-wrong-previous":
+		if step == 2 {
+			v.Previous = nil
+		}
+	case "planner-invented-previous":
+		v.Previous = &req.Inputs[0]
+	case "planner-drop-gap":
+		v.Gaps = []string{}
+	case "planner-foreign-evidence", "planner-uncommitted-evidence":
+		bad := *basis.Ref
+		if mode == "planner-foreign-evidence" {
+			bad.RunID = "foreign"
+		} else {
+			bad.Path = filepath.Join(filepath.Dir(bad.Path), "candidate.json")
+		}
+		v.Hypotheses[0].Evidence[0].Ref = &bad
+	case "planner-local-evidence":
+		v.Hypotheses[0].Evidence[0].Ref = nil
+	case "planner-missing-file":
+		v.Pending[0].Basis[0].FileID = "not-an-input-file"
+	case "planner-duplicate-id":
+		v.Hypotheses = append(v.Hypotheses, v.Hypotheses[0])
+	case "planner-blank-assessment":
+		v.Hypotheses[0].Assessment = " "
+	case "planner-blank-rationale":
+		v.Rationale = " "
+	case "planner-empty-requirements":
+		v.Pending[0].Requirements = []string{}
+	}
+	return v
+}
+
+func assertPlannerOutcome(report engine.Report, name string, failed bool, ref, first contract.Ref, expected PlannerState) error {
+	if !failed {
+		var p publication[PlannerState]
+		if err := protocol.ReadJSON(ref.Path, &p); err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(p.Data, expected) {
+			return fmt.Errorf("planner snapshot lost decision state")
+		}
+		if ref != first {
+			firstAttempt, lastAttempt := report.Snapshot.Attempts[first.AttemptID], report.Snapshot.Attempts[ref.AttemptID]
+			sameHandle := firstAttempt.HandleID == lastAttempt.HandleID
+			wantRequirements := 2
+			if name == "planner-reuse-handoff" {
+				wantRequirements = 3
+			}
+			if sameHandle != (name == "planner-reuse") || p.Data.Previous == nil || (name != "planner-reuse-handoff" && *p.Data.Previous != first) || len(p.Data.Pending[0].Requirements) != wantRequirements {
+				return fmt.Errorf("planner reuse/fresh reconstruction mismatch")
+			}
+		}
+	} else if first.AttemptID != "" {
+		attempt := report.Snapshot.Attempts[first.AttemptID]
+		if ref != first || attempt.Output == nil || *attempt.Output != first || attempt.State != engine.Succeeded {
+			return fmt.Errorf("failed planner replaced or lost last accepted state")
+		}
+	}
+	wantError := map[string]string{
+		"planner-wrong-context":        "planner context/previous mismatch",
+		"planner-wrong-previous":       "planner context/previous mismatch",
+		"planner-invented-previous":    "planner context/previous mismatch",
+		"planner-drop-gap":             "planning cannot remove supporting context gaps",
+		"planner-foreign-evidence":     "planner evidence must name an exact supporting input owner/file",
+		"planner-uncommitted-evidence": "planner evidence must name an exact supporting input owner/file",
+		"planner-local-evidence":       "planner evidence must name an exact supporting input owner/file",
+		"planner-missing-file":         "planner evidence must name an exact supporting input owner/file",
+		"planner-duplicate-id":         "planner hypotheses require unique IDs, statements and assessments",
+		"planner-blank-assessment":     "planner hypotheses require unique IDs, statements and assessments",
+		"planner-blank-rationale":      "planner requires rationale and nonblank gaps",
+		"planner-empty-requirements":   "planner questions require concrete evidence requirements",
+		"planner-uncommitted-input":    "ReferenceInvalid",
+		"planner-wrong-scope":          "context source/scope mismatch",
+		"planner-missing-model":        "explicit role/model/thinking and absolute cwd required",
+		"planner-attempt-cap":          "LimitExceeded",
+		"planner-session-cap":          "LimitExceeded",
+	}
+	if want := wantError[name]; want != "" && !strings.Contains(fmt.Sprint(report.Failure), want) {
+		return fmt.Errorf("planner failure missing %q: %v", want, report.Failure)
+	}
+	for _, session := range report.Snapshot.Sessions {
+		if session.Role.Name == "triage-planner" && session.Role.Model != (runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}) {
+			return fmt.Errorf("planner inherited analysis model")
+		}
+	}
+	if name == "planner-provider-failure" || name == "planner-timeout" {
+		var failure *engine.Failure
+		if !errors.As(report.Failure, &failure) || (name == "planner-provider-failure" && failure.Code != engine.ProviderFailed) || (name == "planner-timeout" && (failure.Code != engine.TimedOut || failure.Origin != engine.OriginAttemptDeadline)) {
+			return fmt.Errorf("planner lost typed failure: %v", report.Failure)
+		}
+		for _, attempt := range report.Snapshot.Attempts {
+			if attempt.State != engine.Succeeded && attempt.Output != nil {
+				return fmt.Errorf("failed planner candidate became committed")
+			}
+		}
+	}
+	return nil
+}
+
 func TestIntakeToContext(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -1037,6 +1183,13 @@ func TestIntakeToContext(t *testing.T) {
 		failure bool
 		ready   bool
 	}{
+		{"planner-ready", 4, false, true}, {"planner-incomplete", 4, false, false}, {"planner-ticket-only", 4, false, false}, {"planner-empty", 4, false, true}, {"planner-no-evidence", 4, false, true}, {"planner-reuse-handoff", 6, false, true},
+		{"planner-reuse", 5, false, true}, {"planner-handoff", 5, false, true}, {"planner-history", 8, false, true}, {"planner-support", 5, false, true},
+		{"planner-wrong-context", 4, true, false}, {"planner-wrong-previous", 5, true, false}, {"planner-invented-previous", 4, true, false}, {"planner-drop-gap", 4, true, false},
+		{"planner-foreign-evidence", 4, true, false}, {"planner-uncommitted-evidence", 4, true, false}, {"planner-local-evidence", 4, true, false}, {"planner-missing-file", 4, true, false},
+		{"planner-duplicate-id", 4, true, false}, {"planner-blank-assessment", 4, true, false}, {"planner-blank-rationale", 4, true, false}, {"planner-empty-requirements", 4, true, false}, {"planner-extra-control", 4, true, false},
+		{"planner-uncommitted-input", 3, true, false}, {"planner-wrong-scope", 3, true, false}, {"planner-missing-model", 3, true, false},
+		{"planner-provider-failure", 5, true, false}, {"planner-cancel", 5, true, false}, {"planner-timeout", 5, true, false}, {"planner-cleanup-failure", 4, true, false}, {"planner-attempt-cap", 4, true, false}, {"planner-session-cap", 4, true, false}, {"planner-tampered-handoff", 4, true, false},
 		{"support-ticket-only", 3, false, false}, {"support-wiki-partial", 3, false, false}, {"support-incomplete", 3, false, false}, {"support-wrong-epoch", 3, true, false}, {"support-missing-file", 3, true, false},
 		{"support-complete", 3, false, true}, {"support-subwindow", 3, false, true}, {"support-partial", 3, false, false}, {"support-unavailable", 3, false, false}, {"support-empty", 3, false, false},
 		{"support-lookup-conflict", 3, false, false}, {"support-malformed-lookup", 3, false, false}, {"support-lookup-environment", 3, true, false}, {"support-lookup-release", 3, true, false},
@@ -1084,7 +1237,8 @@ func TestIntakeToContext(t *testing.T) {
 			supporting := strings.HasPrefix(tc.name, "support-")
 			resolving := strings.HasPrefix(tc.name, "resolve-") || strings.HasPrefix(tc.name, "support-resolve-")
 			refreshing := strings.HasPrefix(tc.name, "refresh-")
-			updating := strings.HasPrefix(tc.name, "update-")
+			planning := strings.HasPrefix(tc.name, "planner-")
+			updating := strings.HasPrefix(tc.name, "update-") || tc.name == "planner-history"
 			revising := refreshing || updating
 			acquiring := (resolving && !supporting) || revising || strings.HasPrefix(tc.name, "http-")
 			mode := tc.name
@@ -1122,6 +1276,15 @@ func TestIntakeToContext(t *testing.T) {
 					mode = "missing-page"
 				}
 			}
+			if planning && !revising {
+				mode = "complete"
+				if tc.name == "planner-incomplete" || tc.name == "planner-drop-gap" {
+					mode = "wiki-partial"
+				}
+				if tc.name == "planner-ticket-only" {
+					mode = "ticket-only"
+				}
+			}
 			scope := testScope()
 			if mode == "ticket-only" {
 				scope = Scope{Ticket: "CASE-17", TenantIDs: []string{}}
@@ -1141,7 +1304,7 @@ func TestIntakeToContext(t *testing.T) {
 			targetAuthorized := strings.TrimSpace(scope.Stack) != "" && strings.TrimSpace(scope.Pop) != "" && strings.TrimSpace(scope.Binding) != "" && len(scope.TenantIDs) > 0
 			var supportingRequests atomic.Int32
 			var supportingURL string
-			if supporting {
+			if supporting || tc.name == "planner-support" {
 				supportingURL = supportingHTTPFixture(t, tc.name, &supportingRequests).URL
 			}
 			var requests, newRequests atomic.Int32
@@ -1269,6 +1432,9 @@ func TestIntakeToContext(t *testing.T) {
 			var report engine.Report
 			var result ContextResult
 			var beforeResolution ContextResult
+			var plannerRef, firstPlannerRef contract.Ref
+			var plannerSteps int
+			var expectedPlanner PlannerState
 			t.Cleanup(func() {
 				cancel()
 				_ = listener.Close()
@@ -1299,6 +1465,13 @@ func TestIntakeToContext(t *testing.T) {
 			}
 			if tc.name == "resolve-attempt-cap" || tc.name == "refresh-attempt-cap" || tc.name == "update-attempt-cap" || tc.name == "support-resolve-attempt-cap" {
 				policy.MaxTotalAttempts = 3
+			}
+			if tc.name == "planner-attempt-cap" {
+				policy.MaxTotalAttempts = 4
+			}
+			if tc.name == "planner-session-cap" {
+				policy.MaxTotalSessions = 4
+				policy.MaxLiveSessions = 4
 			}
 			exe, err := os.Executable()
 			if err != nil {
@@ -1362,15 +1535,75 @@ func TestIntakeToContext(t *testing.T) {
 						result, err = resolveSlice(ctx, run, scope, models, result)
 					}
 				}
+				if err == nil && planning {
+					model := runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}
+					if tc.name == "planner-missing-model" {
+						model = runtime.ModelSpec{}
+					}
+					input, plannerScope := result.Context, scope
+					if tc.name == "planner-uncommitted-input" {
+						input.Path = filepath.Join(filepath.Dir(input.Path), "candidate.json")
+					}
+					if tc.name == "planner-wrong-scope" {
+						plannerScope.Pop = "other-pop"
+					}
+					var planner *plannerCaller
+					planner, err = startPlanner(ctx, run, plannerScope, model, input)
+					if err == nil {
+						plannerRef, err = planner.step(ctx)
+						firstPlannerRef = plannerRef
+					}
+					if err == nil && tc.name == "planner-tampered-handoff" {
+						// Filesystem boundary corruption must be detected before launch.
+						err = os.WriteFile(plannerRef.Path, []byte("{}"), 0600)
+					}
+					if err == nil && tc.name == "planner-reuse-handoff" {
+						plannerRef, err = planner.step(ctx)
+					}
+					if err == nil && (tc.name == "planner-reuse" || tc.name == "planner-reuse-handoff" || tc.name == "planner-handoff" || tc.name == "planner-history" || tc.name == "planner-support" || tc.name == "planner-wrong-previous" || strings.HasSuffix(tc.name, "-failure") || strings.HasSuffix(tc.name, "-cancel") || strings.HasSuffix(tc.name, "-timeout") || strings.HasSuffix(tc.name, "-cap") || tc.name == "planner-tampered-handoff") {
+						if tc.name != "planner-reuse" {
+							var next *plannerCaller
+							next, err = planner.handoff(ctx)
+							if err == nil {
+								planner = next
+							}
+						}
+						if err == nil {
+							var next contract.Ref
+							next, err = planner.step(ctx)
+							if err == nil {
+								plannerRef = next
+							}
+						}
+					}
+					if err == nil {
+						err = planner.close(ctx)
+					} else if planner != nil {
+						if (plannerRef.AttemptID == "" && planner.last != nil) || (plannerRef.AttemptID != "" && (planner.last == nil || *planner.last != plannerRef)) {
+							t.Error("failed Planner caller changed its last accepted Ref")
+						}
+						// A failed caller cannot hide the error by reusing or replacing
+						// its session. Preserve the original error returned to the run.
+						if _, stopped := planner.step(ctx); stopped == nil || !strings.Contains(stopped.Error(), "planner session is stopped") {
+							t.Error("failed Planner caller allowed another Step")
+						}
+						if _, stopped := planner.handoff(ctx); stopped == nil || !strings.Contains(stopped.Error(), "planner handoff requires") {
+							t.Error("failed Planner caller allowed handoff")
+						}
+					}
+				}
 				outputs := map[string]contract.Ref{}
 				// No final selection: these are supporting refs, not a report.
 				if err == nil {
 					outputs = map[string]contract.Ref{"intake": result.Intake, "wiki": result.Wiki, "context": result.Context}
+					if planning {
+						outputs["planner"] = plannerRef
+					}
 				}
 				return engine.Result{Outputs: outputs}, err
 			}}
 			var transport runtime.Runtime = pi
-			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" {
+			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" || tc.name == "planner-timeout" {
 				transport = deadlineRuntime{pi}
 			}
 			r, err = engine.New(ctx, def, engine.Input{Prompt: "CASE-17", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
@@ -1388,6 +1621,7 @@ func TestIntakeToContext(t *testing.T) {
 			var acquiredRequests int32
 			var refreshRequests int32
 			var revisionIntake contract.Ref
+			observedSupportingRefs := map[contract.Ref]bool{}
 		loop:
 			for {
 				select {
@@ -1428,6 +1662,11 @@ func TestIntakeToContext(t *testing.T) {
 					}
 					if !reflect.DeepEqual(task.Scope, scope) {
 						t.Fatal("scope not in prompt")
+					}
+					if task.Stage != "planner" {
+						for _, ref := range req.Inputs {
+							observedSupportingRefs[ref] = true
+						}
 					}
 					var data any
 					var files map[string][]byte
@@ -1471,11 +1710,33 @@ func TestIntakeToContext(t *testing.T) {
 								expectedContext.Attempts[1].Outcome = "attachment unavailable or incomplete; trustworthy incident anchor pending"
 							}
 						}
-						if supporting {
+						if supporting || tc.name == "planner-support" {
 							expectedContext, files = supportingContextFixture(t, ctx, supportingURL, tc.name, 0, task, req.Inputs, expectedContext, files)
 						}
 						data = expectedContext
 					default:
+						if task.Stage == "planner" {
+							plannerSteps++
+							if !planning || req.Output.SchemaID != PlannerSchema || task.Requirements != plannerRequirements || task.RuntimeResolutionAllowed {
+								t.Fatal("planner task/model contract mismatch")
+							}
+							for ref := range observedSupportingRefs {
+								if !slices.Contains(req.Inputs, ref) {
+									t.Fatalf("planner did not receive historical supporting owner %s/%s", ref.SchemaID, ref.AttemptID)
+								}
+							}
+							expectedPlanner = plannerFixture(t, tc.name, req, task, plannerSteps, initialIntake)
+							data = expectedPlanner
+							if tc.name == "planner-extra-control" {
+								var extra map[string]any
+								if err := json.Unmarshal(testJSON(data), &extra); err != nil {
+									t.Fatal(err)
+								}
+								extra["model"] = "agent-selected-model"
+								data = extra
+							}
+							break
+						}
 						if revising && task.Stage != "wiki-resolution" && task.Stage != "context-resolution" {
 							switch task.Stage {
 							case "intake-revision", "intake-update":
@@ -1639,6 +1900,17 @@ func TestIntakeToContext(t *testing.T) {
 						writeCandidate(t, e.m, req, data, files, tc.name == "file-escape")
 					}
 					ack := "settle"
+					if task.Stage == "planner" && plannerSteps == 2 {
+						switch tc.name {
+						case "planner-provider-failure":
+							ack = "provider-error"
+						case "planner-timeout":
+							ack = "hold"
+						case "planner-cancel":
+							ack = "hold"
+							r.Cancel(engine.OriginControllerUser)
+						}
+					}
 					if tc.name == "provider-failure" || ((resolving || revising) && strings.HasSuffix(tc.name, "-provider-failure") && count == 4) {
 						ack = "provider-error"
 					}
@@ -1649,7 +1921,7 @@ func TestIntakeToContext(t *testing.T) {
 						ack = "hold"
 						r.Cancel(engine.OriginControllerUser)
 					}
-					if tc.name == "cleanup-failure" || ((resolving || revising) && strings.HasSuffix(tc.name, "-cleanup-failure") && count == 4) {
+					if tc.name == "cleanup-failure" || ((resolving || revising || planning) && strings.HasSuffix(tc.name, "-cleanup-failure") && count == 4) {
 						for sid := range hellos {
 							path := filepath.Join(bridge, sid+".json")
 							if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -1690,8 +1962,20 @@ func TestIntakeToContext(t *testing.T) {
 			if (tc.name == "support-resolve-dropped-history" || tc.name == "support-resolve-altered-query" || tc.name == "support-resolve-retag-basis") && !strings.Contains(fmt.Sprint(report.Failure), "context revision dropped resolution history") {
 				t.Fatalf("wrong rejection for dropped query history: %v", report.Failure)
 			}
+			if planning {
+				if err := assertPlannerOutcome(report, tc.name, tc.failure, plannerRef, firstPlannerRef, expectedPlanner); err != nil {
+					t.Fatal(err)
+				}
+				if tc.name == "planner-support" && supportingRequests.Load() != 3 {
+					t.Fatal("planner reacquired supporting sources")
+				}
+			}
 			if !tc.failure {
-				if result.Ready != tc.ready || result.Context.RunID != result.Intake.RunID || len(report.Snapshot.Attempts) != tc.stages || len(report.Snapshot.Sessions) != tc.stages {
+				sessions := tc.stages
+				if tc.name == "planner-reuse" || tc.name == "planner-reuse-handoff" {
+					sessions--
+				}
+				if result.Ready != tc.ready || result.Context.RunID != result.Intake.RunID || len(report.Snapshot.Attempts) != tc.stages || len(report.Snapshot.Sessions) != sessions {
 					t.Fatalf("context/accounting: %+v", result)
 				}
 				var published publication[Context]

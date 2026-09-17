@@ -1,6 +1,6 @@
 # Jira triage：workflow 與執行期適配
 
-移植已有 deadline、context usage、cleanup report、匿名 handoff／timeout recovery 適配，以及 `internal/workflows/triage` 的匿名 acquisition → intake → wiki → triage context／局部補缺切片。**尚未註冊 `jira-triage` CLI workflow**，不是完整調查或真 Pi／provider／production 驗收。
+移植已有 deadline、context usage、cleanup report、匿名 handoff／timeout recovery 適配，以及 `internal/workflows/triage` 的匿名 acquisition → intake → wiki → triage context／局部補缺與最小 Planner 狀態交接切片。**尚未註冊 `jira-triage` CLI workflow**，不是完整調查或真 Pi／provider／production 驗收。
 
 ## 責任邊界
 
@@ -44,7 +44,7 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 
 ## 匿名 intake → context 切片
 
-切片的初始階段使用三個獨立 Step／session，沿用真 engine、Store、committed resolver 與 RPC protocol harness。匿名 HTTP 案例在 provider 邊界實際呼叫 workflow-owned acquisition helper，將其原始檔案直接交給同一 candidate／Store 路徑；其他 Agent 分析、wiki 與 DB receipt 仍為匿名 fixtures。沒有通用 orchestrator、工具 adapter 層、共通 instructions 或正式 launcher。Private `executeSlice`／`resolveSlice`／`refreshSlice`／`updateSlice` 目前由匿名測試 caller 串接；GLM binding、thinking 與每次啟動前 shared-discovery preflight 尚未接到產品入口，不提供未驗證的預設值。
+切片的初始階段使用三個獨立 Step／session，沿用真 engine、Store、committed resolver 與 RPC protocol harness。匿名 HTTP 案例在 provider 邊界實際呼叫 workflow-owned acquisition helper，將其原始檔案直接交給同一 candidate／Store 路徑；其他 Agent 分析、wiki 與 DB receipt 仍為匿名 fixtures。沒有通用 orchestrator、工具 adapter 層、共通 instructions 或正式 launcher。Private `executeSlice`／`resolveSlice`／`refreshSlice`／`updateSlice` 及下述 Planner caller 目前由匿名測試串接；GLM binding、thinking 與每次啟動前 shared-discovery preflight 尚未接到產品入口，不提供未驗證的預設值。
 
 - `triage.intake.v1`：完整 issue/raw fields、field metadata、各 comment 原始頁、linked issue snapshots、附件 content／analysis manifest、來源 URL／取得時間及 gaps。Go 核對 raw key、必要欄位、分頁 offset／total／唯一 comment IDs、linked／attachment inventory 及附件 byte size；historical content 在其真正 owner 版本驗 byte metadata，不以新版 issue 的 size 否定舊 bytes。拒絕省略 inventory、截斷本次下載或偽稱 complete。部分／缺失／unsafe／too-large／未完成分析保留為明確缺口，不等於空結果。
 - `triage.wiki.v1`：綁定 exact intake Ref，保存搜尋詞、wiki-only scope、搜尋證據與已讀頁面；區分完成有結果、完成無結果、partial、unavailable、not-run。未完成不得偽裝 no matches。本次開發只使用匿名 wiki fixtures，不存取實際 vault。
@@ -110,7 +110,7 @@ Private `refreshSlice` 從既有 committed context／incomplete intake 執行一
 
 ### 完整任務內的 intake inventory 更新
 
-Private `updateSlice` 從 complete 或 incomplete 的 committed intake/context 執行一次更新，同樣依序使用三個 fresh Steps/sessions：intake update → wiki revision → context revision。它與 `refreshSlice` 共用版本、下游與 cleanup 接線，沒有 Planner、自動 retry 或產品 launcher。
+Private `updateSlice` 從 complete 或 incomplete 的 committed intake/context 執行一次更新，同樣依序使用三個 fresh Steps/sessions：intake update → wiki revision → context revision。它與 `refreshSlice` 共用版本、下游與 cleanup 接線，本身沒有 Planner、自動 retry 或產品 launcher。
 
 - Caller 授權更新這張 ticket 的 intake，不預先列出尚未發現的附件或 linked issues。Agent 在一個 intake Step 取得新 raw issue，自主處理 inventory 增刪、內容更新及 comments 分頁；不為每個新來源停下申請派工，也不重取無需更新的來源。
 - Intake 的 `update=true` 表示這次完整更新任務，`work` 是 Agent 完成工作後提交的來源 selectors／原因紀錄，不是申請書。`previous` 綁定 exact prior intake；取得或改變的 slot 交本次 local result（包含 partial／失敗），移除的 slot 須記錄並退出 active inventory。未改動的 slot 保留 exact prior Source 及真正 owner。窄任務不能用自行填入 `update=true` 擴大授權。
@@ -120,6 +120,18 @@ Private `updateSlice` 從 complete 或 incomplete 的 committed intake/context �
 - 新版 wiki 仍綁定新版 intake，完整 context 驗收成功才取代 caller state。執行失敗、fatal／取消／限額與 cleanup failure 不改標為普通缺資料；中間 committed 產物不自動成為 recovery checkpoint，同 run 額度不重置。
 
 匿名 localhost HTTP／RPC cases 覆蓋同一 Step 取得新 issue/link/attachment、移除／替換、content-only 更新與歷史 analysis、歷史 bytes 的原 owner metadata、多次更新、接續局部補缺、gap 保留／交代、非法 provenance／inventory／task 升格及失敗路徑。這些 fixtures 不證明真 Agent 已成功載入 skill 或自主決定工具操作。
+
+### 最小 Planner caller 與狀態交接
+
+Private `startPlanner` 從 exact committed supporting context（ready 或 needs-resolution）載入完整 context/intake lineage 及真正 evidence owners，建立明確指定 model 的 Planner session。`step` 可在同一 session 連續執行；`handoff` 只在已有合法 Planner 狀態、確認舊 session 的 CloseSessionReport／Wait／cleanup 後，重新驗收 committed state 並開 fresh session。所有 Steps 沿用同 run 的 session/attempt 限額及 30 分鐘期限，不猜 GLM binding、不繼承一般分析模型。
+
+- `triage.planner.v1` 每 Step 交完整 snapshot：exact context／previous、假說 ID／敘述／assessment／evidence、待驗問題與具體 evidence requirements／basis、gaps、rationale。不是 delta，也不是 worker dispatch、verified claim 或 report。尚無 worker results／verification feedback，後續擴充時仍須明列交接。
+- 此單元的 Planner 任務只消費已交付 supporting inputs，形成計畫；不執行新 acquisition 或派工。空假說／無 evidence 的假說可以如實保存，Go 不依 evidence 類型或 assessment 文字判斷真偽。Pending requirements 不含可執行的 model／argv／session 控制欄位，不代表已授權下一工作。
+- Controller 驗收 schema、exact context／previous、必要文字與唯一 hypothesis IDs、evidence owner/file、supporting gaps 保留。Planning 本身不能刪除未改版 context 的 gaps；這不是判定缺口不可補救。來源適用性、假說及下一問題由 Agent 判讀，readiness 不升格為 confirmed。
+- Fresh session 明列上一份完整 Planner state、supporting context 及所有歷史 evidence owners，不靠舊對話、目錄掃描或複製 raw files。成功驗收及 Decision 持久化後才替換 caller 的 last state。無效 contract 或執行失敗使該 caller 停止，不交出失敗 candidate，也不自動 recovery；原始 fatal／取消／限額／cleanup 錯誤仍返回。
+- 匿名 RPC fixtures 覆蓋同 session 多 Step、fresh handoff、revised intake 歷史 owner、supporting query inputs、ready／incomplete、非法 Ref／schema／scope、失敗與會計。這不是正常 Pi 技能操作或指定 GLM live 驗證。
+
+這只是 Planner 接收／保存／交接狀態的局部接線。尚未接自主選擇 supporting remediation、context 改版、workers、容量訊號觸發／timeout recovery、兩輪無進展 reframe、每三 dispatch cycles checkpoint、同版三方驗證或報告。`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。
 
 ## 驗證與下一步
 
@@ -131,6 +143,6 @@ go test -p 1 -count=1 ./internal/workflows/triage ./internal/runtime ./internal/
 
 完整回歸與發布方法見 [VERIFICATION](VERIFICATION.md)。既有 shared-discovery 的 parent pid／`.recovering`／ownership gate 保留，屬於 runtime 對自有 process 的安全責任，不因 Agent 操作規則採軟性提示而取消。
 
-局部補取、完整任務內 inventory 更新，以及 identity/time supporting-source／query 工作紀錄已有上述 private 匿名切片；下一步仍需 Agent 技能操作的授權 live 驗收，以及正式 Planner caller 對 supporting state 的接續。不以新增 executable 代替，也不重做已完成 intake 或將第一次缺欄位當作結案。之後才加入 Planner／bounded workers、reframe、每 Step 可重建狀態／每三輪 checkpoint、同版三方驗證與 deterministic report。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
+局部補取、完整任務內 inventory 更新，以及 identity/time supporting-source／query 工作紀錄已有上述 private 匿名切片；下一步仍需 Agent 技能操作的授權 live 驗收，以及最小 Planner caller 之後的受驗收工作派送與 supporting state 更新。不以新增 executable 代替，也不重做已完成 intake 或將第一次缺欄位當作結案。之後逐單元加入 bounded workers、reframe、包含工作結果／feedback 的每 Step 可重建狀態與每三輪 checkpoint、同版三方驗證及 deterministic report。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
 
 不提供 OS sandbox、任意 detached 子孫清理、crash resume、exactly-once 或外部副作用 rollback；保留 [DESIGN](../DESIGN.md) 的既有非保證範圍。

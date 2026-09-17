@@ -1,5 +1,5 @@
-// Package triage implements the unregistered intake-to-context slice. It does
-// not yet implement investigation, final delivery, or a live launch path.
+// Package triage implements unregistered supporting-context and Planner handoff
+// slices. It does not yet implement investigation, final delivery or live launch.
 package triage
 
 import "pi-workflow-controller/internal/contract"

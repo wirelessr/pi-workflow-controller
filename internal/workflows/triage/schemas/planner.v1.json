@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/planner.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["context", "previous", "hypotheses", "pending", "gaps", "rationale"],
+  "properties": {
+    "context": {"$ref": "common.v1.json#/$defs/ref"},
+    "previous": {
+      "anyOf": [{"$ref": "common.v1.json#/$defs/ref"}, {"type": "null"}]
+    },
+    "hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "statement", "assessment", "evidence"],
+        "properties": {
+          "id": {"type": "string"},
+          "statement": {"type": "string"},
+          "assessment": {"type": "string"},
+          "evidence": {"type": "array", "items": {"$ref": "common.v1.json#/$defs/evidence"}}
+        }
+      }
+    },
+    "pending": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["question", "requirements", "basis"],
+        "properties": {
+          "question": {"type": "string"},
+          "requirements": {"type": "array", "items": {"type": "string"}},
+          "basis": {"type": "array", "items": {"$ref": "common.v1.json#/$defs/evidence"}}
+        }
+      }
+    },
+    "gaps": {"type": "array", "items": {"type": "string"}},
+    "rationale": {"type": "string"}
+  }
+}
