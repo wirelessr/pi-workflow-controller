@@ -20,6 +20,10 @@ type contextHistory struct {
 // Revalidate committed lineage, never discover state by scanning candidates or
 // publications. Intake revisions remain explicit links, not discovered files.
 func loadContextHistory(ctx context.Context, r *engine.Run, scope Scope, ref contract.Ref) (contextHistory, error) {
+	return newAcceptance(ctx, r).loadContextHistory(scope, ref)
+}
+
+func (a *acceptance) loadContextHistory(scope Scope, ref contract.Ref) (contextHistory, error) {
 	h := contextHistory{sources: map[contract.Ref][]file{}}
 	chain := []contract.Ref{}
 	seen := map[contract.Ref]bool{}
@@ -28,7 +32,7 @@ func loadContextHistory(ctx context.Context, r *engine.Run, scope Scope, ref con
 			return h, fmt.Errorf("cyclic context lineage")
 		}
 		seen[ref] = true
-		p, err := read[Context](ctx, r, ref, ContextSchema)
+		p, err := readAccepted[Context](a, ref, ContextSchema)
 		if err != nil {
 			return h, err
 		}
@@ -40,16 +44,16 @@ func loadContextHistory(ctx context.Context, r *engine.Run, scope Scope, ref con
 	}
 	for i := len(chain) - 1; i >= 0; i-- {
 		ref := chain[i]
-		p, err := read[Context](ctx, r, ref, ContextSchema)
+		p, err := readAccepted[Context](a, ref, ContextSchema)
 		if err != nil {
 			return h, err
 		}
 		v := p.Data
-		intake, err := checkIntake(ctx, r, v.Intake, scope.Ticket)
+		intake, err := a.checkIntake(v.Intake, scope.Ticket)
 		if err != nil {
 			return h, err
 		}
-		wiki, err := checkWiki(ctx, r, v.Wiki, v.Intake)
+		wiki, err := a.checkWiki(v.Wiki, v.Intake)
 		if err != nil {
 			return h, err
 		}
@@ -57,17 +61,17 @@ func loadContextHistory(ctx context.Context, r *engine.Run, scope Scope, ref con
 		if i < len(chain)-1 {
 			history = append(history, h)
 		}
-		if _, err := checkContext(ctx, r, ref, scope, v.Intake, v.Wiki, intake, wiki, history...); err != nil {
+		if _, err := a.checkContext(ref, scope, v.Intake, v.Wiki, intake, wiki, history...); err != nil {
 			return h, err
 		}
 		for _, input := range []contract.Ref{v.Intake, v.Wiki} {
-			inputFiles, err := read[json.RawMessage](ctx, r, input, input.SchemaID)
+			inputFiles, err := readAccepted[json.RawMessage](a, input, input.SchemaID)
 			if err != nil {
 				return h, err
 			}
 			h.sources[input] = inputFiles.Files
 		}
-		ih, err := loadIntakeHistory(ctx, r, v.Intake, scope.Ticket)
+		ih, err := a.loadIntakeHistory(v.Intake, scope.Ticket)
 		if err != nil {
 			return h, err
 		}

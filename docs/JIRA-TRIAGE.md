@@ -77,7 +77,7 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 4. 新 context 以 `previous` 綁定舊版本。移除舊 gap 必須提供 `resolved_gaps` evidence，且包含本次新 evidence 或新版 wiki evidence；上游仍存在的 gaps 不可刪除。舊版與新版 evidence 都是顯式 Step inputs。這是 provenance／readiness 驗收，不是對證據語意的獨立事實證明。
 5. 所有 session／attempt 沿用同 run accounting；provider failure／timeout／取消／hard cap／cleanup failure 原樣返回，不補交未 committed candidate，也不替換最後已驗收 state。新 context 仍只是 supporting state，remaining gaps 不等於結案。
 
-此局部 cycle 本身不修補 comments／附件等 acquisition gap，改由下節 `refreshSlice` 指定來源補取；不因 wiki 重試成功就偽稱 intake complete。每個 cycle 會重驗完整 lineage 與 evidence digests，同一 intake 在歷史中會被重複讀取；長歷史的驗證成本尚未最佳化，不宣稱已適合完整 Planner 的長期執行。同 intake 的已解析前提若出現新矛盾，仍需後續 invalidation／reframe 路徑，本切片不靜默改寫。尚未接 live wiki／DB／Sumo／Prism、真 Agent 依既有 skill 取得資料或完整調查 loop。Supporting-source acquisition 與 query readiness 的局部接線及匿名驗收見下節。
+此局部 cycle 本身不修補 comments／附件等 acquisition gap，改由下節 `refreshSlice` 指定來源補取；不因 wiki 重試成功就偽稱 intake complete。每個 cycle 仍重新驗收完整 lineage 與 evidence digests；同一次同步驗收內重用已驗過的 contract envelopes，避免巢狀 checker 重複呼叫 Store（見下節）。這不是跨 Step 的 cache，也不宣稱已解決長歷史的所有成本。同 intake 的已解析前提若出現新矛盾，仍需後續 invalidation／reframe 路徑，本切片不靜默改寫。尚未接 live wiki／DB／Sumo／Prism、真 Agent 依既有 skill 取得資料或完整調查 loop。Supporting-source acquisition 與 query readiness 的局部接線及匿名驗收見下節。
 
 ### Identity/time supporting sources 與任務內 query readiness
 
@@ -148,6 +148,14 @@ Private `plannerCaller.support` 只消費最後已驗收 Planner snapshot 的 pr
 失敗使 caller 停止並保留 last accepted Planner Ref；中途已提交的 intake/wiki/context 留在 run history，不自動作為 recovery checkpoint。沒有重試或重置同 run 額度，不吞 execution、cancel、fatal、限額與 cleanup failure。`support` 返回 fresh caller 尚不表示已有新 Planner snapshot，仍須成功執行其 `step`。
 
 匿名 localhost HTTP／既有 RPC subprocess 測試涵蓋三種派送、完整與不完整結果、多次 context 改版及 fresh handoff、proposal／selector／Refs 拒絕、歷史 owner、失敗停止與同 run 會計。它們使用真 engine/Store/validators，不是真 Agent skills、指定模型或 live 操作證明。這不是完整 adaptive loop，也未新增 ready context 的一般 logs/metrics 假說蒐證 worker。
+
+### 同一次驗收內的讀取重用
+
+Triage 的 private `acceptance` 只在一次同步驗收中保留按完整 `contract.Ref` 索引的 verified envelope bytes。每個 Ref 第一次使用仍透過 engine committed resolver／Store 驗 contract、manifest 及所有附檔的路徑、metadata、digest；巢狀 lineage／語意 checker 再用同一 Ref 時不重做相同 Store 讀取，但仍執行自己的 schema binding／業務驗收。每次重新 decode，避免 checker 修改另一個 checker 的資料。
+
+讀取重用不進入 engine、Store 或 caller 的持久狀態，也不保留跨 Step／session／Decision 的授權。新的驗收建立新 `acceptance`；supporting 任務前後分開，fresh Planner／handoff 亦重新驗收。Engine 在 Step inputs／Decision 的獨立 Ref 驗收不變。Cancellation 即使命中已讀 envelope 仍須返回，不缓存失敗；不是永久信任 digest、跳過 validator 或假設 mutable filesystem 已不可變。
+
+此接線只消除同次驗收的重複讀取，不刪 `noSymlinks`、雙 digest、ownership、scope、receipt、UTC、completeness 或 cleanup。Lineage 語意走訪、必要跨邊界重驗、raw evidence 解析及 journal/state 持久化仍有成本。測試保留真 engine/Store/RPC，涵蓋 decoded 值隔離、exact Ref/schema、取消，以及任務前後與 handoff 的 evidence 篡改拒絕。
 
 ## 驗證與下一步
 

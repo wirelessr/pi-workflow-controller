@@ -1244,6 +1244,17 @@ func assertPlannerOutcome(report engine.Report, name string, failed bool, ref, f
 	return nil
 }
 
+func corruptInputEvidence(ref contract.Ref) error {
+	var p publication[json.RawMessage]
+	if err := protocol.ReadJSON(ref.Path, &p); err != nil {
+		return err
+	}
+	if len(p.Files) == 0 {
+		return fmt.Errorf("fixture needs input evidence to corrupt")
+	}
+	return os.WriteFile(filepath.Join(filepath.Dir(ref.Path), p.Files[0].Path), []byte("changed after acceptance"), 0600)
+}
+
 func TestIntakeToContext(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -1251,6 +1262,9 @@ func TestIntakeToContext(t *testing.T) {
 		failure bool
 		ready   bool
 	}{
+		{"work-tamper-during-worker", 7, true, false},
+		{"work-tamper-evidence-before-support", 4, true, false}, {"work-tamper-evidence-after-support", 7, true, false}, {"work-tamper-evidence-handoff", 8, true, false},
+		{"work-read-isolation", 8, false, true}, {"work-read-cancellation", 8, false, true}, {"work-read-exact-ref", 8, false, true},
 		{"work-unproposed-transition", 7, true, false}, {"work-skipped-context", 10, true, false},
 		{"work-wrong-task", 7, true, false}, {"work-resolve-changed-intake", 7, true, false}, {"work-refresh-work-mismatch", 7, true, false},
 		{"work-reuse", 9, false, true},
@@ -1679,6 +1693,65 @@ func TestIntakeToContext(t *testing.T) {
 						plannerRef, err = planner.step(ctx)
 						firstPlannerRef = plannerRef
 					}
+					if err == nil && strings.HasPrefix(tc.name, "work-read-") {
+						readCtx, cancelRead := context.WithCancel(ctx)
+						a := newAcceptance(readCtx, run)
+						original, readErr := readAccepted[PlannerState](a, plannerRef, PlannerSchema)
+						if readErr != nil {
+							err = readErr
+						} else {
+							switch tc.name {
+							case "work-read-isolation":
+								want := original.Data.Pending[0].Requirements[0]
+								original.Data.Pending[0].Requirements[0] = "mutated by this caller"
+								again, e := readAccepted[PlannerState](a, plannerRef, PlannerSchema)
+								if e != nil || again.Data.Pending[0].Requirements[0] != want {
+									t.Error("acceptance read shared mutable decoded state")
+								}
+								owner, e := readAccepted[Intake](a, beforeResolution.Intake, IntakeSchema)
+								if e != nil || len(owner.Files) == 0 {
+									t.Errorf("fixture intake lacks readable files: %v", e)
+									break
+								}
+								wantFile := owner.Files[0]
+								owner.Files[0].ID = "mutated file mapping"
+								owner, e = readAccepted[Intake](a, beforeResolution.Intake, IntakeSchema)
+								if e != nil || len(owner.Files) == 0 || owner.Files[0] != wantFile {
+									t.Error("acceptance read shared mutable file mappings")
+								}
+							case "work-read-cancellation":
+								cancelRead()
+								if _, e := readAccepted[PlannerState](a, plannerRef, PlannerSchema); !errors.Is(e, context.Canceled) {
+									t.Errorf("repeated read swallowed cancellation: %v", e)
+								}
+							case "work-read-exact-ref":
+								for _, field := range []string{"run", "attempt", "path", "schema", "digest", "manifest"} {
+									bad, schema := plannerRef, PlannerSchema
+									switch field {
+									case "run":
+										bad.RunID = "foreign"
+									case "attempt":
+										bad.AttemptID = "unknown"
+									case "path":
+										bad.Path = filepath.Join(filepath.Dir(bad.Path), "candidate.json")
+									case "schema":
+										bad.SchemaID, schema = ContextSchema, ContextSchema
+									case "digest":
+										bad.SHA256 = strings.Repeat("0", 64)
+									case "manifest":
+										bad.ManifestSHA256 = strings.Repeat("0", 64)
+									}
+									if _, e := readAccepted[PlannerState](a, bad, schema); e == nil || !strings.Contains(e.Error(), "ReferenceInvalid") {
+										t.Errorf("repeated read ignored exact %s binding: %v", field, e)
+									}
+								}
+								if _, e := readAccepted[PlannerState](a, plannerRef, ContextSchema); e == nil || !strings.Contains(e.Error(), "expected "+ContextSchema) {
+									t.Errorf("repeated read ignored required schema: %v", e)
+								}
+							}
+						}
+						cancelRead()
+					}
 					if err == nil && transitionProbe {
 						err = planner.close(ctx)
 						other := result
@@ -1699,6 +1772,9 @@ func TestIntakeToContext(t *testing.T) {
 						}
 					}
 					if err == nil && working {
+						if tc.name == "work-tamper-evidence-before-support" {
+							err = corruptInputEvidence(beforeResolution.Intake)
+						}
 						if tc.name == "work-tamper-proposal" {
 							err = os.WriteFile(plannerRef.Path, []byte("{}"), 0600)
 						}
@@ -1709,11 +1785,20 @@ func TestIntakeToContext(t *testing.T) {
 						for cycle := 0; cycle < cycles && err == nil; cycle++ {
 							var next *plannerCaller
 							next, err = planner.support(ctx, models)
+							if tc.name == "work-tamper-during-worker" && (err == nil || !strings.Contains(err.Error(), "supporting result acceptance: ")) {
+								t.Errorf("worker mutation was not rejected by post-worker acceptance: %v", err)
+							}
 							if err == nil {
 								if _, reused := planner.support(ctx, models); reused == nil {
 									t.Error("consumed supporting proposal was dispatched twice")
 								}
 								planner = next
+								if tc.name == "work-tamper-evidence-after-support" {
+									err = corruptInputEvidence(beforeResolution.Intake)
+									if err != nil {
+										break
+									}
+								}
 								var accepted contract.Ref
 								accepted, err = planner.step(ctx)
 								if err == nil {
@@ -1727,7 +1812,10 @@ func TestIntakeToContext(t *testing.T) {
 						if err == nil && tc.name == "work-tamper-history" {
 							err = os.WriteFile(firstPlannerRef.Path, []byte("{}"), 0600)
 						}
-						if err == nil && (tc.name == "work-handoff" || tc.name == "work-repeat" || tc.name == "work-tamper-history") {
+						if err == nil && tc.name == "work-tamper-evidence-handoff" {
+							err = corruptInputEvidence(beforeResolution.Intake)
+						}
+						if err == nil && (tc.name == "work-handoff" || tc.name == "work-repeat" || tc.name == "work-tamper-history" || tc.name == "work-tamper-evidence-handoff") {
 							var next *plannerCaller
 							next, err = planner.handoff(ctx)
 							if err == nil {
@@ -2120,6 +2208,13 @@ func TestIntakeToContext(t *testing.T) {
 						data = raw
 						expectedContext.Attempts[0].Queries = []SupportingQuery{}
 					}
+					if tc.name == "work-tamper-during-worker" && task.Stage == "context-revision" {
+						// Corrupt the prior Planner after this Step's input resolution.
+						// Only the post-worker transition consumes that proposal again.
+						if err := os.WriteFile(task.SupportingProposal.Path, []byte("{}"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
 					if acquiring && count == 1 {
 						writeEnvelope(t, e.m, req, data, acquiredFiles)
 					} else {
@@ -2207,32 +2302,51 @@ func TestIntakeToContext(t *testing.T) {
 			if (tc.name == "support-resolve-dropped-history" || tc.name == "support-resolve-altered-query" || tc.name == "support-resolve-retag-basis") && !strings.Contains(fmt.Sprint(report.Failure), "context revision dropped resolution history") {
 				t.Fatalf("wrong rejection for dropped query history: %v", report.Failure)
 			}
+			if tc.name == "work-tamper-during-worker" {
+				raw, err := os.ReadFile(filepath.Join(r.Dir(), "events.jsonl"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
+					var event engine.Event
+					if err := json.Unmarshal(line, &event); err != nil {
+						t.Fatal(err)
+					}
+					if event.Kind == "Decision" && event.Details.(map[string]any)["name"] == "supporting-"+firstPlannerRef.AttemptID+"-recorded" {
+						t.Fatal("post-worker acceptance reused the corrupted pre-worker proposal")
+					}
+				}
+			}
 			if working {
 				wantError := map[string]string{
-					"work-unproposed-transition":  "planner context change requires prior supporting proposal and direct context successor",
-					"work-skipped-context":        "planner context change requires prior supporting proposal and direct context successor",
-					"work-wrong-task":             "supporting result differs from proposed intake task",
-					"work-refresh-work-mismatch":  "supporting result differs from proposed intake task",
-					"work-resolve-changed-intake": "supporting resolve result changed intake or wiki task binding",
-					"work-no-proposal":            "structured supporting_work",
-					"work-bad-kind":               "ContractInvalid",
-					"work-blank-reason":           "supporting work requires reason and basis",
-					"work-no-basis":               "supporting work requires reason and basis",
-					"work-local-basis":            "supporting work basis must name an exact supporting input owner/file",
-					"work-foreign-basis":          "supporting work basis must name an exact supporting input owner/file",
-					"work-uncommitted-basis":      "supporting work basis must name an exact supporting input owner/file",
-					"work-missing-file":           "supporting work basis must name an exact supporting input owner/file",
-					"work-resolve-ready":          "supporting resolve requires needs-resolution context",
-					"work-refresh-ready":          "local intake revision requires incomplete intake and explicit work",
-					"work-refresh-empty":          "local intake revision requires incomplete intake and explicit work",
-					"work-unknown-source":         "unknown source work selector",
-					"work-duplicate-source":       "source work requires unique selectors and reasons",
-					"work-blank-source-reason":    "source work requires unique selectors and reasons",
-					"work-extra-sources":          "only refresh accepts source selectors",
-					"work-extra-control":          "ContractInvalid",
-					"work-wrong-result-context":   "planner context/previous mismatch",
-					"work-drop-gap":               "planning cannot remove supporting context gaps",
-					"work-attempt-cap":            "LimitExceeded", "work-final-cap": "LimitExceeded", "work-session-cap": "LimitExceeded",
+					"work-tamper-during-worker":           "ReferenceInvalid",
+					"work-tamper-evidence-before-support": "ReferenceInvalid",
+					"work-tamper-evidence-after-support":  "ReferenceInvalid",
+					"work-tamper-evidence-handoff":        "ReferenceInvalid",
+					"work-unproposed-transition":          "planner context change requires prior supporting proposal and direct context successor",
+					"work-skipped-context":                "planner context change requires prior supporting proposal and direct context successor",
+					"work-wrong-task":                     "supporting result differs from proposed intake task",
+					"work-refresh-work-mismatch":          "supporting result differs from proposed intake task",
+					"work-resolve-changed-intake":         "supporting resolve result changed intake or wiki task binding",
+					"work-no-proposal":                    "structured supporting_work",
+					"work-bad-kind":                       "ContractInvalid",
+					"work-blank-reason":                   "supporting work requires reason and basis",
+					"work-no-basis":                       "supporting work requires reason and basis",
+					"work-local-basis":                    "supporting work basis must name an exact supporting input owner/file",
+					"work-foreign-basis":                  "supporting work basis must name an exact supporting input owner/file",
+					"work-uncommitted-basis":              "supporting work basis must name an exact supporting input owner/file",
+					"work-missing-file":                   "supporting work basis must name an exact supporting input owner/file",
+					"work-resolve-ready":                  "supporting resolve requires needs-resolution context",
+					"work-refresh-ready":                  "local intake revision requires incomplete intake and explicit work",
+					"work-refresh-empty":                  "local intake revision requires incomplete intake and explicit work",
+					"work-unknown-source":                 "unknown source work selector",
+					"work-duplicate-source":               "source work requires unique selectors and reasons",
+					"work-blank-source-reason":            "source work requires unique selectors and reasons",
+					"work-extra-sources":                  "only refresh accepts source selectors",
+					"work-extra-control":                  "ContractInvalid",
+					"work-wrong-result-context":           "planner context/previous mismatch",
+					"work-drop-gap":                       "planning cannot remove supporting context gaps",
+					"work-attempt-cap":                    "LimitExceeded", "work-final-cap": "LimitExceeded", "work-session-cap": "LimitExceeded",
 					"work-tamper-proposal": "ReferenceInvalid", "work-tamper-history": "ReferenceInvalid",
 				}[tc.name]
 				if wantError != "" && !strings.Contains(fmt.Sprint(report.Failure), wantError) {

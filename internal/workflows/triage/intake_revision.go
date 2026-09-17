@@ -117,6 +117,10 @@ func checkIntakeRevision(v, old Intake, previous contract.Ref) error {
 }
 
 func loadIntakeHistory(ctx context.Context, r *engine.Run, ref contract.Ref, ticket string) (intakeHistory, error) {
+	return newAcceptance(ctx, r).loadIntakeHistory(ref, ticket)
+}
+
+func (a *acceptance) loadIntakeHistory(ref contract.Ref, ticket string) (intakeHistory, error) {
 	h := intakeHistory{sources: map[contract.Ref][]file{}}
 	var chain []contract.Ref
 	var publications []publication[Intake]
@@ -126,7 +130,7 @@ func loadIntakeHistory(ctx context.Context, r *engine.Run, ref contract.Ref, tic
 			return h, fmt.Errorf("cyclic intake lineage")
 		}
 		seen[ref] = true
-		p, err := read[Intake](ctx, r, ref, IntakeSchema)
+		p, err := readAccepted[Intake](a, ref, IntakeSchema)
 		if err != nil {
 			return h, err
 		}
@@ -153,7 +157,7 @@ func loadIntakeHistory(ctx context.Context, r *engine.Run, ref contract.Ref, tic
 		} else if err := checkIntakeRevision(p.Data, h.value, chain[i+1]); err != nil {
 			return h, err
 		}
-		v, err := checkIntakePublication(ctx, ref, p, ticket, h.sources, h.inventory)
+		v, err := checkIntakePublication(a.ctx, ref, p, ticket, h.sources, h.inventory)
 		if err != nil {
 			return h, err
 		}

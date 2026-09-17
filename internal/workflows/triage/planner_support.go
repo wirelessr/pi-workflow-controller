@@ -6,7 +6,6 @@ import (
 	"slices"
 
 	"pi-workflow-controller/internal/contract"
-	"pi-workflow-controller/internal/engine"
 )
 
 // SupportingWork proposes one existing workflow task, bound to the enclosing
@@ -18,7 +17,7 @@ type SupportingWork struct {
 	Sources []intakeWork `json:"sources"`
 }
 
-func checkSupportingWork(ctx context.Context, r *engine.Run, h contextHistory, work *SupportingWork) error {
+func (a *acceptance) checkSupportingWork(h contextHistory, work *SupportingWork) error {
 	if work == nil {
 		return nil
 	}
@@ -39,7 +38,7 @@ func checkSupportingWork(ctx context.Context, r *engine.Run, h contextHistory, w
 			return fmt.Errorf("supporting resolve requires needs-resolution context")
 		}
 	case "refresh":
-		intake, err := checkIntake(ctx, r, h.value.Intake, h.value.Scope.Ticket)
+		intake, err := a.checkIntake(h.value.Intake, h.value.Scope.Ticket)
 		if err != nil {
 			return err
 		}
@@ -54,11 +53,11 @@ func checkSupportingWork(ctx context.Context, r *engine.Run, h contextHistory, w
 // A context change consumes the immediately previous Planner proposal. Verify
 // the task/version relationship, not the agent's rationale or applicability.
 // Old planning states continue to be checked against their own context owners.
-func checkPlannerContextChange(ctx context.Context, r *engine.Run, next contextHistory, previous *contract.Ref) error {
+func (a *acceptance) checkPlannerContextChange(next contextHistory, previous *contract.Ref) error {
 	if previous == nil {
 		return nil
 	}
-	prior, err := read[PlannerState](ctx, r, *previous, PlannerSchema)
+	prior, err := readAccepted[PlannerState](a, *previous, PlannerSchema)
 	if err != nil {
 		return err
 	}
@@ -69,15 +68,15 @@ func checkPlannerContextChange(ctx context.Context, r *engine.Run, next contextH
 	if work == nil || next.value.Previous == nil || *next.value.Previous != prior.Data.Context {
 		return fmt.Errorf("planner context change requires prior supporting proposal and direct context successor")
 	}
-	old, err := loadContextHistory(ctx, r, next.value.Scope, prior.Data.Context)
+	old, err := a.loadContextHistory(next.value.Scope, prior.Data.Context)
 	if err != nil {
 		return err
 	}
-	if err := checkSupportingWork(ctx, r, old, work); err != nil {
+	if err := a.checkSupportingWork(old, work); err != nil {
 		return err
 	}
 	if work.Kind == "resolve" {
-		wiki, err := checkWiki(ctx, r, old.value.Wiki, old.value.Intake)
+		wiki, err := a.checkWiki(old.value.Wiki, old.value.Intake)
 		if err != nil {
 			return err
 		}
@@ -86,7 +85,7 @@ func checkPlannerContextChange(ctx context.Context, r *engine.Run, next contextH
 		}
 		return nil
 	}
-	intake, err := checkIntake(ctx, r, next.value.Intake, next.value.Scope.Ticket)
+	intake, err := a.checkIntake(next.value.Intake, next.value.Scope.Ticket)
 	if err != nil {
 		return err
 	}
@@ -104,15 +103,16 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 		return nil, fmt.Errorf("supporting dispatch requires an accepted state and usable planner")
 	}
 	p.stopped = true
-	h, err := loadContextHistory(ctx, p.r, p.scope, p.history.ref)
+	beforeAcceptance := newAcceptance(ctx, p.r)
+	h, err := beforeAcceptance.loadContextHistory(p.scope, p.history.ref)
 	if err != nil {
 		return nil, err
 	}
-	state, err := read[PlannerState](ctx, p.r, *p.last, PlannerSchema)
+	state, err := readAccepted[PlannerState](beforeAcceptance, *p.last, PlannerSchema)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkPlanner(ctx, p.r, *p.last, h, state.Data.Previous); err != nil {
+	if err := beforeAcceptance.checkPlanner(*p.last, h, state.Data.Previous); err != nil {
 		return nil, err
 	}
 	work := state.Data.SupportingWork
@@ -137,12 +137,13 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 	if err != nil {
 		return nil, err
 	}
-	next, err := loadContextHistory(ctx, p.r, p.scope, after.Context)
+	afterAcceptance := newAcceptance(ctx, p.r)
+	next, err := afterAcceptance.loadContextHistory(p.scope, after.Context)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkPlannerContextChange(ctx, p.r, next, p.last); err != nil {
-		return nil, err
+	if err := afterAcceptance.checkPlannerContextChange(next, p.last); err != nil {
+		return nil, fmt.Errorf("supporting result acceptance: %w", err)
 	}
 	if err := p.r.Root().Decision(ctx, key+"-recorded", "Supporting result accepted for Planner reassessment, not a verified claim or final report", []contract.Ref{*p.last, before.Context, after.Context}); err != nil {
 		return nil, err

@@ -63,7 +63,8 @@ func startPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime
 }
 
 func openPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime.ModelSpec, contextRef contract.Ref, previous *contract.Ref) (*plannerCaller, error) {
-	h, err := loadContextHistory(ctx, r, scope, contextRef)
+	a := newAcceptance(ctx, r)
+	h, err := a.loadContextHistory(scope, contextRef)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +76,7 @@ func openPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime.
 			return nil, fmt.Errorf("cyclic planner lineage")
 		}
 		seen[*ref] = true
-		p, err := read[PlannerState](ctx, r, *ref, PlannerSchema)
+		p, err := readAccepted[PlannerState](a, *ref, PlannerSchema)
 		if err != nil {
 			return nil, err
 		}
@@ -84,23 +85,23 @@ func openPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime.
 	}
 	var prior *contract.Ref
 	for i := len(chain) - 1; i >= 0; i-- {
-		state, err := read[PlannerState](ctx, r, chain[i], PlannerSchema)
+		state, err := readAccepted[PlannerState](a, chain[i], PlannerSchema)
 		if err != nil {
 			return nil, err
 		}
 		owner := h
 		if state.Data.Context != h.ref {
-			owner, err = loadContextHistory(ctx, r, scope, state.Data.Context)
+			owner, err = a.loadContextHistory(scope, state.Data.Context)
 			if err != nil {
 				return nil, err
 			}
 		}
-		if err := checkPlanner(ctx, r, chain[i], owner, prior); err != nil {
+		if err := a.checkPlanner(chain[i], owner, prior); err != nil {
 			return nil, err
 		}
 		prior = &chain[i]
 	}
-	if err := checkPlannerContextChange(ctx, r, h, prior); err != nil {
+	if err := a.checkPlannerContextChange(h, prior); err != nil {
 		return nil, err
 	}
 	handle, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-planner", Model: model, CWD: filepath.Join(r.Dir(), "triage-work")})
@@ -111,7 +112,11 @@ func openPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime.
 }
 
 func checkPlanner(ctx context.Context, r *engine.Run, ref contract.Ref, h contextHistory, previous *contract.Ref) error {
-	p, err := read[PlannerState](ctx, r, ref, PlannerSchema)
+	return newAcceptance(ctx, r).checkPlanner(ref, h, previous)
+}
+
+func (a *acceptance) checkPlanner(ref contract.Ref, h contextHistory, previous *contract.Ref) error {
+	p, err := readAccepted[PlannerState](a, ref, PlannerSchema)
 	if err != nil {
 		return err
 	}
@@ -119,7 +124,7 @@ func checkPlanner(ctx context.Context, r *engine.Run, ref contract.Ref, h contex
 	if v.Context != h.ref || (v.Previous == nil) != (previous == nil) || (previous != nil && *v.Previous != *previous) {
 		return fmt.Errorf("planner context/previous mismatch")
 	}
-	if err := checkPlannerContextChange(ctx, r, h, previous); err != nil {
+	if err := a.checkPlannerContextChange(h, previous); err != nil {
 		return err
 	}
 	if !nonblank(v.Rationale) || !texts(v.Gaps) {
@@ -156,7 +161,7 @@ func checkPlanner(ctx context.Context, r *engine.Run, ref contract.Ref, h contex
 			return err
 		}
 	}
-	return checkSupportingWork(ctx, r, h, v.SupportingWork)
+	return a.checkSupportingWork(h, v.SupportingWork)
 }
 
 func (p *plannerCaller) step(ctx context.Context) (contract.Ref, error) {

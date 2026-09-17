@@ -30,18 +30,6 @@ type publication[T any] struct {
 	Files []file `json:"files"`
 }
 
-func read[T any](ctx context.Context, r *engine.Run, ref contract.Ref, schema string) (publication[T], error) {
-	var p publication[T]
-	if ref.SchemaID != schema {
-		return p, fmt.Errorf("expected %s", schema)
-	}
-	raw, err := engine.ReadContract(ctx, r, ref)
-	if err == nil {
-		err = json.Unmarshal(raw, &p)
-	}
-	return p, err
-}
-
 func nonblank(s string) bool { return strings.TrimSpace(s) != "" }
 func texts(values []string) bool {
 	for _, s := range values {
@@ -129,7 +117,11 @@ func rawJSON(ctx context.Context, ref contract.Ref, files []file, id string, val
 }
 
 func checkIntake(ctx context.Context, r *engine.Run, ref contract.Ref, ticket string) (Intake, error) {
-	h, err := loadIntakeHistory(ctx, r, ref, ticket)
+	return newAcceptance(ctx, r).checkIntake(ref, ticket)
+}
+
+func (a *acceptance) checkIntake(ref contract.Ref, ticket string) (Intake, error) {
+	h, err := a.loadIntakeHistory(ref, ticket)
 	return h.value, err
 }
 
@@ -363,7 +355,11 @@ func wikiComplete(v WikiSearch) bool {
 	return v.Status == "completed-with-matches" || v.Status == "completed-no-matches"
 }
 func checkWiki(ctx context.Context, r *engine.Run, ref, intake contract.Ref) (WikiSearch, error) {
-	p, err := read[WikiSearch](ctx, r, ref, WikiSchema)
+	return newAcceptance(ctx, r).checkWiki(ref, intake)
+}
+
+func (a *acceptance) checkWiki(ref, intake contract.Ref) (WikiSearch, error) {
+	p, err := readAccepted[WikiSearch](a, ref, WikiSchema)
 	if err != nil {
 		return p.Data, err
 	}
@@ -479,7 +475,12 @@ func checkTime(v TimeResolution, evidence func(Evidence) error) error {
 }
 
 func checkContext(ctx context.Context, r *engine.Run, ref contract.Ref, scope Scope, intakeRef, wikiRef contract.Ref, intake Intake, wiki WikiSearch, history ...contextHistory) (Context, error) {
-	p, err := read[Context](ctx, r, ref, ContextSchema)
+	return newAcceptance(ctx, r).checkContext(ref, scope, intakeRef, wikiRef, intake, wiki, history...)
+}
+
+func (a *acceptance) checkContext(ref contract.Ref, scope Scope, intakeRef, wikiRef contract.Ref, intake Intake, wiki WikiSearch, history ...contextHistory) (Context, error) {
+	ctx := a.ctx
+	p, err := readAccepted[Context](a, ref, ContextSchema)
 	if err != nil {
 		return p.Data, err
 	}
@@ -487,15 +488,15 @@ func checkContext(ctx context.Context, r *engine.Run, ref contract.Ref, scope Sc
 	if v.Intake != intakeRef || v.Wiki != wikiRef || !reflect.DeepEqual(v.Scope, scope) || !nonblank(v.Problem) {
 		return v, fmt.Errorf("context source/scope mismatch")
 	}
-	ip, err := read[Intake](ctx, r, intakeRef, IntakeSchema)
+	ip, err := readAccepted[Intake](a, intakeRef, IntakeSchema)
 	if err != nil {
 		return v, err
 	}
-	wp, err := read[WikiSearch](ctx, r, wikiRef, WikiSchema)
+	wp, err := readAccepted[WikiSearch](a, wikiRef, WikiSchema)
 	if err != nil {
 		return v, err
 	}
-	ih, err := loadIntakeHistory(ctx, r, intakeRef, scope.Ticket)
+	ih, err := a.loadIntakeHistory(intakeRef, scope.Ticket)
 	if err != nil {
 		return v, err
 	}
