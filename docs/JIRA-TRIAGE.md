@@ -24,7 +24,9 @@ Agent 先載入既有領域 skill，沿用其中的 scripts、CLI、REST 與其�
 
 完整性要求仍保留：取得 raw issue／metadata／comments、下載及檢查附件、保存 partial 與診斷，全部直接落本 run 的 evidence。Formatted Markdown 不是 raw 證據，附件清單不是已下載，單頁 comments 不是全量。Controller 驗收這些結果及 exact committed Refs，不接管逐項工具操作。
 
-版本／ownership 驗收不等於內容適用性判讀。Agent 決定歷史 wiki、facts 與時間證據是否仍適用；Controller 不依 wiki 內容、evidence schema 或 fact status 新增認列規則。Exact 引用歷史 evidence 可以保留其原始 provenance，但不能把舊 wiki contract 的 intake binding 改稱新版。既有 receipt／UTC／completeness 驗收仍保留。
+版本／ownership 驗收不等於內容適用性判讀。Agent 決定歷史 wiki、facts 與時間證據是否仍適用；Controller 不依 wiki 內容、evidence schema 或 fact status 新增認列規則。Exact 引用歷史 evidence 可以保留其原始 provenance，但不能把舊 wiki contract 的 intake binding 改稱新版。Identity lookup 不因 owner 是 wiki 就一律被拒絕，仍須通過 exact evidence、receipt 內容與 target／scope 驗收；通過不等於 Controller 證明歷史資料適用，也不把 wiki pattern 當本次 runtime proof。既有 UTC／completeness 驗收仍保留。
+
+完整任務內的取得與更新由 Agent 自主處理，不把新發現的附件或 linked issue 拆成逐項審批。Controller 接版本、ownership、歷史與下游 dependencies；Agent 判斷替換意義、分析適用性及剩餘工作。明列 selectors 的局部補取仍可使用，但不是所有更新工作的唯一入口。
 
 ## 模型與預算
 
@@ -42,9 +44,9 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 
 ## 匿名 intake → context 切片
 
-切片的初始階段使用三個獨立 Step／session，沿用真 engine、Store、committed resolver 與 RPC protocol harness。匿名 HTTP 案例在 provider 邊界實際呼叫 workflow-owned acquisition helper，將其原始檔案直接交給同一 candidate／Store 路徑；其他 Agent 分析、wiki 與 DB receipt 仍為匿名 fixtures。沒有通用 orchestrator、工具 adapter 層、共通 instructions 或正式 launcher。Private `executeSlice`／`resolveSlice`／`refreshSlice` 目前由匿名測試 caller 串接；GLM binding、thinking 與每次啟動前 shared-discovery preflight 尚未接到產品入口，不提供未驗證的預設值。
+切片的初始階段使用三個獨立 Step／session，沿用真 engine、Store、committed resolver 與 RPC protocol harness。匿名 HTTP 案例在 provider 邊界實際呼叫 workflow-owned acquisition helper，將其原始檔案直接交給同一 candidate／Store 路徑；其他 Agent 分析、wiki 與 DB receipt 仍為匿名 fixtures。沒有通用 orchestrator、工具 adapter 層、共通 instructions 或正式 launcher。Private `executeSlice`／`resolveSlice`／`refreshSlice`／`updateSlice` 目前由匿名測試 caller 串接；GLM binding、thinking 與每次啟動前 shared-discovery preflight 尚未接到產品入口，不提供未驗證的預設值。
 
-- `triage.intake.v1`：完整 issue/raw fields、field metadata、各 comment 原始頁、linked issue snapshots、附件 content／analysis manifest、來源 URL／取得時間及 gaps。Go 核對 raw key、必要欄位、分頁 offset／total／唯一 comment IDs、linked／attachment inventory 及附件 byte size；拒絕省略 inventory、截斷檔案或偽稱 complete。部分／缺失／unsafe／too-large／未完成分析保留為明確缺口，不等於空結果。
+- `triage.intake.v1`：完整 issue/raw fields、field metadata、各 comment 原始頁、linked issue snapshots、附件 content／analysis manifest、來源 URL／取得時間及 gaps。Go 核對 raw key、必要欄位、分頁 offset／total／唯一 comment IDs、linked／attachment inventory 及附件 byte size；historical content 在其真正 owner 版本驗 byte metadata，不以新版 issue 的 size 否定舊 bytes。拒絕省略 inventory、截斷本次下載或偽稱 complete。部分／缺失／unsafe／too-large／未完成分析保留為明確缺口，不等於空結果。
 - `triage.wiki.v1`：綁定 exact intake Ref，保存搜尋詞、wiki-only scope、搜尋證據與已讀頁面；區分完成有結果、完成無結果、partial、unavailable、not-run。未完成不得偽裝 no matches。本次開發只使用匿名 wiki fixtures，不存取實際 vault。
 - `triage.context.v1`：綁定 exact intake/wiki Refs 與 caller 授權 scope，保留身份、binding、release、observations、identity/time resolution attempts、附件/wiki 完整性與上游 gaps。Evidence 使用 exact input Ref＋file ID，或 null Ref 表示本 contract 自有 evidence，不重複宣告其他 attempt 的附檔。Resolved identity 須有 target/DB resolution receipt，核對唯一 tenant/orgkey row、stack/PoP/binding/release；多 row、錯環境或版本不符不可宣稱 resolved。
 - UTC 正規化驗收支援 explicit-offset RFC3339、epoch seconds/millis、同事件 local／epoch 配對與 offset 實算。保留原始時間、來源、UTC 與計算；不接受無 offset 的時間字串冒充 RFC3339，也不接受 local timestamp 自身作 absolute evidence。From/to 為已觀測 incident anchors 的 min/max，單點事件可為同一時刻；不是已授權的 production 查詢窗口，查詢的非零窗口／擴展理由仍由後續 Planner 驗收。
@@ -81,13 +83,26 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 
 Private `refreshSlice` 從既有 committed context／incomplete intake 執行一個指定 cycle，三個 fresh Step/session 依序產生 intake revision、wiki revision、context revision。Caller 明列 source selectors 與缺少／失效原因，Controller 不從內容推斷失效，也不替 Agent 選工具。
 
-- Intake 以 `previous` 綁定 exact prior intake，`work` 保存此次指定來源與原因。Selectors 為 `issue`、`fields`、`comment:<startAt>`、`linked:<key>`、`attachment-content:<id>`、`attachment-analysis:<id>`。可补缺少的 comment page；其他 slots 必須已在原 inventory，任意 inventory 增刪與完整 intake 的重新 acquisition 尚不支援。
-- 每個指定 slot 保存本次 local result，包括失敗／partial 狀態；本次 `acquisition` 必須有自有 metadata／diagnostics evidence。其餘 slots 保持原狀，有檔案者以 `Source.ref`＋`file_id` 指向真正的歷史 owner，不重複宣告舊附檔。歷史 raw／失敗資料仍留在原 committed contract。Issue 補取失敗時，沿 exact 歷史 issue inventory 檢查保留 slots 的結構／byte metadata；不把 inventory 當成本次成功的 issue，也不因此改標 complete。Agent 的 metadata 內容判讀不由 Controller 重寫。
+- Intake 以 `previous` 綁定 exact prior intake，`work` 保存此次指定來源與原因。Selectors 為 `issue`、`fields`、`comment:<startAt>`、`linked:<key>`、`attachment-content:<id>`、`attachment-analysis:<id>`。可補缺少的 comment page；其他 slots 必須已在原 inventory。任意 inventory 增刪與完整 intake 更新使用下節 `updateSlice`，不由窄任務自行升格。
+- 每個指定 slot 保存本次 local result，包括失敗／partial 狀態；本次 `acquisition` 必須有自有 metadata／diagnostics evidence。其餘 slots 保持原狀，有檔案者以 `Source.ref`＋`file_id` 指向真正的歷史 owner，不重複宣告舊附檔。Content 補取失敗時可以保留經 lineage 驗證的歷史 analysis，新 intake 仍 incomplete；沒有 content 卻宣稱本次新 analysis 完成仍被拒絕。歷史 raw／失敗資料仍留在原 committed contract。Issue 補取失敗時，沿 exact 歷史 issue inventory 檢查保留 slots 的結構／byte metadata；不把 inventory 當成本次成功的 issue，也不因此改標 complete。Agent 的 metadata 內容判讀不由 Controller 重寫。
 - 新版 wiki 必須綁定新版 intake，重新交付本次搜尋的 local evidence 與實際完成狀態；partial／unavailable／not-run 仍是缺口。舊 wiki 是顯式歷史 input，不是新版搜尋的替身。
 - Context 同時綁定新版 intake/wiki 與 previous context。Agent 保留仍適用的資訊、重評受影響身份／時間／observations；Controller 只接來源／版本關係並保留既有 receipt、UTC、scope、gap 驗收，不自行建立歷史 wiki 的適用性或 facts 認列機制。跨 intake 可更新原先 resolved 的資料，原版仍保留，resolution attempt history 不可丟棄。同 intake `resolveSlice` 的原有保留規則不变。
 - 所有保留的 intake/context/wiki evidence owners 都是 exact committed Step inputs。失敗不替換 caller 的最後已驗收 context；中途已 committed 的 revision 保留在 run history，但尚未形成完整 handoff，不當作自動 checkpoint recovery。每一步仍先確認 `CloseSessionReport`，不重置計數、不吞 timeout／cancel／fatal／cleanup error。
 
 匿名 RPC fixtures 經真 engine／Store 驗收，局部補頁／附件會讀指定 localhost HTTP 來源；Agent 判讀與 skills 操作仍是 provider fixtures。這不是 Agent 已成功載入技能或自主 acquisition 的 live 證明，也沒有新增工具入口或 CLI 註冊。
+
+### 完整任務內的 intake inventory 更新
+
+Private `updateSlice` 從 complete 或 incomplete 的 committed intake/context 執行一次更新，同樣依序使用三個 fresh Steps/sessions：intake update → wiki revision → context revision。它與 `refreshSlice` 共用版本、下游與 cleanup 接線，沒有 Planner、自動 retry 或產品 launcher。
+
+- Caller 授權更新這張 ticket 的 intake，不預先列出尚未發現的附件或 linked issues。Agent 在一個 intake Step 取得新 raw issue，自主處理 inventory 增刪、內容更新及 comments 分頁；不為每個新來源停下申請派工，也不重取無需更新的來源。
+- Intake 的 `update=true` 表示這次完整更新任務，`work` 是 Agent 完成工作後提交的來源 selectors／原因紀錄，不是申請書。`previous` 綁定 exact prior intake；取得或改變的 slot 交本次 local result（包含 partial／失敗），移除的 slot 須記錄並退出 active inventory。未改動的 slot 保留 exact prior Source 及真正 owner。窄任務不能用自行填入 `update=true` 擴大授權。
+- Active linked／attachment inventory 仍必須符合 raw issue；取得 issue 失敗時用 exact 歷史 raw inventory 驗保留結構，新 issue 仍是缺口，不冒充成功。新增來源尚未取得或分析不完整，必須列 entry、狀態與 gaps，不得省略 inventory。新資料的 byte metadata 驗收保留。
+- 不要求不同 ID 提交 old → new 業務替換關係。同 ID 的 content 更新不強迫 analysis 重跑；保留的 analysis 沿真正歷史 owner/binding 引用，不改標成本次新分析。`complete` 表示來源可用性及結構覆蓋的既有驗收，不證明歷史內容仍適用或根因已確認。
+- 移除 active source 不刪 committed history，也不使仍引用它的 context evidence 失去 owner。Agent 在新版 context 判斷適用性，保留 resolution attempt history；既有 gap 可以保留，移除則仍須 `resolved_gaps` 與新 evidence 交代，不自動當作補取成功。
+- 新版 wiki 仍綁定新版 intake，完整 context 驗收成功才取代 caller state。執行失敗、fatal／取消／限額與 cleanup failure 不改標為普通缺資料；中間 committed 產物不自動成為 recovery checkpoint，同 run 額度不重置。
+
+匿名 localhost HTTP／RPC cases 覆蓋同一 Step 取得新 issue/link/attachment、移除／替換、content-only 更新與歷史 analysis、歷史 bytes 的原 owner metadata、多次更新、接續局部補缺、gap 保留／交代、非法 provenance／inventory／task 升格及失敗路徑。這些 fixtures 不證明真 Agent 已成功載入 skill 或自主決定工具操作。
 
 ## 驗證與下一步
 
@@ -99,6 +114,6 @@ go test -p 1 -count=1 ./internal/workflows/triage ./internal/runtime ./internal/
 
 完整回歸與發布方法見 [VERIFICATION](VERIFICATION.md)。既有 shared-discovery 的 parent pid／`.recovering`／ownership gate 保留，屬於 runtime 對自有 process 的安全責任，不因 Agent 操作規則採軟性提示而取消。
 
-局部來源補取／版本交接已有上述 private 匿名切片；下一步仍需 Agent 技能操作的授權 live 驗收、較廣的 inventory 變更、identity/time 的實際 supporting-source acquisition 與 query readiness。不以新增 executable 代替，也不重做已完成 intake 或將第一次缺欄位當作結案。之後才加入 Planner／bounded workers、reframe、每 Step 可重建狀態／每三輪 checkpoint、同版三方驗證與 deterministic report。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
+局部補取與完整任務內的 inventory 更新已有上述 private 匿名切片；下一步仍需 Agent 技能操作的授權 live 驗收、identity/time 的實際 supporting-source acquisition 與 query readiness。不以新增 executable 代替，也不重做已完成 intake 或將第一次缺欄位當作結案。之後才加入 Planner／bounded workers、reframe、每 Step 可重建狀態／每三輪 checkpoint、同版三方驗證與 deterministic report。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
 
 不提供 OS sandbox、任意 detached 子孫清理、crash resume、exactly-once 或外部副作用 rollback；保留 [DESIGN](../DESIGN.md) 的既有非保證範圍。

@@ -336,7 +336,9 @@ func checkIntakePublication(ctx context.Context, ref contract.Ref, p publication
 		if err := check(a.Analysis); err != nil {
 			return v, err
 		}
-		if a.Content.Status == "available" {
+		// Retained bytes were checked against their owning intake's inventory
+		// earlier in the lineage, not metadata from a later issue snapshot.
+		if a.Content.Status == "available" && a.Content.Ref == nil {
 			raw, err := readSource(a.Content)
 			if err != nil {
 				return v, err
@@ -344,7 +346,7 @@ func checkIntakePublication(ctx context.Context, ref contract.Ref, p publication
 			if int64(len(raw)) != size {
 				return v, fmt.Errorf("truncated attachment")
 			}
-		} else if a.Analysis.Status == "available" {
+		} else if a.Content.Status != "available" && a.Analysis.Status == "available" && a.Analysis.Ref == nil {
 			return v, fmt.Errorf("analysis without attachment content")
 		}
 	}
@@ -560,9 +562,6 @@ func checkContext(ctx context.Context, r *engine.Run, ref contract.Ref, scope Sc
 		lookupRef, lookupFiles := ref, p.Files
 		if i.Lookup.Ref != nil {
 			lookupRef = *i.Lookup.Ref
-			if lookupRef.SchemaID == WikiSchema {
-				return v, fmt.Errorf("historical wiki cannot verify current target/DB identity")
-			}
 			lookupFiles = sources[lookupRef]
 		}
 		var lookup IdentityLookup

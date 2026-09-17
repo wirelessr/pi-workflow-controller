@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -153,6 +154,11 @@ func intakeFixture(mode string) (Intake, map[string][]byte) {
 		v.Fields = unavailable("field metadata access denied")
 		v.Complete = false
 		v.Gaps = []string{"field metadata access denied"}
+	case "analysis-without-content":
+		v.Attachments[0].Content = unavailable("download failed")
+		v.Complete, v.Gaps = false, []string{"download failed"}
+	case "initial-update":
+		v.Update = true
 	case "unknown-file":
 		v.Issue.FileID = "absent"
 	case "file-escape":
@@ -166,10 +172,19 @@ func wikiFixture(mode string, intake contract.Ref) (WikiSearch, map[string][]byt
 	v := WikiSearch{Intake: intake, Queries: []string{"sample symptom component"}, Scope: "wiki-only", Status: "completed-no-matches", Pages: []Source{}, Search: available("search"), Gaps: []string{}}
 	files := map[string][]byte{"search": []byte(`{"query":"sample symptom component","complete":true,"matches":[]}`)}
 	switch mode {
-	case "wiki-history-identity":
+	case "wiki-history-identity", "wiki-history-conflict", "wiki-history-environment", "wiki-history-release":
 		v.Status = "completed-with-matches"
 		v.Pages = []Source{available("historical-identity")}
-		files["historical-identity"] = testJSON(IdentityLookup{Stack: "test-stack", Pop: "test-pop", Binding: "local:test-cluster", Release: "release-example", Matches: []TenantIdentity{{TenantID: "17", OrgKey: "org-example"}}})
+		lookup := IdentityLookup{Stack: "test-stack", Pop: "test-pop", Binding: "local:test-cluster", Release: "release-example", Matches: []TenantIdentity{{TenantID: "17", OrgKey: "org-example"}}}
+		switch mode {
+		case "wiki-history-conflict":
+			lookup.Matches = append(lookup.Matches, TenantIdentity{TenantID: "18", OrgKey: "other-org"})
+		case "wiki-history-environment":
+			lookup.Pop = "other-pop"
+		case "wiki-history-release":
+			lookup.Release = "other-release"
+		}
+		files["historical-identity"] = testJSON(lookup)
 	case "wiki-matches":
 		v.Status = "completed-with-matches"
 		v.Pages = []Source{available("wiki-page")}
@@ -229,7 +244,7 @@ func contextFixture(mode string, scope Scope, inputs []contract.Ref, intake Inta
 		files["resolution"] = testJSON(IdentityLookup{Stack: "test-stack", Pop: "other-pop", Binding: "local:test-cluster", Release: "release-example", Matches: []TenantIdentity{{TenantID: "17", OrgKey: "org-example"}}})
 	case "lookup-release":
 		files["resolution"] = testJSON(IdentityLookup{Stack: "test-stack", Pop: "test-pop", Binding: "local:test-cluster", Release: "other-release", Matches: []TenantIdentity{{TenantID: "17", OrgKey: "org-example"}}})
-	case "wiki-history-identity":
+	case "wiki-history-identity", "wiki-history-conflict", "wiki-history-environment", "wiki-history-release":
 		v.Identity.Lookup = &Evidence{Ref: &inputs[1], FileID: "historical-identity"}
 	case "conflicting-foreign-lookup":
 		v.Identity.Status = "conflicting"
@@ -468,9 +483,90 @@ func assertRetainedInputOwners(t *testing.T, inputs []contract.Ref) {
 	}
 }
 
+// The update API responses change inventory without any per-source dispatch.
+func updateHTTPFixture(t *testing.T, name string, observe func(*http.Request)) *httptest.Server {
+	t.Helper()
+	_, raw := intakeFixture("complete")
+	bundle := []byte("new attachment evidence\n")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observe(r)
+		if r.Header.Get("Authorization") != "" {
+			t.Error("HTTP fixture received Authorization")
+		}
+		switch r.URL.Path {
+		case "/rest/api/3/issue/CASE-17":
+			if r.URL.Query().Get("fields") != "*all" {
+				t.Error("update omitted raw fields")
+			}
+			if strings.HasPrefix(name, "update-issue-failure") {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("issue unavailable"))
+				return
+			}
+			var issue map[string]any
+			_ = json.Unmarshal(raw["issue"], &issue)
+			fields := issue["fields"].(map[string]any)
+			switch name {
+			case "update-remove", "update-retain-gap", "update-drop-gap", "update-resolve-gap":
+				fields["attachment"], fields["issuelinks"] = []any{}, []any{}
+			case "update-replace", "update-repeat":
+				fields["attachment"] = []any{map[string]any{"id": "a2", "size": len(bundle)}}
+				fields["issuelinks"] = []any{map[string]any{"outwardIssue": map[string]any{"key": "CASE-19"}}}
+			case "update-content", "update-retain-content", "update-truncated":
+				fields["attachment"] = []any{map[string]any{"id": "a1", "size": len(bundle)}}
+			case "update-comments-repage":
+				fields["comment"] = map[string]any{"total": 1, "comments": []any{}}
+			case "update-comments-missing", "update-comments-false-complete":
+				fields["comment"] = map[string]any{"total": 3, "comments": []any{}}
+			case "update-then-refresh", "update-removed-still-in-raw", "update-page", "update-wrong-task":
+			default:
+				fields["attachment"] = append(fields["attachment"].([]any), map[string]any{"id": "a2", "size": len(bundle)})
+				fields["issuelinks"] = append(fields["issuelinks"].([]any), map[string]any{"outwardIssue": map[string]any{"key": "CASE-19"}})
+			}
+			_, _ = w.Write(testJSON(issue))
+		case "/rest/api/3/issue/CASE-19":
+			_, _ = w.Write([]byte(`{"key":"CASE-19","fields":{"summary":"New incident reference"}}`))
+		case "/attachment":
+			if name == "update-partial" {
+				w.WriteHeader(http.StatusForbidden)
+			}
+			body := bundle
+			if name == "update-truncated" {
+				body = body[:len(body)-1]
+			}
+			_, _ = w.Write(body)
+		case "/rest/api/3/issue/CASE-17/comment":
+			start := r.URL.Query().Get("startAt")
+			if strings.HasPrefix(name, "update-comments-") {
+				total := 3
+				if name == "update-comments-repage" {
+					total = 1
+				}
+				n := 0
+				if start == "1" {
+					n = 1
+				}
+				if start == "2" {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = w.Write([]byte("comment page unavailable"))
+					return
+				}
+				_, _ = w.Write(testJSON(map[string]any{"startAt": n, "total": total, "comments": []any{map[string]any{"id": fmt.Sprintf("c%d", n+1), "body": "updated comment"}}}))
+			} else {
+				_, _ = w.Write(raw["page-"+start])
+			}
+		default:
+			t.Errorf("update unexpectedly reacquired %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 // This is an external provider fixture, not a replacement Step/validator or a
-// product acquisition entry. Only explicitly selected localhost sources are read.
-func refreshIntakeFixture(t *testing.T, ctx context.Context, name string, count int, inputs []contract.Ref, task stageTask, base string) (Intake, map[string][]byte) {
+// product acquisition entry. Only anonymous localhost sources are read.
+func refreshIntakeFixture(t *testing.T, ctx context.Context, name string, count int, inputs []contract.Ref, task stageTask, base string) (Intake, map[string][]byte, int32) {
 	t.Helper()
 	var prior publication[Intake]
 	if err := protocol.ReadJSON(inputs[0].Path, &prior); err != nil {
@@ -478,6 +574,7 @@ func refreshIntakeFixture(t *testing.T, ctx context.Context, name string, count 
 	}
 	v := prior.Data
 	v.Previous, v.Work = &inputs[0], task.SourceWork
+	v.Update = task.Stage == "intake-update"
 	v.FetchedAt = "2025-01-04T00:00:00Z"
 	qualify := func(s *Source) {
 		if s.FileID != "" && s.Ref == nil {
@@ -498,7 +595,7 @@ func refreshIntakeFixture(t *testing.T, ctx context.Context, name string, count 
 	}
 	files := map[string][]byte{}
 	var receipts []map[string]any
-	fetch := func(id, endpoint string) {
+	fetch := func(id, endpoint string) Source {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+endpoint, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -514,31 +611,134 @@ func refreshIntakeFixture(t *testing.T, ctx context.Context, name string, count 
 		}
 		files[id] = raw
 		receipts = append(receipts, map[string]any{"file_id": id, "http_status": resp.StatusCode, "source": endpoint})
+		if resp.StatusCode != http.StatusOK {
+			return Source{Status: "partial", FileID: id, Reason: "HTTP source unavailable"}
+		}
+		return available(id)
 	}
-	for _, item := range task.SourceWork {
-		switch item.Source {
-		case "issue":
-			fetch("new-issue", "/rest/api/3/issue/CASE-17?fields=*all")
-			v.Issue = Source{Status: "partial", FileID: "new-issue", Reason: "issue response incomplete"}
-			if name == "refresh-issue-missing" {
-				v.Issue.Status = "missing"
+	if v.Update {
+		v.Issue = fetch("new-issue", "/rest/api/3/issue/CASE-17?fields=*all")
+		v.Work = []intakeWork{{Source: "issue", Reason: "update ticket snapshot"}}
+		record := func(selector string) {
+			v.Work = append(v.Work, intakeWork{Source: selector, Reason: "agent handled inventory update"})
+		}
+		if name == "update-page" {
+			v.Comments[1].Source = fetch("new-page-1", "/rest/api/3/issue/CASE-17/comment?startAt=1")
+			record("comment:1")
+		}
+		if strings.HasPrefix(name, "update-comments-") {
+			v.Comments[0].Source = fetch("new-page-0", "/rest/api/3/issue/CASE-17/comment?startAt=0")
+			record("comment:0")
+			record("comment:1")
+			if name == "update-comments-repage" {
+				v.Comments = v.Comments[:1]
+			} else {
+				v.Comments[1].Source = fetch("new-page-1", "/rest/api/3/issue/CASE-17/comment?startAt=1")
+				v.Comments = append(v.Comments, CommentPage{Start: 2, Source: fetch("new-page-2", "/rest/api/3/issue/CASE-17/comment?startAt=2")})
+				record("comment:2")
 			}
-		case "comment:1":
-			fetch("new-page", "/rest/api/3/issue/CASE-17/comment?startAt=1")
-			if len(v.Comments) == 1 {
-				v.Comments = append(v.Comments, CommentPage{Start: 1})
+		}
+		if v.Issue.Status == "available" {
+			var issue acquisitionIssue
+			if err := json.Unmarshal(files["new-issue"], &issue); err != nil {
+				t.Fatal(err)
 			}
-			v.Comments[1].Source = available("new-page")
-		case "attachment-content:a1":
-			fetch("new-bundle", "/attachment")
-			v.Attachments[0].Content = available("new-bundle")
-		case "attachment-analysis:a1":
-			v.Attachments[0].Analysis = available("new-bundle")
-		default:
-			t.Fatal("unexpected fixture work")
+			var links []acquisitionLink
+			var attachments []acquisitionAttachment
+			_ = json.Unmarshal(issue.Fields["issuelinks"], &links)
+			_ = json.Unmarshal(issue.Fields["attachment"], &attachments)
+			oldLinks, oldAttachments := v.Linked, v.Attachments
+			v.Linked, v.Attachments = []LinkedIssue{}, []Attachment{}
+			for _, link := range links {
+				key := link.Out.Key
+				n := slices.IndexFunc(oldLinks, func(l LinkedIssue) bool { return l.Key == key })
+				if n >= 0 {
+					v.Linked = append(v.Linked, oldLinks[n])
+				} else {
+					source := fetch("new-linked", "/rest/api/3/issue/"+key+"?fields=*all")
+					v.Linked = append(v.Linked, LinkedIssue{Key: key, Source: source})
+					record("linked:" + key)
+				}
+			}
+			for _, old := range oldLinks {
+				if !slices.ContainsFunc(v.Linked, func(l LinkedIssue) bool { return l.Key == old.Key }) {
+					record("linked:" + old.Key)
+				}
+			}
+			for _, attachment := range attachments {
+				n := slices.IndexFunc(oldAttachments, func(a Attachment) bool { return a.ID == attachment.ID })
+				if n >= 0 {
+					a := oldAttachments[n]
+					if name == "update-content" || name == "update-truncated" {
+						a.Content = fetch("new-bundle", "/attachment")
+						record("attachment-content:" + a.ID)
+					}
+					v.Attachments = append(v.Attachments, a)
+				} else {
+					content := fetch("new-bundle", "/attachment")
+					analysis := available("new-bundle")
+					if content.Status != "available" {
+						analysis = unavailable("content incomplete")
+					}
+					v.Attachments = append(v.Attachments, Attachment{ID: attachment.ID, Content: content, Analysis: analysis})
+					record("attachment-content:" + attachment.ID)
+					record("attachment-analysis:" + attachment.ID)
+				}
+			}
+			for _, old := range oldAttachments {
+				if !slices.ContainsFunc(v.Attachments, func(a Attachment) bool { return a.ID == old.ID }) {
+					record("attachment-content:" + old.ID)
+					record("attachment-analysis:" + old.ID)
+				}
+			}
+		}
+	} else {
+		for _, item := range task.SourceWork {
+			switch item.Source {
+			case "issue":
+				fetch("new-issue", "/rest/api/3/issue/CASE-17?fields=*all")
+				v.Issue = Source{Status: "partial", FileID: "new-issue", Reason: "issue response incomplete"}
+				if name == "refresh-issue-missing" {
+					v.Issue.Status = "missing"
+				}
+			case "comment:1":
+				fetch("new-page", "/rest/api/3/issue/CASE-17/comment?startAt=1")
+				if len(v.Comments) == 1 {
+					v.Comments = append(v.Comments, CommentPage{Start: 1})
+				}
+				v.Comments[1].Source = available("new-page")
+			case "attachment-content:a1":
+				v.Attachments[0].Content = fetch("new-bundle", "/attachment")
+				if strings.HasPrefix(name, "refresh-content-") {
+					v.Attachments[0].Content.Status = "partial"
+					v.Attachments[0].Content.Reason = "replacement content incomplete"
+				}
+			case "attachment-analysis:a1":
+				v.Attachments[0].Analysis = available("new-bundle")
+			default:
+				t.Fatal("unexpected fixture work")
+			}
 		}
 	}
 	v.Complete, v.Gaps = true, []string{}
+	if v.Update || strings.HasPrefix(name, "refresh-content-") {
+		sources := []Source{v.Issue, v.Fields}
+		for _, p := range v.Comments {
+			sources = append(sources, p.Source)
+		}
+		for _, l := range v.Linked {
+			sources = append(sources, l.Source)
+		}
+		for _, a := range v.Attachments {
+			sources = append(sources, a.Content, a.Analysis)
+		}
+		for _, source := range sources {
+			if source.Status != "available" {
+				v.Complete = false
+				v.Gaps = append(v.Gaps, source.Reason)
+			}
+		}
+	}
 	if strings.HasPrefix(name, "refresh-issue-") {
 		v.Complete, v.Gaps = false, append(append([]string{}, prior.Data.Gaps...), "issue response incomplete")
 	}
@@ -551,23 +751,54 @@ func refreshIntakeFixture(t *testing.T, ctx context.Context, name string, count 
 	files["revision-metadata"] = testJSON(map[string]any{"records": receipts, "gaps": v.Gaps})
 	v.Acquisition = &Source{Status: "available", FileID: "revision-metadata"}
 	switch name {
-	case "refresh-unselected-copy":
+	case "refresh-unselected-copy", "update-unrecorded-change":
 		files["copied-fields"] = []byte(`[{"id":"description","name":"Description"}]`)
 		v.Fields = available("copied-fields")
-	case "refresh-foreign-ref":
+	case "refresh-foreign-ref", "update-foreign-ref":
 		bad := inputs[0]
 		bad.RunID = "foreign"
 		v.Fields.Ref = &bad
-	case "refresh-wrong-previous":
+	case "refresh-wrong-previous", "update-wrong-previous":
 		v.Previous = &inputs[1]
 	case "refresh-work-changed":
 		v.Work = append(append([]intakeWork{}, v.Work...), intakeWork{Source: "fields", Reason: "unrequested expansion"})
-	case "refresh-no-metadata":
+	case "refresh-no-metadata", "update-no-metadata":
 		v.Acquisition = nil
 	case "refresh-dropped-source":
 		v.Linked = []LinkedIssue{}
+	case "refresh-escalated-task":
+		v.Update = true
+		v.Work = append(v.Work, intakeWork{Source: "issue", Reason: "unrequested full update"})
+		files["new-issue"] = testJSON(map[string]any{})
+		v.Issue = Source{Status: "partial", FileID: "new-issue", Reason: "issue incomplete"}
+		v.Complete, v.Gaps = false, []string{"issue incomplete"}
+	case "update-comments-false-complete":
+		v.Complete, v.Gaps = true, []string{}
+	case "update-wrong-task":
+		v.Update = false
+	case "update-no-issue":
+		v.Work = v.Work[1:]
+		v.Issue = prior.Data.Issue
+		qualify(&v.Issue)
+	case "update-duplicate-work":
+		v.Work = append(v.Work, v.Work[0])
+	case "update-blank-reason":
+		v.Work[0].Reason = " "
+	case "update-unrecorded-add":
+		v.Work = v.Work[:1]
+	case "update-omitted-slot":
+		v.Attachments = v.Attachments[:1]
+		v.Work = slices.DeleteFunc(v.Work, func(w intakeWork) bool { return strings.HasSuffix(w.Source, ":a2") })
+	case "update-new-ref":
+		v.Attachments[1].Content = v.Attachments[0].Content
+	case "update-removed-still-in-raw", "update-issue-failure-remove":
+		v.Linked, v.Attachments = []LinkedIssue{}, []Attachment{}
+		v.Work = append(v.Work, intakeWork{Source: "linked:CASE-18", Reason: "removed"}, intakeWork{Source: "attachment-content:a1", Reason: "removed"}, intakeWork{Source: "attachment-analysis:a1", Reason: "removed"})
+	case "update-history-alias":
+		v.Attachments[0].Analysis.Ref = &inputs[0]
+		v.Attachments[0].Analysis.FileID = "fields"
 	}
-	return v, files
+	return v, files, int32(len(receipts))
 }
 
 func TestIntakeToContext(t *testing.T) {
@@ -577,6 +808,17 @@ func TestIntakeToContext(t *testing.T) {
 		failure bool
 		ready   bool
 	}{
+		{"update-page", 6, false, true}, {"update-comments-repage", 6, false, true}, {"update-comments-missing", 6, false, false}, {"update-comments-false-complete", 4, true, false},
+		{"update-add", 6, false, true}, {"update-remove", 6, false, true}, {"update-replace", 6, false, true}, {"update-repeat", 9, false, true},
+		{"update-content", 6, false, true}, {"update-retain-content", 6, false, true}, {"update-partial", 6, false, false}, {"update-issue-failure", 6, false, false},
+		{"update-retain-gap", 6, false, false}, {"update-resolve-gap", 6, false, true}, {"update-drop-gap", 6, true, false},
+		{"update-history-lookup", 6, false, true}, {"update-then-resolve", 8, false, true}, {"update-then-refresh", 9, false, true},
+		{"update-truncated", 4, true, false}, {"update-unrecorded-change", 4, true, false}, {"update-foreign-ref", 4, true, false}, {"update-wrong-previous", 4, true, false}, {"update-no-metadata", 4, true, false},
+		{"update-wrong-task", 4, true, false}, {"update-no-issue", 4, true, false}, {"update-duplicate-work", 4, true, false}, {"update-blank-reason", 4, true, false}, {"update-unrecorded-add", 4, true, false},
+		{"update-omitted-slot", 4, true, false}, {"update-new-ref", 4, true, false}, {"update-removed-still-in-raw", 4, true, false}, {"update-issue-failure-remove", 4, true, false}, {"update-history-alias", 4, true, false},
+		{"update-old-wiki-binding", 5, true, false}, {"update-provider-failure", 4, true, false}, {"update-cancel", 4, true, false}, {"update-timeout", 4, true, false}, {"update-cleanup-failure", 4, true, false}, {"update-attempt-cap", 3, true, false}, {"update-uncommitted-input", 3, true, false},
+		{"refresh-content-failure", 6, false, false}, {"refresh-content-failure-repeat", 9, false, false}, {"refresh-content-new-analysis", 4, true, false}, {"refresh-escalated-task", 4, true, false},
+		{"analysis-without-content", 1, true, false}, {"initial-update", 1, true, false},
 		{"refresh-issue-partial", 6, false, false}, {"refresh-issue-missing", 6, false, false}, {"refresh-issue-repeat", 9, false, false},
 		{"refresh-page", 6, false, true}, {"refresh-attachment", 6, false, true}, {"refresh-invalidated", 6, false, true},
 		{"refresh-historical-wiki", 6, false, true}, {"refresh-wiki-partial", 6, false, false}, {"refresh-repeat", 9, false, true}, {"refresh-then-resolve", 8, false, true},
@@ -591,7 +833,7 @@ func TestIntakeToContext(t *testing.T) {
 		{"resolve-wiki", 5, false, true}, {"resolve-wiki-unavailable", 5, false, true}, {"resolve-wiki-not-run", 5, false, true}, {"resolve-wiki-partial-again", 5, false, false}, {"resolve-repeat", 7, false, true}, {"resolve-time", 4, false, true}, {"resolve-identity", 4, false, true}, {"resolve-ticket-only", 4, false, false},
 		{"resolve-drop-gap", 5, true, false}, {"resolve-foreign-evidence", 5, true, false}, {"resolve-replace-valid-time", 5, true, false}, {"resolve-wrong-previous", 5, true, false}, {"resolve-old-evidence", 5, true, false}, {"resolve-dropped-history", 5, true, false},
 		{"resolve-provider-failure", 4, true, false}, {"resolve-cancel", 4, true, false}, {"resolve-timeout", 4, true, false}, {"resolve-cleanup-failure", 4, true, false}, {"resolve-attempt-cap", 3, true, false}, {"resolve-uncommitted-input", 3, true, false},
-		{"wiki-history-identity", 3, true, false}, {"conflicting-foreign-lookup", 3, true, false},
+		{"wiki-history-identity", 3, false, true}, {"wiki-history-conflict", 3, true, false}, {"wiki-history-environment", 3, true, false}, {"wiki-history-release", 3, true, false}, {"conflicting-foreign-lookup", 3, true, false},
 		{"ticket-only", 3, false, false}, {"wiki-not-run", 3, false, false},
 		{"false-ready", 3, true, false}, {"dropped-gap", 3, true, false}, {"self-paired", 3, true, false}, {"lookup-conflict", 3, true, false}, {"lookup-environment", 3, true, false}, {"lookup-release", 3, true, false}, {"missing-lookup", 3, true, false},
 		{"complete", 3, false, true}, {"wiki-matches", 3, false, true}, {"epoch-millis", 3, false, true}, {"local-paired", 3, false, true}, {"dst-offsets", 3, false, true},
@@ -604,10 +846,15 @@ func TestIntakeToContext(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			resolving := strings.HasPrefix(tc.name, "resolve-")
 			refreshing := strings.HasPrefix(tc.name, "refresh-")
-			acquiring := resolving || refreshing || strings.HasPrefix(tc.name, "http-")
+			updating := strings.HasPrefix(tc.name, "update-")
+			revising := refreshing || updating
+			acquiring := resolving || revising || strings.HasPrefix(tc.name, "http-")
 			mode := tc.name
-			if refreshing {
+			if revising {
 				mode = "wiki-matches"
+			}
+			if tc.name == "update-history-lookup" {
+				mode = "wiki-history-identity"
 			}
 			if resolving {
 				mode = "wiki-partial"
@@ -669,10 +916,10 @@ func TestIntakeToContext(t *testing.T) {
 					bundle = []byte(strings.Repeat("x", 8193))
 				}
 				httpMode := strings.TrimPrefix(tc.name, "http-")
-				if tc.name == "resolve-acquisition-gap" || refreshing {
+				if tc.name == "resolve-acquisition-gap" || refreshing || tc.name == "update-then-refresh" || tc.name == "update-page" || tc.name == "update-wrong-task" {
 					httpMode = "page-failure"
 				}
-				if tc.name == "refresh-attachment" {
+				if tc.name == "refresh-attachment" || tc.name == "update-retain-gap" || tc.name == "update-drop-gap" || tc.name == "update-resolve-gap" {
 					httpMode = "attachment-partial"
 				}
 				server := acquireFixture(t, httpMode, bundle, mime, func(*http.Request) { requests.Add(1) })
@@ -693,11 +940,20 @@ func TestIntakeToContext(t *testing.T) {
 							}
 							return
 						}
+						if strings.HasPrefix(tc.name, "refresh-content-") {
+							if req.URL.Path != "/attachment" {
+								t.Error("content refresh fetched another source")
+							}
+							return
+						}
 						if req.URL.Path != "/attachment" && (req.URL.Path != "/rest/api/3/issue/CASE-17/comment" || req.URL.Query().Get("startAt") != "1") {
 							t.Error("revision fetched an unrequested source")
 						}
 					})
 					revisionURL = revisionServer.URL
+				}
+				if updating {
+					revisionURL = updateHTTPFixture(t, tc.name, func(*http.Request) { newRequests.Add(1) }).URL
 				}
 				if tc.name == "http-oversized" {
 					acquisition.MaxBytes = 8192
@@ -787,7 +1043,7 @@ func TestIntakeToContext(t *testing.T) {
 			if tc.name == "attempt-cap" {
 				policy.MaxTotalAttempts = 1
 			}
-			if tc.name == "resolve-attempt-cap" || tc.name == "refresh-attempt-cap" {
+			if tc.name == "resolve-attempt-cap" || tc.name == "refresh-attempt-cap" || tc.name == "update-attempt-cap" {
 				policy.MaxTotalAttempts = 3
 			}
 			exe, err := os.Executable()
@@ -816,9 +1072,9 @@ func TestIntakeToContext(t *testing.T) {
 						result, err = resolveSlice(ctx, run, scope, models, result)
 					}
 				}
-				if err == nil && refreshing {
+				if err == nil && revising {
 					beforeResolution = result
-					if tc.name == "refresh-uncommitted-input" {
+					if tc.name == "refresh-uncommitted-input" || tc.name == "update-uncommitted-input" {
 						result.Context.Path = filepath.Join(filepath.Dir(result.Context.Path), "candidate.json")
 					}
 					work := []intakeWork{{Source: "comment:1", Reason: "retry missing comment page"}}
@@ -831,11 +1087,24 @@ func TestIntakeToContext(t *testing.T) {
 					if strings.HasPrefix(tc.name, "refresh-issue-") {
 						work = []intakeWork{{Source: "issue", Reason: "caller declared issue snapshot stale"}}
 					}
-					result, err = refreshSlice(ctx, run, scope, models, result, work)
-					if err == nil && (tc.name == "refresh-repeat" || tc.name == "refresh-issue-repeat") {
+					if strings.HasPrefix(tc.name, "refresh-content-") {
+						work = []intakeWork{{Source: "attachment-content:a1", Reason: "update content without automatically repeating analysis"}}
+						if tc.name == "refresh-content-new-analysis" {
+							work = append(work, intakeWork{Source: "attachment-analysis:a1", Reason: "new analysis result"})
+						}
+					}
+					if updating {
+						result, err = updateSlice(ctx, run, scope, models, result)
+					} else {
 						result, err = refreshSlice(ctx, run, scope, models, result, work)
 					}
-					if err == nil && tc.name == "refresh-then-resolve" {
+					if err == nil && tc.name == "update-repeat" {
+						result, err = updateSlice(ctx, run, scope, models, result)
+					}
+					if err == nil && (tc.name == "refresh-repeat" || tc.name == "refresh-issue-repeat" || tc.name == "refresh-content-failure-repeat" || tc.name == "update-then-refresh") {
+						result, err = refreshSlice(ctx, run, scope, models, result, work)
+					}
+					if err == nil && (tc.name == "refresh-then-resolve" || tc.name == "update-then-resolve") {
 						result, err = resolveSlice(ctx, run, scope, models, result)
 					}
 				}
@@ -847,7 +1116,7 @@ func TestIntakeToContext(t *testing.T) {
 				return engine.Result{Outputs: outputs}, err
 			}}
 			var transport runtime.Runtime = pi
-			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" {
+			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" {
 				transport = deadlineRuntime{pi}
 			}
 			r, err = engine.New(ctx, def, engine.Input{Prompt: "CASE-17", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
@@ -885,7 +1154,7 @@ func TestIntakeToContext(t *testing.T) {
 						hellos[e.m.SessionID] = e.m
 						continue
 					}
-					if (tc.name == "cancel" || tc.name == "attempt-timeout" || tc.name == "resolve-cancel" || tc.name == "resolve-timeout" || tc.name == "refresh-cancel" || tc.name == "refresh-timeout") && e.m.Type == "held" {
+					if (tc.name == "cancel" || tc.name == "attempt-timeout" || strings.HasSuffix(tc.name, "-cancel") || strings.HasSuffix(tc.name, "-timeout")) && e.m.Type == "held" {
 						continue
 					}
 					if e.m.Type != "prompt" {
@@ -947,29 +1216,30 @@ func TestIntakeToContext(t *testing.T) {
 						}
 						data = expectedContext
 					default:
-						if refreshing && task.Stage != "wiki-resolution" && task.Stage != "context-resolution" {
+						if revising && task.Stage != "wiki-resolution" && task.Stage != "context-resolution" {
 							switch task.Stage {
-							case "intake-revision":
-								intake, files = refreshIntakeFixture(t, ctx, tc.name, count, req.Inputs, task, revisionURL)
-								refreshRequests++
-								if tc.name == "refresh-attachment" || tc.name == "refresh-invalidated" {
-									if tc.name == "refresh-attachment" {
-										refreshRequests--
-									}
-									refreshRequests++
+							case "intake-revision", "intake-update":
+								if task.Stage == "intake-update" && (len(task.SourceWork) != 0 || !updating) {
+									t.Fatal("update turned into per-source dispatch")
+								}
+								var fetched int32
+								intake, files, fetched = refreshIntakeFixture(t, ctx, tc.name, count, req.Inputs, task, revisionURL)
+								refreshRequests += fetched
+								if task.Stage == "intake-update" && count == 4 && (tc.name == "update-add" || tc.name == "update-replace") && fetched != 3 {
+									t.Fatal("new issue/link/attachment were not acquired in one Step")
 								}
 								data = intake
 							case "wiki-revision":
 								revisionIntake = req.Inputs[0]
 								wikiMode := "wiki-matches"
-								if tc.name == "refresh-wiki-partial" || tc.name == "refresh-then-resolve" {
+								if tc.name == "refresh-wiki-partial" || tc.name == "refresh-then-resolve" || tc.name == "update-then-resolve" {
 									wikiMode = "wiki-partial"
 								}
 								if tc.name == "refresh-false-no-matches" {
 									wikiMode = "wiki-false-empty"
 								}
 								wiki, files = wikiFixture(wikiMode, req.Inputs[0])
-								if tc.name == "refresh-old-wiki-binding" {
+								if tc.name == "refresh-old-wiki-binding" || tc.name == "update-old-wiki-binding" {
 									wiki.Intake = initialIntake
 								}
 								data = wiki
@@ -997,7 +1267,19 @@ func TestIntakeToContext(t *testing.T) {
 								if tc.name == "refresh-historical-wiki" {
 									expectedContext.Observations = append(expectedContext.Observations, Fact{Value: "Agent retained a prior wiki pattern", Evidence: []Evidence{{Ref: &prior.Data.Wiki, FileID: "wiki-page"}}})
 								}
-								if tc.name == "refresh-drop-gap" {
+								if updating {
+									for n := range expectedContext.Time.Anchors {
+										if prior.Data.Time.Status != "resolved" {
+											expectedContext.Time.Anchors[n].Evidence = Evidence{FileID: "remediation"}
+										}
+									}
+									if tc.name == "update-retain-gap" {
+										expectedContext.Gaps = append(expectedContext.Gaps, prior.Data.Gaps...)
+										expectedContext.ResolvedGaps = nil
+										expectedContext.Readiness = "needs-resolution"
+									}
+								}
+								if tc.name == "refresh-drop-gap" || tc.name == "update-drop-gap" {
 									expectedContext.ResolvedGaps = nil
 								}
 								if tc.name == "refresh-dropped-history" {
@@ -1018,10 +1300,10 @@ func TestIntakeToContext(t *testing.T) {
 							break
 						}
 						expectedIntake := initialIntake
-						if refreshing {
+						if revising {
 							expectedIntake = revisionIntake
 						}
-						if (!resolving && !refreshing) || req.Inputs[0] != expectedIntake || task.Previous == nil || requests.Load() != acquiredRequests {
+						if (!resolving && !revising) || req.Inputs[0] != expectedIntake || task.Previous == nil || requests.Load() != acquiredRequests {
 							t.Fatal("resolution reacquired intake or lost committed input")
 						}
 						if task.Stage == "wiki-resolution" {
@@ -1056,7 +1338,7 @@ func TestIntakeToContext(t *testing.T) {
 								t.Fatal("resolution prerequisite gate mismatch")
 							}
 							expectedContext, files = resolutionFixture(tc.name, mode, scope, req.Inputs, intake, wiki, prior.Data)
-							if refreshing {
+							if revising {
 								for n := len(prior.Data.Attempts); n < len(expectedContext.Attempts); n++ {
 									if expectedContext.Attempts[n].Kind == "time" {
 										expectedContext.Attempts[n].Evidence = []Evidence{{FileID: "remediation"}}
@@ -1083,17 +1365,17 @@ func TestIntakeToContext(t *testing.T) {
 						writeCandidate(t, e.m, req, data, files, tc.name == "file-escape")
 					}
 					ack := "settle"
-					if tc.name == "provider-failure" || ((tc.name == "resolve-provider-failure" || tc.name == "refresh-provider-failure") && count == 4) {
+					if tc.name == "provider-failure" || ((resolving || revising) && strings.HasSuffix(tc.name, "-provider-failure") && count == 4) {
 						ack = "provider-error"
 					}
-					if tc.name == "attempt-timeout" || ((tc.name == "resolve-timeout" || tc.name == "refresh-timeout") && count == 4) {
+					if tc.name == "attempt-timeout" || ((resolving || revising) && strings.HasSuffix(tc.name, "-timeout") && count == 4) {
 						ack = "hold"
 					}
-					if tc.name == "cancel" || ((tc.name == "resolve-cancel" || tc.name == "refresh-cancel") && count == 4) {
+					if tc.name == "cancel" || ((resolving || revising) && strings.HasSuffix(tc.name, "-cancel") && count == 4) {
 						ack = "hold"
 						r.Cancel(engine.OriginControllerUser)
 					}
-					if tc.name == "cleanup-failure" || ((tc.name == "resolve-cleanup-failure" || tc.name == "refresh-cleanup-failure") && count == 4) {
+					if tc.name == "cleanup-failure" || ((resolving || revising) && strings.HasSuffix(tc.name, "-cleanup-failure") && count == 4) {
 						for sid := range hellos {
 							path := filepath.Join(bridge, sid+".json")
 							if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -1112,6 +1394,9 @@ func TestIntakeToContext(t *testing.T) {
 			if count != tc.stages || (report.ExitCode != 0) != tc.failure {
 				t.Fatalf("stages=%d outcome=%s failure=%v", count, report.Outcome, report.Failure)
 			}
+			if tc.name == "update-wrong-task" && !strings.Contains(fmt.Sprint(report.Failure), "intake revision changed dispatched task/work/previous") {
+				t.Fatalf("wrong task was not rejected at dispatch binding: %v", report.Failure)
+			}
 			if report.Final != nil {
 				t.Fatal("slice invented final report")
 			}
@@ -1126,15 +1411,76 @@ func TestIntakeToContext(t *testing.T) {
 				if !reflect.DeepEqual(published.Data, expectedContext) {
 					t.Fatal("committed context lost provenance/state")
 				}
+				if revising {
+					var revised, initial publication[Intake]
+					if err := protocol.ReadJSON(result.Intake.Path, &revised); err != nil {
+						t.Fatal(err)
+					}
+					if err := protocol.ReadJSON(initialIntake.Path, &initial); err != nil {
+						t.Fatal(err)
+					}
+					if revised.Data.Update != (updating && tc.name != "update-then-refresh") {
+						t.Fatal("intake lost task binding")
+					}
+					if revised.Data.Acquisition == nil || revised.Data.Acquisition.Ref != nil || !hasFile(revised.Files, revised.Data.Acquisition.FileID) {
+						t.Fatal("new acquisition diagnostics not owned by revision")
+					}
+					switch tc.name {
+					case "update-page":
+						oldPage := initial.Data.Comments[0].Source
+						oldPage.Ref = &initialIntake
+						if !reflect.DeepEqual(revised.Data.Comments[0].Source, oldPage) || revised.Data.Comments[1].Source.Ref != nil || !hasFile(revised.Files, revised.Data.Comments[1].Source.FileID) {
+							t.Fatal("update did not retain page owner and acquire missing page in one Step")
+						}
+					case "update-comments-repage":
+						if len(revised.Data.Comments) != 1 || revised.Data.Comments[0].Source.Ref != nil || len(initial.Data.Comments) != 2 {
+							t.Fatal("repagination changed history or retained obsolete active page")
+						}
+					case "update-comments-missing":
+						page := revised.Data.Comments[2].Source
+						if revised.Data.Complete || page.Status != "partial" || !hasFile(revised.Files, page.FileID) {
+							t.Fatal("partial comment page lost status or raw evidence")
+						}
+					case "update-content", "update-retain-content", "refresh-content-failure", "refresh-content-failure-repeat":
+						oldAnalysis := initial.Data.Attachments[0].Analysis
+						oldAnalysis.Ref = &initialIntake
+						if !reflect.DeepEqual(revised.Data.Attachments[0].Analysis, oldAnalysis) {
+							t.Fatal("source update rewrote historical analysis ownership")
+						}
+						if tc.name == "update-retain-content" {
+							oldContent := initial.Data.Attachments[0].Content
+							oldContent.Ref = &initialIntake
+							if !reflect.DeepEqual(revised.Data.Attachments[0].Content, oldContent) {
+								t.Fatal("historical content was relabeled as a new download")
+							}
+						} else if !hasFile(revised.Files, revised.Data.Attachments[0].Content.FileID) || revised.Data.Attachments[0].Content.Ref != nil {
+							t.Fatal("new content/partial bytes not preserved")
+						}
+					case "update-remove", "update-retain-gap", "update-resolve-gap":
+						if len(revised.Data.Attachments) != 0 || len(revised.Data.Linked) != 0 {
+							t.Fatal("removed sources remain in active inventory")
+						}
+						if len(initial.Data.Attachments) != 1 || len(initial.Data.Linked) != 1 {
+							t.Fatal("removal changed committed history")
+						}
+					case "update-repeat":
+						if revised.Data.Attachments[0].Content.Ref == nil || revised.Data.Previous == nil || *revised.Data.Attachments[0].Content.Ref != *revised.Data.Previous {
+							t.Fatal("second update did not retain the first update's true owner")
+						}
+						if published.Data.Time.Anchors[0].Evidence.Ref == nil || *published.Data.Time.Anchors[0].Evidence.Ref != initialIntake {
+							t.Fatal("removed inventory evidence lost historical binding")
+						}
+					}
+				}
 			}
-			if tc.name != "cleanup-failure" && tc.name != "resolve-cleanup-failure" && tc.name != "refresh-cleanup-failure" {
+			if !strings.HasSuffix(tc.name, "cleanup-failure") {
 				for _, c := range report.Cleanup {
 					if !c.WaitCompleted || !c.ProcessExited || len(c.Unconfirmed) > 0 {
 						t.Fatalf("cleanup incomplete: %+v", c)
 					}
 				}
 			}
-			if (tc.name == "cleanup-failure" || tc.name == "resolve-cleanup-failure" || tc.name == "refresh-cleanup-failure") && len(report.CleanupErrors) == 0 {
+			if strings.HasSuffix(tc.name, "cleanup-failure") && len(report.CleanupErrors) == 0 {
 				t.Fatal("cleanup failure not retained")
 			}
 			if tc.name == "attempt-timeout" || tc.name == "provider-failure" {
@@ -1154,7 +1500,7 @@ func TestIntakeToContext(t *testing.T) {
 					}
 				}
 			}
-			if (resolving || refreshing) && tc.name != "resolve-uncommitted-input" && tc.name != "refresh-uncommitted-input" {
+			if (resolving || revising) && !strings.HasSuffix(tc.name, "-uncommitted-input") {
 				if requests.Load() != acquiredRequests || acquiredRequests == 0 {
 					t.Fatal("resolution repeated HTTP acquisition")
 				}
@@ -1168,15 +1514,15 @@ func TestIntakeToContext(t *testing.T) {
 					}
 				}
 			}
-			if tc.name == "resolve-provider-failure" || tc.name == "resolve-timeout" || tc.name == "refresh-provider-failure" || tc.name == "refresh-timeout" {
+			if (resolving || revising) && (strings.HasSuffix(tc.name, "-provider-failure") || strings.HasSuffix(tc.name, "-timeout")) {
 				var failure *engine.Failure
 				if !errors.As(report.Failure, &failure) {
 					t.Fatal("resolution lost typed execution failure")
 				}
-				if (tc.name == "resolve-provider-failure" || tc.name == "refresh-provider-failure") && failure.Code != engine.ProviderFailed {
+				if strings.HasSuffix(tc.name, "-provider-failure") && failure.Code != engine.ProviderFailed {
 					t.Fatalf("resolution provider failure reclassified: %+v", failure)
 				}
-				if (tc.name == "resolve-timeout" || tc.name == "refresh-timeout") && (failure.Code != engine.TimedOut || failure.Origin != engine.OriginAttemptDeadline) {
+				if strings.HasSuffix(tc.name, "-timeout") && (failure.Code != engine.TimedOut || failure.Origin != engine.OriginAttemptDeadline) {
 					t.Fatalf("resolution timeout reclassified: %+v", failure)
 				}
 				for _, a := range report.Snapshot.Attempts {
@@ -1186,14 +1532,14 @@ func TestIntakeToContext(t *testing.T) {
 				}
 			}
 			for _, s := range report.Snapshot.Sessions {
-				if (s.Role.Name == "triage-intake" || s.Role.Name == "triage-intake-revision") && (s.Role.Model.Provider != "fireworks" || s.Role.Model.ID != "accounts/fireworks/models/deepseek-v4p1-flash") {
+				if (s.Role.Name == "triage-intake" || s.Role.Name == "triage-intake-revision" || s.Role.Name == "triage-intake-update") && (s.Role.Model.Provider != "fireworks" || s.Role.Model.ID != "accounts/fireworks/models/deepseek-v4p1-flash") {
 					t.Fatal("mechanical model binding changed")
 				}
 			}
-			if (tc.name == "cancel" || tc.name == "resolve-cancel" || tc.name == "refresh-cancel") && report.Outcome != engine.CancelledState {
+			if (tc.name == "cancel" || strings.HasSuffix(tc.name, "-cancel")) && report.Outcome != engine.CancelledState {
 				t.Fatal("cancellation swallowed")
 			}
-			if (tc.name == "attempt-cap" || tc.name == "resolve-attempt-cap" || tc.name == "refresh-attempt-cap") && !strings.Contains(fmt.Sprint(report.Failure), "LimitExceeded") {
+			if strings.HasSuffix(tc.name, "attempt-cap") && !strings.Contains(fmt.Sprint(report.Failure), "LimitExceeded") {
 				t.Fatal("hard cap swallowed")
 			}
 		})

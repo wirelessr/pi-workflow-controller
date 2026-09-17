@@ -40,7 +40,7 @@ func slicePolicy() engine.RunPolicy {
 
 func sliceStep(ctx context.Context, r *engine.Run, models sliceModels, key string, task stageTask, schema string, inputs []contract.Ref) (contract.Ref, error) {
 	model := models.Analysis
-	if task.Stage == "intake" || task.Stage == "intake-revision" {
+	if task.Stage == "intake" || task.Stage == "intake-revision" || task.Stage == "intake-update" {
 		model = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: models.FetchThinking}
 	}
 	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + task.Stage, CWD: filepath.Join(r.Dir(), "triage-work"), Model: model})

@@ -43,8 +43,9 @@ type Attachment struct {
 	Analysis Source `json:"analysis"`
 }
 
-// intakeWork identifies one source slot, not a command or an applicability rule.
-// Reason is supplied by the caller/agent, including explicit invalidation reasons.
+// intakeWork records source work, not commands or applicability rules. In a
+// scoped refresh it is dispatched by the caller; in an update the agent reports
+// the acquired, changed or removed slots and reasons after doing the work.
 type intakeWork struct {
 	Source string `json:"source"`
 	Reason string `json:"reason"`
@@ -52,6 +53,7 @@ type intakeWork struct {
 
 type Intake struct {
 	Previous    *contract.Ref `json:"previous,omitempty"`
+	Update      bool          `json:"update,omitempty"`
 	Work        []intakeWork  `json:"work,omitempty"`
 	Acquisition *Source       `json:"acquisition,omitempty"`
 	Ticket      string        `json:"ticket"`
