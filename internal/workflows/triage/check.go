@@ -467,8 +467,8 @@ func checkTime(v TimeResolution, evidence func(Evidence) error) error {
 	if v.Status == "resolved" {
 		from, e1 := utc(v.From)
 		to, e2 := utc(v.To)
-		// This slice records the observed incident interval, not an invented
-		// padded query window. Query-specific expansion belongs to the planner.
+		// Observed incident bounds are separate from query windows, which the
+		// agent selects and adjusts autonomously within the authorized task.
 		if e1 != nil || e2 != nil || first.IsZero() || !from.Equal(first) || !to.Equal(last) {
 			return fmt.Errorf("UTC window must match observed anchors")
 		}
