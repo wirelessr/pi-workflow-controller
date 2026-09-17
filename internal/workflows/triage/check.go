@@ -588,6 +588,21 @@ func checkContext(ctx context.Context, r *engine.Run, ref contract.Ref, scope Sc
 				return v, err
 			}
 		}
+		for _, q := range a.Queries {
+			from, e1 := utc(q.From)
+			to, e2 := utc(q.To)
+			if e1 != nil || e2 != nil || !from.Before(to) {
+				return v, fmt.Errorf("supporting query requires a nonzero UTC window")
+			}
+			if !nonblank(q.Source) || !nonblank(q.Filter) || !nonblank(q.Outcome) || len(q.Basis) == 0 || len(q.Evidence) == 0 {
+				return v, fmt.Errorf("supporting query lacks conditions, basis or result evidence")
+			}
+			for _, e := range append(slices.Clone(q.Basis), q.Evidence...) {
+				if err := evidence(e); err != nil {
+					return v, err
+				}
+			}
+		}
 		kinds[a.Kind] = true
 	}
 	if !kinds["identity"] || !kinds["time"] {

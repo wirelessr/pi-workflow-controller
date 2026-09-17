@@ -115,6 +115,15 @@ func qualifiedContext(v Context, ref contract.Ref) Context {
 		for j := range out.Attempts[n].Evidence {
 			bind(&out.Attempts[n].Evidence[j])
 		}
+		for j := range out.Attempts[n].Queries {
+			q := &out.Attempts[n].Queries[j]
+			for k := range q.Basis {
+				bind(&q.Basis[k])
+			}
+			for k := range q.Evidence {
+				bind(&q.Evidence[k])
+			}
+		}
 	}
 	return out
 }
@@ -140,7 +149,14 @@ func checkRevision(v Context, h contextHistory, fact func(Fact) error, wikiRef c
 		}
 	}
 	for _, attempt := range old.Attempts {
-		if !slices.ContainsFunc(v.Attempts, func(a ResolutionAttempt) bool { return reflect.DeepEqual(a, attempt) }) {
+		if !slices.ContainsFunc(v.Attempts, func(a ResolutionAttempt) bool {
+			// The qualified JSON copy omits empty optional queries. An agent's
+			// explicit [] represents the same history as an omitted field.
+			if len(a.Queries) == 0 {
+				a.Queries = nil
+			}
+			return reflect.DeepEqual(a, attempt)
+		}) {
 			return fmt.Errorf("context revision dropped resolution history")
 		}
 	}

@@ -32,6 +32,10 @@ type stageTask struct {
 	ResolutionKinds          []string      `json:"resolution_kinds,omitempty"`
 }
 
+// These are identity/time task requirements, not a tool wrapper or a separate
+// query-approval stage. Every context-producing task has the same receipt duties.
+const supportingResolutionRequirements = `Load the relevant existing skills before identity/time acquisition and use their normal tools. Save original target verification, deployed release and lookup query/response alongside the normalized identity receipt; do not substitute the receipt for raw evidence. For time resolution, actively inspect other authorized sources when local timestamps lack a timezone. Supporting log/metric queries require an authorized target, completed intake/wiki prerequisites, and an evidence-backed finite UTC search window with source/filter clues before querying, but do not require every local timestamp or the final context to be resolved. If no trustworthy UTC search basis exists, seek it from other authorized sources; never guess zones or scan alternative timezones. Within this task, choose small windows appropriate to log volume and the question; autonomously narrow, shift, split, expand, add evidenced filters or aggregate with existing tools. Do not seek per-query Controller approval and do not require each query to cover the entire observed incident interval. Keep the task's scope and existing tool limits. Record each actual time-bounded supporting query in its resolution attempt's queries: source, filter, UTC from/to, basis refs available before querying, complete/partial/unavailable status, outcome explaining the window choice and limitations, and evidence refs for original results plus request/status/diagnostics. These are work receipts, not dispatch requests. Preserve failed and partial queries even after a later query succeeds. A query may find useful evidence without exhaustive coverage; judge its applicability and state limitations. Empty small-window results, partial data and execution timeouts do not prove absence across the incident. Do not overwrite observed time.from/to with search windows.`
+
 func slicePolicy() engine.RunPolicy {
 	p := engine.DefaultRunPolicy()
 	p.DisableRunTimeout = true
@@ -46,6 +50,9 @@ func sliceStep(ctx context.Context, r *engine.Run, models sliceModels, key strin
 	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + task.Stage, CWD: filepath.Join(r.Dir(), "triage-work"), Model: model})
 	if err != nil {
 		return contract.Ref{}, err
+	}
+	if schema == ContextSchema {
+		task.Requirements += "\n\n" + supportingResolutionRequirements
 	}
 	prompt, err := json.Marshal(task)
 	if err != nil {

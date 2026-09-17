@@ -138,11 +138,27 @@ type TimeResolution struct {
 	Anchors []TimeAnchor `json:"anchors"`
 }
 
-type ResolutionAttempt struct {
-	Kind     string     `json:"kind"`
+// SupportingQuery records work performed within a resolution task, not a
+// request for dispatch. Basis cites the UTC/search evidence available before
+// querying; Evidence preserves actual results and diagnostics, including partials.
+// Its window is independent of the context's observed incident interval.
+type SupportingQuery struct {
 	Source   string     `json:"source"`
+	Filter   string     `json:"filter"`
+	From     string     `json:"from"`
+	To       string     `json:"to"`
+	Basis    []Evidence `json:"basis"`
+	Status   string     `json:"status"`
 	Outcome  string     `json:"outcome"`
 	Evidence []Evidence `json:"evidence"`
+}
+
+type ResolutionAttempt struct {
+	Kind     string            `json:"kind"`
+	Source   string            `json:"source"`
+	Outcome  string            `json:"outcome"`
+	Evidence []Evidence        `json:"evidence"`
+	Queries  []SupportingQuery `json:"queries,omitempty"`
 }
 
 type Context struct {

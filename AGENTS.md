@@ -21,6 +21,10 @@ Planner Agent 可以提出下一步工作；Controller 依已批准的 contract�
 
 派工以完整任務為單位，不把任務內的領域操作拆成 Controller 的微型審批流程。在已授權 scope、角色與完成條件內，Agent 自主選擇工具、處理新發現的來源並回報實際工作、結果與缺項；不能只因發現新附件或 linked issue，就要求先停止、提交申請再由 Controller 批准取得。超出授權範圍、需要其他角色或後續 Step 時，才由 Controller 接續派工。明確的局部補取可以保留為窄任務，但不能成為所有更新工作的唯一形式。
 
+查詢窗口、分段、filters 與 aggregation 是 Agent 在完整任務內控制資料量及取得證據的策略，不是逐次 Controller 審批單位。Agent 可依證據與結果自主縮窄、移動或擴展窗口，不要求每次查詢涵蓋整段事故，也不由 Controller 統一指定窗口寬度。保留實際查詢條件、時間依據、結果完整性與失敗診斷，以供交接驗收。
+
+局部工作已有可靠前提，不等於所有背景資訊都必須先解析完成。例如已有可信的有限 UTC 搜尋依據時，可先取得 supporting evidence 協助解析其他時間；不能猜時區或盲掃來冒充前提。Controller 保留既定 scope、UTC、receipt、completeness、Refs、預算及 cleanup 驗收，不自行判斷窗口的調查價值。小窗空結果、partial 或 timeout 不代表整段事故不存在。
+
 ## 二、版本驗收不等於領域認列
 
 - Exact 引用舊 evidence，不等於冒充新版 evidence。保留真正 owner 與歷史 binding；不得因為來源較舊就一律拒絕，也不得把舊產物重新標成新版取得或驗證。

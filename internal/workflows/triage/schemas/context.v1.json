@@ -143,6 +143,30 @@
           "evidence"
         ],
         "properties": {
+          "queries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source", "filter", "from", "to", "basis", "status", "outcome", "evidence"],
+              "properties": {
+                "source": {"type": "string"},
+                "filter": {"type": "string"},
+                "from": {"type": "string"},
+                "to": {"type": "string"},
+                "basis": {
+                  "type": "array",
+                  "items": {"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"}
+                },
+                "status": {"enum": ["complete", "partial", "unavailable"]},
+                "outcome": {"type": "string"},
+                "evidence": {
+                  "type": "array",
+                  "items": {"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"}
+                }
+              }
+            }
+          },
           "kind": {
             "enum": [
               "identity",

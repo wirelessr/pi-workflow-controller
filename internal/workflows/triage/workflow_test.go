@@ -85,6 +85,10 @@ func intakeFixture(mode string) (Intake, map[string][]byte) {
 		"bundle":    []byte("event=sample at 2025-01-02T00:30:00+02:00\n"),
 		"extracted": []byte("processInfo/epoch correlation; observed event sample, not ticket activity\n"),
 	}
+	if strings.HasPrefix(mode, "support-") {
+		files["bundle"] = []byte("event=sample at 2025-01-02T00:30:00; timezone unknown\n")
+		files["page-1"] = []byte(`{"startAt":1,"total":2,"comments":[{"id":"c2","body":"Server receipt for tenant 17 at 2025-01-01T22:30:00Z; later receipt at 2025-01-01T22:50:00Z"}]}`)
+	}
 	files["issue"] = testJSON(map[string]any{"key": "CASE-17", "fields": map[string]any{
 		"description":   map[string]any{"type": "doc", "content": []any{map[string]any{"text": strings.Repeat("unabridged ", 80)}}},
 		"customfield_1": "not an identity", "customfield_2": 17,
@@ -801,6 +805,231 @@ func refreshIntakeFixture(t *testing.T, ctx context.Context, name string, count 
 	return v, files, int32(len(receipts))
 }
 
+// Only the external API/provider boundary is simulated. The fixture performs
+// real HTTP acquisition in one context task; it is not a product tool wrapper.
+func supportingHTTPFixture(t *testing.T, name string, requests *atomic.Int32) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/identity":
+			if name == "support-malformed-lookup" {
+				_, _ = w.Write([]byte(`{"rows":`))
+				return
+			}
+			target := IdentityLookup{Stack: "test-stack", Pop: "test-pop", Binding: "local:test-cluster", Release: "release-example", Matches: []TenantIdentity{{TenantID: "17", OrgKey: "org-example"}}}
+			if name == "support-lookup-conflict" {
+				target.Matches = append(target.Matches, TenantIdentity{TenantID: "18", OrgKey: "other-org"})
+			}
+			if name == "support-lookup-environment" {
+				target.Pop = "other-pop"
+			}
+			if name == "support-lookup-release" {
+				target.Release = "other-release"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"target": target, "query": "read-only tenant lookup for 17"})
+		case "/events":
+			if r.URL.Query().Get("from") == "" || r.URL.Query().Get("to") == "" {
+				t.Error("supporting request lacks bounded time")
+			}
+			if r.URL.Query().Get("filter") == "tenant:17" {
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte(`{"events":[{"trace":"sample"}],"partial":true}`))
+				return
+			}
+			if r.URL.Query().Get("filter") != "trace:sample" {
+				t.Error("fixture did not narrow with observed trace")
+			}
+			mode := r.URL.Query().Get("mode")
+			if mode == "unavailable" {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":"source unavailable"}`))
+			} else if mode == "partial" {
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte(`{"events":[],"partial":true}`))
+			} else if mode == "empty" {
+				_, _ = w.Write([]byte(`{"events":[],"partial":false}`))
+			} else {
+				epoch := int64(1735770600000)
+				if name == "support-wrong-epoch" {
+					epoch += 1000
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"events": []any{map[string]any{"trace": "sample", "epoch_millis": epoch}}, "partial": false})
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func supportingContextFixture(t *testing.T, ctx context.Context, base, name string, cycle int, task stageTask, inputs []contract.Ref, v Context, files map[string][]byte) (Context, map[string][]byte) {
+	t.Helper()
+	// A trustworthy server receipt is available, but the client timestamp is
+	// still unresolved when supporting acquisition begins.
+	if cycle == 0 {
+		v.Time = TimeResolution{Status: "unresolved", Anchors: []TimeAnchor{}}
+		v.Attempts[1].Outcome = "local client timestamp has no timezone; seek same-event server evidence"
+	}
+	if !task.RuntimeResolutionAllowed {
+		return v, files
+	}
+	fetch := func(id, endpoint string) int {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+endpoint, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[id] = raw
+		files[id+"-metadata"] = testJSON(map[string]any{"request": endpoint, "http_status": resp.StatusCode, "fetched_at": "2025-01-03T00:00:00Z"})
+		return resp.StatusCode
+	}
+	if cycle == 0 {
+		fetch("identity-raw", "/identity")
+		var raw struct {
+			Target IdentityLookup `json:"target"`
+		}
+		if err := json.Unmarshal(files["identity-raw"], &raw); err != nil {
+			delete(files, "resolution")
+			v.Identity.Lookup = nil
+			v.Identity.Status = "unresolved"
+			v.Gaps = append(v.Gaps, "identity response malformed")
+			v.Attempts[0].Outcome = "raw lookup response could not be parsed"
+		} else {
+			files["resolution"] = testJSON(raw.Target)
+			if len(raw.Target.Matches) != 1 {
+				v.Identity.Status = "conflicting"
+				v.Gaps = append(v.Gaps, "identity response has conflicting rows")
+				v.Attempts[0].Outcome = "raw lookup returned conflicting rows"
+			}
+		}
+		v.Attempts[0].Evidence = []Evidence{{FileID: "identity-raw"}, {FileID: "identity-raw-metadata"}}
+		for _, f := range []*Fact{&v.Identity.Stack, &v.Identity.Pop, &v.Identity.Binding, &v.Identity.TenantID, &v.Identity.OrgKey, &v.Identity.Release} {
+			f.Evidence = []Evidence{{FileID: "identity-raw"}, {FileID: "identity-raw-metadata"}}
+		}
+	}
+	mode := "complete"
+	switch name {
+	case "support-partial":
+		mode = "partial"
+	case "support-unavailable":
+		mode = "unavailable"
+	case "support-empty":
+		mode = "empty"
+	}
+	if strings.HasPrefix(name, "support-resolve-") && (cycle == 0 || (name == "support-resolve-repeat" && cycle == 1)) {
+		mode = "partial"
+	}
+	attempt := ResolutionAttempt{Kind: "time", Source: "authorized same-event supporting search", Outcome: "preserve both broad partial and narrowed result", Evidence: []Evidence{{FileID: "events-narrow"}, {FileID: "events-narrow-metadata"}}}
+	for n, spec := range []struct{ id, from, to, filter string }{
+		{"events-broad", "2025-01-01T22:29:00Z", "2025-01-01T22:31:00Z", "tenant:17"},
+		{"events-narrow", "2025-01-01T22:29:59Z", "2025-01-01T22:30:01Z", "trace:sample"},
+	} {
+		filter := spec.filter
+		if n == 1 {
+			var prior struct {
+				Events []struct {
+					Trace string `json:"trace"`
+				} `json:"events"`
+			}
+			if err := json.Unmarshal(files["events-broad"], &prior); err != nil || len(prior.Events) != 1 {
+				t.Fatal("missing narrowing evidence")
+			}
+			filter = "trace:" + prior.Events[0].Trace
+		}
+		status := fetch(spec.id, "/events?from="+spec.from+"&to="+spec.to+"&filter="+filter+"&mode="+mode)
+		q := SupportingQuery{Source: "anonymous event source", Filter: filter, From: spec.from, To: spec.to, Basis: []Evidence{{Ref: &inputs[0], FileID: "page-1"}}, Status: "complete", Outcome: "small window around server receipt; narrow with observed trace after volume limit; not full-incident coverage", Evidence: []Evidence{{FileID: spec.id}, {FileID: spec.id + "-metadata"}}}
+		if n == 1 {
+			q.Basis = append(q.Basis, Evidence{FileID: "events-broad"})
+		}
+		if status == http.StatusPartialContent {
+			q.Status = "partial"
+		} else if status != http.StatusOK {
+			q.Status = "unavailable"
+		}
+		attempt.Queries = append(attempt.Queries, q)
+	}
+	var events struct {
+		Events []struct {
+			Epoch int64 `json:"epoch_millis"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(files["events-narrow"], &events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events.Events) != 0 {
+		epoch := events.Events[0].Epoch
+		a := TimeAnchor{Event: "sample", Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "same-event server epoch", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: Evidence{Ref: &inputs[0], FileID: "bundle"}, PairedEpochMillis: &epoch, PairedEvidence: &Evidence{FileID: "events-narrow"}}
+		v.Time = TimeResolution{Status: "resolved", From: a.UTC, To: a.UTC, Anchors: []TimeAnchor{a}}
+		for n := range v.ResolvedGaps {
+			v.ResolvedGaps[n].Evidence = []Evidence{{FileID: "events-narrow"}, {FileID: "events-narrow-metadata"}}
+		}
+		if name == "support-subwindow" {
+			v.Time.Anchors = append(v.Time.Anchors, TimeAnchor{Event: "later receipt", Original: "2025-01-01T22:50:00Z", Format: "rfc3339", SourceTZ: "UTC", UTC: "2025-01-01T22:50:00Z", Evidence: Evidence{Ref: &inputs[0], FileID: "page-1"}})
+			v.Time.To = "2025-01-01T22:50:00Z"
+		}
+	} else {
+		v.Time = TimeResolution{Status: "unresolved", Anchors: []TimeAnchor{}}
+		v.Gaps = append(v.Gaps, "supporting time evidence pending")
+		v.ResolvedGaps = nil
+	}
+	q := &attempt.Queries[1]
+	switch name {
+	case "support-zero-window":
+		q.To = q.From
+	case "support-reversed-window":
+		q.From, q.To = q.To, q.From
+	case "support-nonutc":
+		q.From = "2025-01-01T22:29:59"
+	case "support-no-basis":
+		q.Basis = []Evidence{}
+	case "support-missing-file":
+		q.Basis[0].FileID = "absent-seed"
+	case "support-no-result":
+		q.Evidence = []Evidence{}
+	case "support-blank-filter":
+		q.Filter = " "
+	case "support-no-outcome":
+		q.Outcome = ""
+	case "support-invalid-status":
+		q.Status = "ready"
+	case "support-foreign-basis":
+		bad := inputs[0]
+		bad.RunID = "foreign"
+		q.Basis[0].Ref = &bad
+	case "support-uncommitted-result":
+		bad := inputs[0]
+		bad.Path = filepath.Join(filepath.Dir(bad.Path), "candidate.json")
+		q.Evidence[0].Ref = &bad
+	}
+	v.Attempts = append(v.Attempts, attempt)
+	if cycle > 0 {
+		switch name {
+		case "support-resolve-dropped-history":
+			v.Attempts = append(v.Attempts[:2], v.Attempts[3:]...)
+		case "support-resolve-altered-query":
+			v.Attempts[2].Queries[0].Status = "complete"
+		case "support-resolve-retag-basis":
+			v.Attempts[2].Queries[1].Basis[1].Ref = nil
+		}
+	}
+	v.Readiness = "ready"
+	if len(v.Gaps) > 0 {
+		v.Readiness = "needs-resolution"
+	}
+	return v, files
+}
+
 func TestIntakeToContext(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -808,6 +1037,14 @@ func TestIntakeToContext(t *testing.T) {
 		failure bool
 		ready   bool
 	}{
+		{"support-ticket-only", 3, false, false}, {"support-wiki-partial", 3, false, false}, {"support-incomplete", 3, false, false}, {"support-wrong-epoch", 3, true, false}, {"support-missing-file", 3, true, false},
+		{"support-complete", 3, false, true}, {"support-subwindow", 3, false, true}, {"support-partial", 3, false, false}, {"support-unavailable", 3, false, false}, {"support-empty", 3, false, false},
+		{"support-lookup-conflict", 3, false, false}, {"support-malformed-lookup", 3, false, false}, {"support-lookup-environment", 3, true, false}, {"support-lookup-release", 3, true, false},
+		{"support-zero-window", 3, true, false}, {"support-reversed-window", 3, true, false}, {"support-nonutc", 3, true, false}, {"support-no-basis", 3, true, false}, {"support-no-result", 3, true, false}, {"support-blank-filter", 3, true, false}, {"support-no-outcome", 3, true, false}, {"support-invalid-status", 3, true, false}, {"support-foreign-basis", 3, true, false}, {"support-uncommitted-result", 3, true, false},
+		{"support-resolve-altered-query", 4, true, false}, {"support-resolve-retag-basis", 4, true, false},
+		{"support-resolve-empty-prior", 4, false, true}, {"support-resolve-empty-next", 4, false, true}, {"support-resolve-empty-both", 4, false, true},
+		{"support-resolve-success", 4, false, true}, {"support-resolve-repeat", 5, false, true}, {"support-resolve-dropped-history", 4, true, false},
+		{"support-resolve-provider-failure", 4, true, false}, {"support-resolve-cancel", 4, true, false}, {"support-resolve-timeout", 4, true, false}, {"support-resolve-cleanup-failure", 4, true, false}, {"support-resolve-attempt-cap", 3, true, false},
 		{"update-page", 6, false, true}, {"update-comments-repage", 6, false, true}, {"update-comments-missing", 6, false, false}, {"update-comments-false-complete", 4, true, false},
 		{"update-add", 6, false, true}, {"update-remove", 6, false, true}, {"update-replace", 6, false, true}, {"update-repeat", 9, false, true},
 		{"update-content", 6, false, true}, {"update-retain-content", 6, false, true}, {"update-partial", 6, false, false}, {"update-issue-failure", 6, false, false},
@@ -844,11 +1081,12 @@ func TestIntakeToContext(t *testing.T) {
 		{"attempt-timeout", 1, true, false}, {"provider-failure", 1, true, false}, {"cancel", 1, true, false}, {"cleanup-failure", 1, true, false}, {"attempt-cap", 1, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			resolving := strings.HasPrefix(tc.name, "resolve-")
+			supporting := strings.HasPrefix(tc.name, "support-")
+			resolving := strings.HasPrefix(tc.name, "resolve-") || strings.HasPrefix(tc.name, "support-resolve-")
 			refreshing := strings.HasPrefix(tc.name, "refresh-")
 			updating := strings.HasPrefix(tc.name, "update-")
 			revising := refreshing || updating
-			acquiring := resolving || revising || strings.HasPrefix(tc.name, "http-")
+			acquiring := (resolving && !supporting) || revising || strings.HasPrefix(tc.name, "http-")
 			mode := tc.name
 			if revising {
 				mode = "wiki-matches"
@@ -873,6 +1111,17 @@ func TestIntakeToContext(t *testing.T) {
 					mode = "wiki-not-run"
 				}
 			}
+			if supporting {
+				mode = tc.name
+				switch tc.name {
+				case "support-ticket-only":
+					mode = "ticket-only"
+				case "support-wiki-partial":
+					mode = "wiki-partial"
+				case "support-incomplete":
+					mode = "missing-page"
+				}
+			}
 			scope := testScope()
 			if mode == "ticket-only" {
 				scope = Scope{Ticket: "CASE-17", TenantIDs: []string{}}
@@ -890,6 +1139,11 @@ func TestIntakeToContext(t *testing.T) {
 				scope.Stack, scope.Pop, scope.Binding = " ", " ", " "
 			}
 			targetAuthorized := strings.TrimSpace(scope.Stack) != "" && strings.TrimSpace(scope.Pop) != "" && strings.TrimSpace(scope.Binding) != "" && len(scope.TenantIDs) > 0
+			var supportingRequests atomic.Int32
+			var supportingURL string
+			if supporting {
+				supportingURL = supportingHTTPFixture(t, tc.name, &supportingRequests).URL
+			}
 			var requests, newRequests atomic.Int32
 			var revisionURL string
 			var acquisition acquisitionOptions
@@ -1043,7 +1297,7 @@ func TestIntakeToContext(t *testing.T) {
 			if tc.name == "attempt-cap" {
 				policy.MaxTotalAttempts = 1
 			}
-			if tc.name == "resolve-attempt-cap" || tc.name == "refresh-attempt-cap" || tc.name == "update-attempt-cap" {
+			if tc.name == "resolve-attempt-cap" || tc.name == "refresh-attempt-cap" || tc.name == "update-attempt-cap" || tc.name == "support-resolve-attempt-cap" {
 				policy.MaxTotalAttempts = 3
 			}
 			exe, err := os.Executable()
@@ -1068,7 +1322,7 @@ func TestIntakeToContext(t *testing.T) {
 						result.Context.Path = filepath.Join(filepath.Dir(result.Context.Path), "candidate.json")
 					}
 					result, err = resolveSlice(ctx, run, scope, models, result)
-					if err == nil && tc.name == "resolve-repeat" {
+					if err == nil && (tc.name == "resolve-repeat" || tc.name == "support-resolve-repeat") {
 						result, err = resolveSlice(ctx, run, scope, models, result)
 					}
 				}
@@ -1116,7 +1370,7 @@ func TestIntakeToContext(t *testing.T) {
 				return engine.Result{Outputs: outputs}, err
 			}}
 			var transport runtime.Runtime = pi
-			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" {
+			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" {
 				transport = deadlineRuntime{pi}
 			}
 			r, err = engine.New(ctx, def, engine.Input{Prompt: "CASE-17", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
@@ -1169,6 +1423,9 @@ func TestIntakeToContext(t *testing.T) {
 					if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
 						t.Fatal(err)
 					}
+					if req.Output.SchemaID == ContextSchema && !strings.Contains(task.Requirements, supportingResolutionRequirements) {
+						t.Fatalf("supporting requirements missing from %s task", task.Stage)
+					}
 					if !reflect.DeepEqual(task.Scope, scope) {
 						t.Fatal("scope not in prompt")
 					}
@@ -1213,6 +1470,9 @@ func TestIntakeToContext(t *testing.T) {
 								expectedContext.Attempts[1].Evidence[0].FileID = "issue"
 								expectedContext.Attempts[1].Outcome = "attachment unavailable or incomplete; trustworthy incident anchor pending"
 							}
+						}
+						if supporting {
+							expectedContext, files = supportingContextFixture(t, ctx, supportingURL, tc.name, 0, task, req.Inputs, expectedContext, files)
 						}
 						data = expectedContext
 					default:
@@ -1338,6 +1598,9 @@ func TestIntakeToContext(t *testing.T) {
 								t.Fatal("resolution prerequisite gate mismatch")
 							}
 							expectedContext, files = resolutionFixture(tc.name, mode, scope, req.Inputs, intake, wiki, prior.Data)
+							if supporting {
+								expectedContext, files = supportingContextFixture(t, ctx, supportingURL, tc.name, count-3, task, req.Inputs, expectedContext, files)
+							}
 							if revising {
 								for n := len(prior.Data.Attempts); n < len(expectedContext.Attempts); n++ {
 									if expectedContext.Attempts[n].Kind == "time" {
@@ -1358,6 +1621,17 @@ func TestIntakeToContext(t *testing.T) {
 						if a.Output == nil || *a.Output != ref || a.State != engine.Succeeded {
 							t.Fatal("noncommitted input")
 						}
+					}
+					if strings.HasPrefix(tc.name, "support-resolve-empty-") && ((count == 3 && tc.name != "support-resolve-empty-next") || (count == 4 && tc.name != "support-resolve-empty-prior")) {
+						// Bypass only Go's omitempty encoder, not the real schema or
+						// parser: an agent may explicitly emit a legal empty array.
+						var raw map[string]any
+						if err := json.Unmarshal(testJSON(data), &raw); err != nil {
+							t.Fatal(err)
+						}
+						raw["attempts"].([]any)[0].(map[string]any)["queries"] = []any{}
+						data = raw
+						expectedContext.Attempts[0].Queries = []SupportingQuery{}
 					}
 					if acquiring && count == 1 {
 						writeEnvelope(t, e.m, req, data, acquiredFiles)
@@ -1400,6 +1674,22 @@ func TestIntakeToContext(t *testing.T) {
 			if report.Final != nil {
 				t.Fatal("slice invented final report")
 			}
+			supportingAllowed := targetAuthorized && intake.Complete && wikiComplete(wiki)
+			if supporting {
+				wantRequests := int32(0)
+				if supportingAllowed {
+					wantRequests = int32(3 + 2*(count-3))
+				}
+				if supportingRequests.Load() != wantRequests {
+					t.Fatalf("supporting acquisition requests=%d, want=%d", supportingRequests.Load(), wantRequests)
+				}
+			}
+			if (tc.name == "support-no-basis" || tc.name == "support-no-result") && !strings.Contains(fmt.Sprint(report.Failure), "supporting query lacks conditions, basis or result evidence") {
+				t.Fatalf("empty array was not rejected by semantic acceptance: %v", report.Failure)
+			}
+			if (tc.name == "support-resolve-dropped-history" || tc.name == "support-resolve-altered-query" || tc.name == "support-resolve-retag-basis") && !strings.Contains(fmt.Sprint(report.Failure), "context revision dropped resolution history") {
+				t.Fatalf("wrong rejection for dropped query history: %v", report.Failure)
+			}
 			if !tc.failure {
 				if result.Ready != tc.ready || result.Context.RunID != result.Intake.RunID || len(report.Snapshot.Attempts) != tc.stages || len(report.Snapshot.Sessions) != tc.stages {
 					t.Fatalf("context/accounting: %+v", result)
@@ -1410,6 +1700,52 @@ func TestIntakeToContext(t *testing.T) {
 				}
 				if !reflect.DeepEqual(published.Data, expectedContext) {
 					t.Fatal("committed context lost provenance/state")
+				}
+				if supporting && supportingAllowed {
+					queryCount := 0
+					for _, attempt := range published.Data.Attempts {
+						for _, q := range attempt.Queries {
+							queryCount++
+							if q.From == published.Data.Time.From && q.To == published.Data.Time.To {
+								t.Fatal("query window was conflated with observed interval")
+							}
+							for _, evidence := range append(slices.Clone(q.Basis), q.Evidence...) {
+								owner, ownerFiles := result.Context, published.Files
+								if evidence.Ref != nil {
+									owner = *evidence.Ref
+									var raw publication[json.RawMessage]
+									if err := protocol.ReadJSON(owner.Path, &raw); err != nil {
+										t.Fatal(err)
+									}
+									ownerFiles = raw.Files
+								}
+								a := report.Snapshot.Attempts[owner.AttemptID]
+								if a.Output == nil || *a.Output != owner || !hasFile(ownerFiles, evidence.FileID) {
+									t.Fatal("query lost exact committed owner")
+								}
+							}
+							if q.Filter == "tenant:17" && q.Status != "partial" {
+								t.Fatal("successful narrow query erased earlier partial status")
+							}
+						}
+					}
+					if queryCount != 2*(count-2) {
+						t.Fatalf("query history count=%d", queryCount)
+					}
+					for _, id := range []string{"events-broad", "events-narrow", "events-broad-metadata", "events-narrow-metadata"} {
+						if !hasFile(published.Files, id) {
+							t.Fatalf("missing raw query evidence %s", id)
+						}
+					}
+					if strings.HasPrefix(tc.name, "support-resolve-") {
+						if hasFile(published.Files, "identity-raw") {
+							t.Fatal("resolved identity was reacquired or copied")
+						}
+						first := published.Data.Attempts[2].Queries[1]
+						if first.Basis[1].Ref == nil || *first.Basis[1].Ref != beforeResolution.Context || first.Evidence[0].Ref == nil || *first.Evidence[0].Ref != beforeResolution.Context {
+							t.Fatal("historical query evidence was relabeled")
+						}
+					}
 				}
 				if revising {
 					var revised, initial publication[Intake]
@@ -1501,7 +1837,7 @@ func TestIntakeToContext(t *testing.T) {
 				}
 			}
 			if (resolving || revising) && !strings.HasSuffix(tc.name, "-uncommitted-input") {
-				if requests.Load() != acquiredRequests || acquiredRequests == 0 {
+				if requests.Load() != acquiredRequests || (!supporting && acquiredRequests == 0) {
 					t.Fatal("resolution repeated HTTP acquisition")
 				}
 				if tc.failure && !reflect.DeepEqual(result, beforeResolution) {

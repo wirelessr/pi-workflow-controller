@@ -49,7 +49,7 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 - `triage.intake.v1`：完整 issue/raw fields、field metadata、各 comment 原始頁、linked issue snapshots、附件 content／analysis manifest、來源 URL／取得時間及 gaps。Go 核對 raw key、必要欄位、分頁 offset／total／唯一 comment IDs、linked／attachment inventory 及附件 byte size；historical content 在其真正 owner 版本驗 byte metadata，不以新版 issue 的 size 否定舊 bytes。拒絕省略 inventory、截斷本次下載或偽稱 complete。部分／缺失／unsafe／too-large／未完成分析保留為明確缺口，不等於空結果。
 - `triage.wiki.v1`：綁定 exact intake Ref，保存搜尋詞、wiki-only scope、搜尋證據與已讀頁面；區分完成有結果、完成無結果、partial、unavailable、not-run。未完成不得偽裝 no matches。本次開發只使用匿名 wiki fixtures，不存取實際 vault。
 - `triage.context.v1`：綁定 exact intake/wiki Refs 與 caller 授權 scope，保留身份、binding、release、observations、identity/time resolution attempts、附件/wiki 完整性與上游 gaps。Evidence 使用 exact input Ref＋file ID，或 null Ref 表示本 contract 自有 evidence，不重複宣告其他 attempt 的附檔。Resolved identity 須有 target/DB resolution receipt，核對唯一 tenant/orgkey row、stack/PoP/binding/release；多 row、錯環境或版本不符不可宣稱 resolved。
-- UTC 正規化驗收支援 explicit-offset RFC3339、epoch seconds/millis、同事件 local／epoch 配對與 offset 實算。保留原始時間、來源、UTC 與計算；不接受無 offset 的時間字串冒充 RFC3339，也不接受 local timestamp 自身作 absolute evidence。From/to 為已觀測 incident anchors 的 min/max，單點事件可為同一時刻；不是已授權的 production 查詢窗口，查詢的非零窗口／擴展理由仍由後續 Planner 驗收。
+- UTC 正規化驗收支援 explicit-offset RFC3339、epoch seconds/millis、同事件 local／epoch 配對與 offset 實算。保留原始時間、來源、UTC 與計算；不接受無 offset 的時間字串冒充 RFC3339，也不接受 local timestamp 自身作 absolute evidence。From/to 為已觀測 incident anchors 的 min/max，單點事件可為同一時刻；它與實際查詢窗口分開。Agent 在任務內依可靠時間依據與資料量自主選擇非零小窗，不要求每次涵蓋完整事故區間，也不逐查請批。
 - Ticket-only 授權仍可執行 intake/wiki/local triage，不要求先知道 tenant/PoP 才能保存資料。只有 caller 已明確授權 target 且 intake/wiki 完整時，task 才允許唯讀 runtime resolution；此 task 規則不是 shell sandbox。
 - 每個成功 Step 提交後確認舊 session cleanup，才開下一個 session。輸出為 supporting context，`ready` 只代表本切片前提驗收；`needs-resolution` 保留待補工作，不是 blocked 結案。沒有 `FinalSelection`、報告、draft、publish 或 confirmed root cause。Step failure／取消／hard cap／cleanup failure 原樣返回，不重新標為缺資料。
 
@@ -77,7 +77,24 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 4. 新 context 以 `previous` 綁定舊版本。移除舊 gap 必須提供 `resolved_gaps` evidence，且包含本次新 evidence 或新版 wiki evidence；上游仍存在的 gaps 不可刪除。舊版與新版 evidence 都是顯式 Step inputs。這是 provenance／readiness 驗收，不是對證據語意的獨立事實證明。
 5. 所有 session／attempt 沿用同 run accounting；provider failure／timeout／取消／hard cap／cleanup failure 原樣返回，不補交未 committed candidate，也不替換最後已驗收 state。新 context 仍只是 supporting state，remaining gaps 不等於結案。
 
-此局部 cycle 本身不修補 comments／附件等 acquisition gap，改由下節 `refreshSlice` 指定來源補取；不因 wiki 重試成功就偽稱 intake complete。每個 cycle 會重驗完整 lineage 與 evidence digests，同一 intake 在歷史中會被重複讀取；長歷史的驗證成本尚未最佳化，不宣稱已適合完整 Planner 的長期執行。同 intake 的已解析前提若出現新矛盾，仍需後續 invalidation／reframe 路徑，本切片不靜默改寫。尚未接 live wiki／DB、原始 lookup acquisition、Sumo／Prism query readiness、真 Agent 依既有 skill 取得資料或完整調查 loop。
+此局部 cycle 本身不修補 comments／附件等 acquisition gap，改由下節 `refreshSlice` 指定來源補取；不因 wiki 重試成功就偽稱 intake complete。每個 cycle 會重驗完整 lineage 與 evidence digests，同一 intake 在歷史中會被重複讀取；長歷史的驗證成本尚未最佳化，不宣稱已適合完整 Planner 的長期執行。同 intake 的已解析前提若出現新矛盾，仍需後續 invalidation／reframe 路徑，本切片不靜默改寫。尚未接 live wiki／DB／Sumo／Prism、真 Agent 依既有 skill 取得資料或完整調查 loop。Supporting-source acquisition 與 query readiness 的局部接線及匿名驗收見下節。
+
+### Identity/time supporting sources 與任務內 query readiness
+
+Context、context-resolution、context-revision 共用 identity/time acquisition 的工作要求，沿既有 skills/tools 保存 target／release 原始查證、lookup query/response 與 normalized receipt。沒有 acquisition executable、新工具 wrapper、query-approval Step 或產品入口。
+
+Query readiness 是本次 supporting 工作的可靠起點，不是新增全域 `ready` 狀態，也不要求全部 local timestamps 都先 resolved。仍須有 caller 授權 target、完整 intake/wiki 前提，以及查詢前已有的可信有限 UTC 搜尋依據和來源／filter 線索。例如已有 server receipt 的 UTC，但 client local timestamp 缺 TZ，可以先查同事件 supporting evidence。若沒有可信 UTC 依據，先沿其他已授權來源補找，不猜時區或盲掃。
+
+Agent 可在同一 Step 依資料量自主縮窗、移窗、分段、擴展、加 filter 或改 aggregate；不由 Controller 固定每窗寬度、選取策略或強迫下載整段事故。既有工具限額保留。這是任務與工具操作規則，不是 Controller 對每次 HTTP／shell 的硬性攔截。
+
+`ResolutionAttempt.queries` 是 optional 的實際操作紀錄，不是事前申請或未執行的計畫：
+
+- 每筆保存 `source`、`filter`、UTC `from/to`、查詢前已有的 `basis` evidence、`status`（complete／partial／unavailable）、`outcome`（包含窗口選取及結果限制），以及原始結果、request/status/diagnostics 的 `evidence`。未進行 time-bounded supporting query 的 attempt 可省略；舊 contracts 不需改寫。
+- Controller 驗非零正向 UTC 窗口、必要欄位與 exact evidence owners，不解析 query 語言、不檢查窗口是否覆蓋所有 anchors，也不替 Agent 認列時間／filter 證據的內容適用性。`basis` 的內容及先後真實性、原始 response 是否被正確理解，不能只憑 Ref 存在證明。
+- Query 的 `complete` 指該次查詢取得狀態，不代表完整事故覆蓋或根因 confirmed。前次 partial／unavailable 在後續成功後仍保留；空小窗、partial 與 timeout 不等於事故不存在。Agent 判斷結果是否已足以支援局部問題，無須為了將所有 query 標成 complete 而重跑。
+- 歷史 queries 的 basis/result 都沿真正 owner qualification 及 resolution attempt history 保留規則交接；保留舊資料不冒充本次新查詢。Observed `time.from/to` 仍只由 incident anchors 決定，不被查詢窗口覆寫。
+
+匿名 localhost HTTP／RPC 測試在同一 context Step 讀取 raw identity response、產生 receipt、取得 partial 搜尋結果，再以其 trace 縮小窗口取得 server epoch，交給真 engine／Store 驗收 local/epoch 換算與 ownership。另涵蓋 partial／unavailable／空結果、lookup conflict／錯 target 或 release、非法窗口／Refs、fresh-session 局部續接與失敗保留。取得及後續條件使用是真 HTTP，工具選擇與領域推理仍由 provider fixture 模擬；不是已驗證真 Agent skill 載入或 Sumo／Prism live 操作。
 
 ### Committed incomplete intake 的局部版本交接
 
@@ -114,6 +131,6 @@ go test -p 1 -count=1 ./internal/workflows/triage ./internal/runtime ./internal/
 
 完整回歸與發布方法見 [VERIFICATION](VERIFICATION.md)。既有 shared-discovery 的 parent pid／`.recovering`／ownership gate 保留，屬於 runtime 對自有 process 的安全責任，不因 Agent 操作規則採軟性提示而取消。
 
-局部補取與完整任務內的 inventory 更新已有上述 private 匿名切片；下一步仍需 Agent 技能操作的授權 live 驗收、identity/time 的實際 supporting-source acquisition 與 query readiness。不以新增 executable 代替，也不重做已完成 intake 或將第一次缺欄位當作結案。之後才加入 Planner／bounded workers、reframe、每 Step 可重建狀態／每三輪 checkpoint、同版三方驗證與 deterministic report。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
+局部補取、完整任務內 inventory 更新，以及 identity/time supporting-source／query 工作紀錄已有上述 private 匿名切片；下一步仍需 Agent 技能操作的授權 live 驗收，以及正式 Planner caller 對 supporting state 的接續。不以新增 executable 代替，也不重做已完成 intake 或將第一次缺欄位當作結案。之後才加入 Planner／bounded workers、reframe、每 Step 可重建狀態／每三輪 checkpoint、同版三方驗證與 deterministic report。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
 
 不提供 OS sandbox、任意 detached 子孫清理、crash resume、exactly-once 或外部副作用 rollback；保留 [DESIGN](../DESIGN.md) 的既有非保證範圍。
