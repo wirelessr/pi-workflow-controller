@@ -26,8 +26,8 @@
 | Context usage 與 cleanup report | `engine/session.go`、`runtime/types.go` | 已有 API；triage 的容量／續作策略尚需接線 |
 | Discovery 自動 preflight | `runtime.New` 固定有效 BridgeDir；`Pi.Start` → `runtime/preflight.go` 的 `preflightDiscovery` | R1 已接線：review 私有 guard 已移除；smoke/review/triage 共用 Start，仍須部署版本核對/live 驗收 |
 | 嚴格收尾確認 | `runtime.CleanupReport.ConfirmsLocalClose(expectedSessionID)` | R2 已接線：triage slice／Planner 共用；caller 先處理 CloseSessionReport error，普通 CloseSession 不改義 |
-| Envelope／file consumer | review `readReviewContract`、triage `readAccepted`／`publication`／`file` | R3a：共用表示與 committed 消費入口 |
-| Published／checkout 二次讀檔 | review `readCheckFile`／`readPublishedFile`、triage `rawFile`、contract `copyStable` | R3b：先區分保證，再收斂機械部分 |
+| Envelope／file consumer | review `readReviewContract`、triage `readAccepted`／`publication`／`file` | R3：共用表示與 committed 消費入口 |
+| Published／checkout 二次讀檔 | review `readCheckFile`／`readPublishedFile`、triage `rawFile`、contract `copyStable` | R3：同單元內先區分讀檔保證，再收斂機械部分 |
 | RPC 測試 transport | `testutil/protocol` 已有 child Serve／Control；host pumps 分散在 review／triage tests | R4：共用 host lifecycle 與 envelope writer |
 | Skill extraction／report renderer | 目前只有 review 的 `ExtractSkills` 與 `render_report.py` | R5：第二個實際 consumer 出現時才抽機械部分 |
 
@@ -35,7 +35,7 @@
 
 ## 3. 共用 refactor 單元與順序
 
-預設順序為 **R1 → R2 → R3a → R3b → R4，再進 triage M1**。每項是可獨立 review／驗收的最小單元，不合成一次大重構。R4 可為前面單元的測試需求先行，但須記錄順序調整，不能因此改變依賴或跳過 R1–R3。R5 延至 M6，不預造第二個 renderer。
+預設順序為 **R1 → R2 → R3 → R4，再進 triage M1**。每項是可獨立 review／驗收的最小單元，不合成一次大重構。R4 可為前面單元的測試需求先行，但須記錄順序調整，不能因此改變依賴或跳過 R1–R3。R5 延至 M6，不預造第二個 renderer。
 
 ### R1：共用 persisted-start preflight
 
@@ -67,7 +67,11 @@
 
 **完成出口：** triage slice／Planner 都呼叫共同嚴格判定，原重複 predicate 移除；用真 session/report 邊界測 identity、Wait、close errors、同 run 會計及 stopped/last 行為。普通 close regression 與嚴格 close regression 分開，不能拿本機確認當遠端 job 結束證明。
 
-### R3a：typed publication／FileEntry 共用
+### R3：typed publication／FileEntry 與讀檔機械共用
+
+R3 是單一實作／review／commit 單元，以下兩組驗收要求須一起閉合，才算 R3 完成；不再拆成前後兩個 milestones。合併施工單元不代表強制統一不同信任邊界的 reader，也不刪減原有差異矩陣、consumer 遷移或回歸要求。必要的窄 adapter 仍可保留，但須記錄具體保證與 callers。
+
+#### 驗收一：typed publication／FileEntry 共用
 
 **目標與責任層：** 共用 contract file 表示及經 engine committed resolver 的 typed publication 消費入口。依據 review／triage 的實際兩個 consumers 設計，不建立只有預想 callers 的泛型框架。
 
@@ -78,7 +82,7 @@
 
 **完成出口：** review 與 triage 都使用真共用入口；原 consumer 的錯誤／ID／Ref／Files 行為有對照 regression，cache 不跨邊界，Store-only publication 不獲 engine 授權。記錄必要的 source/API 相容性差異與實際 callers。
 
-### R3b：published-file 與 checkout reader 的安全邊界
+#### 驗收二：published-file 與 checkout reader 的安全邊界
 
 **目標：** 減少 bounded/cancellable 讀取機械重複，但不將不同信任邊界混成一個含糊 helper。
 
@@ -112,7 +116,7 @@ R1–R4 的匿名驗收與 consumer 遷移完成後才啟動 M1，不因某個 h
 
 | Milestone | 前置完成項 | 必須重用 | 允許新增的業務內容／禁止重造 |
 |---|---|---|---|
-| M1 一般調查 worker | R1、R2、R3a、R3b、R4 | OpenSession、Step、Inputs、共用 publication/file 消費及 test host | 新增完整 task/result/evidence contracts 與回 Planner 接線；不再造 acquisition wrapper/session driver |
+| M1 一般調查 worker | R1、R2、R3、R4 | OpenSession、Step、Inputs、共用 publication/file 消費及 test host | 新增完整 task/result/evidence contracts 與回 Planner 接線；不再造 acquisition wrapper/session driver |
 | M2 Adaptive loop | M1 | Parallel、Decision、原 Run policy／會計 | 最多3個 ready workers、依賴批次、ledger、兩輪無進展 reframe/wiki 重查；不新增 scheduler/DAG |
 | M3 Checkpoint／容量 handoff | M2、R2 | 每成功 Step 的 committed state、ContextUsage、嚴格 close、handoff | state 納入工作結果/feedback，每3dispatch完整 checkpoint與容量策略；不新增 Store/journal/crash resume |
 | M4 Timeout recovery | M3 | typed failure、closeOnce/Wait、原 Run budget、適用時的有限 Retry | 先接已有worker/Planner的可恢復分支及remote job安全條件；verifier分支在M5角色出現時接入，不預造占位角色或新process manager |
