@@ -364,7 +364,7 @@ func TestEngineCleanupReportRecoveryGate(t *testing.T) {
 					t.Errorf("legacy error changed: %v", err)
 				}
 				// This stricter gate is workflow policy, not engine automatic retry.
-				if closeErr != nil || cleaned.Identity != h.session.Identity() || !cleaned.ProcessExited || !cleaned.WaitCompleted || cleaned.WaitError != "" || cleaned.KillError != "" || cleaned.DiscoveryError != "" || len(cleaned.Unconfirmed) != 0 {
+				if closeErr != nil || cleaned.Identity != h.session.Identity() || !cleaned.ConfirmsLocalClose(h.session.Identity().SessionID) {
 					return Result{}, errors.New("replacement blocked by cleanup evidence")
 				}
 				replacement = true

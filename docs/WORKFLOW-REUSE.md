@@ -2,7 +2,7 @@
 
 本文件落實 [專案憲法第七條](../AGENTS.md)，是開發、review 與接手的必要入口。規範共用機制的收斂順序，不新增 WorkflowBase、DSL、工具權限框架或外部 workflow config。
 
-**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，實際入口見下表；R2–R4 的目標入口尚待實作／遷移，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
+**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，R2 已提供共用 report 判定，實際入口見下表；R3–R4 的目標入口尚待實作／遷移，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
 
 ## 1. 單一規範來源與接手 gate
 
@@ -25,7 +25,7 @@
 | Result／FinalSelection／FinalDelivery | `engine/api.go`、`resolve.go`、`run.go` | 直接重用；禁止另一個 final artifact registry |
 | Context usage 與 cleanup report | `engine/session.go`、`runtime/types.go` | 已有 API；triage 的容量／續作策略尚需接線 |
 | Discovery 自動 preflight | `runtime.New` 固定有效 BridgeDir；`Pi.Start` → `runtime/preflight.go` 的 `preflightDiscovery` | R1 已接線：review 私有 guard 已移除；smoke/review/triage 共用 Start，仍須部署版本核對/live 驗收 |
-| 嚴格收尾確認 | `workflows/triage/workflow.go` 與 `planner.go` 的相同 report 判定 | R2：共用嚴格判定，普通 CloseSession 不改義 |
+| 嚴格收尾確認 | `runtime.CleanupReport.ConfirmsLocalClose(expectedSessionID)` | R2 已接線：triage slice／Planner 共用；caller 先處理 CloseSessionReport error，普通 CloseSession 不改義 |
 | Envelope／file consumer | review `readReviewContract`、triage `readAccepted`／`publication`／`file` | R3a：共用表示與 committed 消費入口 |
 | Published／checkout 二次讀檔 | review `readCheckFile`／`readPublishedFile`、triage `rawFile`、contract `copyStable` | R3b：先區分保證，再收斂機械部分 |
 | RPC 測試 transport | `testutil/protocol` 已有 child Serve／Control；host pumps 分散在 review／triage tests | R4：共用 host lifecycle 與 envelope writer |
@@ -54,6 +54,10 @@
 **完成出口：** 所有 Controller-owned persisted-start callers 實際受同一檢查；BridgeDir 不再由 review 另解一份；舊 private 實作移除，必要 compatibility wrapper 只能轉送。使用隔離的匿名 discovery fixtures 驗正常／阻擋／取消／錯誤、spawn 前停止、有效目錄選擇與原 startup/cleanup/accounting 行為。更新 README 與 workflow 現況說明。未授權 live 就標未驗，不用測試 bypass flag 移除產品 gate。
 
 ### R2：嚴格 local-close 確認
+
+**已實作接線：** `CleanupReport.ConfirmsLocalClose` 共用原 SessionID 相等、WaitCompleted／ProcessExited 為真及 Unconfirmed／WaitError／KillError／DiscoveryError 為空的判定。Triage sliceStep 與 Planner close 已移除重複 predicate，先原樣處理 CloseSessionReport error，再呼叫共用方法；Planner 額外的非空 session ID 要求仍在 caller。此方法只比較傳入 ID，不另驗其有效性（兩個空 ID 仍相等）、不比較整份 Identity、不執行 cleanup；普通 CloseSession、closeOnce／會計、accepted state／handoff 政策及原錯誤不變。
+
+以下保留目標與完成條件，匿名／live 證據仍分開。
 
 **目標與責任層：** 在 runtime CleanupReport／engine session 邊界提供明確較強的共用判定或 opt-in helper，遷移 triage 的兩個相同判定。
 

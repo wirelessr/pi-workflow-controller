@@ -71,7 +71,7 @@ func sliceStep(ctx context.Context, r *engine.Run, models sliceModels, key strin
 	if err != nil {
 		return out.Output, err
 	}
-	if closed.Identity.SessionID != out.Execution.SessionID || !closed.WaitCompleted || !closed.ProcessExited || len(closed.Unconfirmed) != 0 || closed.WaitError != "" || closed.KillError != "" || closed.DiscoveryError != "" {
+	if !closed.ConfirmsLocalClose(out.Execution.SessionID) {
 		return out.Output, fmt.Errorf("%s cleanup not confirmed", task.Stage)
 	}
 	return out.Output, nil

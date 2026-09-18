@@ -68,6 +68,15 @@ type CleanupReport struct {
 	StderrTruncated                                                  bool
 	StderrTail                                                       string
 }
+
+// ConfirmsLocalClose compares the report with the caller's expected session ID.
+// The caller owns ID validity and continuation policy; this is not evidence that
+// remote jobs have stopped, and does not replace handling the Close error.
+func (r CleanupReport) ConfirmsLocalClose(sessionID string) bool {
+	return r.Identity.SessionID == sessionID && r.WaitCompleted && r.ProcessExited &&
+		len(r.Unconfirmed) == 0 && r.WaitError == "" && r.KillError == "" && r.DiscoveryError == ""
+}
+
 type Observation struct {
 	DispatchToken      string
 	HandleID, Kind     string

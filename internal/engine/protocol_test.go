@@ -255,7 +255,7 @@ func TestEngineProtocolHandoff(t *testing.T) {
 				if err != nil {
 					return engine.Result{}, err
 				}
-				if cleaned.Identity.SessionID != first.Execution.SessionID || !cleaned.WaitCompleted || !cleaned.ProcessExited || cleaned.WaitError != "" || cleaned.KillError != "" || cleaned.DiscoveryError != "" || len(cleaned.Unconfirmed) != 0 {
+				if !cleaned.ConfirmsLocalClose(first.Execution.SessionID) {
 					return engine.Result{}, errors.New("cleanup evidence blocks replacement")
 				}
 				copy, err := r.CloseSessionReport(ctx, h)

@@ -208,7 +208,7 @@ func (p *plannerCaller) close(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if p.session == "" || report.Identity.SessionID != p.session || !report.WaitCompleted || !report.ProcessExited || len(report.Unconfirmed) != 0 || report.WaitError != "" || report.KillError != "" || report.DiscoveryError != "" {
+	if p.session == "" || !report.ConfirmsLocalClose(p.session) {
 		return fmt.Errorf("planner cleanup not confirmed")
 	}
 	return nil

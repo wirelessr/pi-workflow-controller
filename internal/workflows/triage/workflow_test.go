@@ -2444,7 +2444,8 @@ func TestIntakeToContext(t *testing.T) {
 					}
 					if err == nil {
 						err = planner.close(ctx)
-					} else if planner != nil {
+					}
+					if err != nil && planner != nil {
 						if (plannerRef.AttemptID == "" && planner.last != nil) || (plannerRef.AttemptID != "" && (planner.last == nil || *planner.last != plannerRef)) {
 							t.Error("failed Planner caller changed its last accepted Ref")
 						}
@@ -2459,6 +2460,12 @@ func TestIntakeToContext(t *testing.T) {
 						if _, stopped := planner.handoff(ctx); stopped == nil || !strings.Contains(stopped.Error(), "planner handoff requires") {
 							t.Error("failed Planner caller allowed handoff")
 						}
+					}
+				}
+				if err != nil && strings.Contains(tc.name, "cleanup-failure") {
+					var failure *engine.Failure
+					if !errors.As(err, &failure) || failure.Code != engine.CleanupFailed {
+						t.Errorf("cleanup failure lost its runtime classification: %v", err)
 					}
 				}
 				outputs := map[string]contract.Ref{}

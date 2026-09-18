@@ -375,7 +375,7 @@ func TestPiSubprocess(t *testing.T) {
 				}
 				held = nil
 			case "exit":
-				os.Exit(0)
+				os.Exit(c.Count)
 			case "wait-tool":
 				if tool == nil {
 					os.Exit(5)
@@ -1051,6 +1051,101 @@ func TestStartupFailureReapsChild(t *testing.T) {
 		})
 	}
 }
+func TestCleanupReportConfirmsLocalClose(t *testing.T) {
+	for _, tc := range []struct {
+		name, expected string
+		change         func(*CleanupReport)
+		want           bool
+	}{
+		{"clean", "session", nil, true},
+		{"wrong-session", "other", nil, false},
+		{"missing-expected", "", nil, false},
+		{"missing-reported", "session", func(r *CleanupReport) { r.Identity.SessionID = "" }, false},
+		{"matching-empty-ids", "", func(r *CleanupReport) { r.Identity.SessionID = "" }, true},
+		{"zero-report", "session", func(r *CleanupReport) { *r = CleanupReport{} }, false},
+		{"wait-incomplete", "session", func(r *CleanupReport) { r.WaitCompleted = false }, false},
+		{"process-not-exited", "session", func(r *CleanupReport) { r.ProcessExited = false }, false},
+		{"unconfirmed", "session", func(r *CleanupReport) { r.Unconfirmed = []string{"observer"} }, false},
+		{"wait-error", "session", func(r *CleanupReport) { r.WaitError = "exit status 3" }, false},
+		{"kill-error", "session", func(r *CleanupReport) { r.KillError = "permission denied" }, false},
+		{"discovery-error", "session", func(r *CleanupReport) { r.DiscoveryError = "ownership changed" }, false},
+		{"empty-unconfirmed", "session", func(r *CleanupReport) { r.Unconfirmed = []string{} }, true},
+		{"other-identity-fields", "session", func(r *CleanupReport) {
+			r.Identity.HandleID, r.Identity.SessionFile, r.Identity.PID = "handle", "session.jsonl", 42
+		}, true},
+		{"diagnostics", "session", func(r *CleanupReport) {
+			r.AbortAcknowledged, r.AbortBashAcknowledged, r.SIGKILL = true, true, true
+			r.DiscoveryRemoved = []string{"owned.json"}
+			r.StderrTruncated, r.StderrTail = true, "diagnostic"
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := CleanupReport{Identity: Identity{SessionID: "session"}, WaitCompleted: true, ProcessExited: true}
+			if tc.change != nil {
+				tc.change(&report)
+			}
+			if got := report.ConfirmsLocalClose(tc.expected); got != tc.want {
+				t.Fatalf("confirmed=%t want=%t report=%+v", got, tc.want, report)
+			}
+		})
+	}
+}
+
+func TestCloseExitStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		kill   bool
+	}{
+		{"clean", 0, false},
+		{"nonzero", 3, false},
+		{"sigkill", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := mustFixture(t, "normal", nil)
+			if tc.kill {
+				if err := f.s.cmd.Process.Kill(); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := f.encoder.Encode(control{Type: "exit", Count: tc.status}); err != nil {
+				t.Fatal(err)
+			}
+			// Wait for the child to close stdout before Close sends its final signal.
+			// Close still owns the sole process Wait.
+			select {
+			case <-f.s.readerDone:
+			case <-f.ctx.Done():
+				t.Fatal("child stdout did not close")
+			}
+			report, err := f.s.Close(f.ctx)
+			if !report.WaitCompleted || !report.ProcessExited || report.Identity != f.s.Identity() || report.DiscoveryError != "" || len(report.Unconfirmed) != 0 {
+				t.Fatalf("close report=%+v error=%v", report, err)
+			}
+			// Some systems return EPERM when signalling an already exited group.
+			// That remains a cleanup error, independently of the child's exit status.
+			if report.KillError != "" {
+				if report.KillError != syscall.EPERM.Error() {
+					t.Fatalf("unexpected kill error: %+v", report)
+				}
+				requireCode(t, err, CleanupFailed)
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			wantWaitError := ""
+			if tc.status != 0 {
+				wantWaitError = fmt.Sprintf("exit status %d", tc.status)
+			}
+			if report.WaitError != wantWaitError || report.ConfirmsLocalClose(f.s.Identity().SessionID) != (tc.status == 0 && report.KillError == "") {
+				t.Fatalf("exit status not reflected by strict confirmation: %+v", report)
+			}
+			again, againErr := f.s.Close(f.ctx)
+			if !errors.Is(againErr, err) || !reflect.DeepEqual(again, report) {
+				t.Fatalf("close outcome changed: %+v %v", again, againErr)
+			}
+		})
+	}
+}
+
 func TestConcurrentCloseAndOwnership(t *testing.T) {
 	f := mustFixture(t, "normal", nil)
 	sentinel := filepath.Join(f.bridge, "external.json")
