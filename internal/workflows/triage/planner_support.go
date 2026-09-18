@@ -18,6 +18,20 @@ type SupportingWork struct {
 }
 
 func (a *acceptance) checkSupportingWork(h contextHistory, work *SupportingWork) error {
+	if err := checkSupportingProposal(h, work); err != nil {
+		return err
+	}
+	if work != nil && work.Kind == "refresh" {
+		intake, err := a.checkIntake(h.value.Intake, h.value.Scope.Ticket)
+		if err != nil {
+			return err
+		}
+		return checkIntakeWork(intake, work.Sources)
+	}
+	return nil
+}
+
+func checkSupportingProposal(h contextHistory, work *SupportingWork) error {
 	if work == nil {
 		return nil
 	}
@@ -37,13 +51,7 @@ func (a *acceptance) checkSupportingWork(h contextHistory, work *SupportingWork)
 		if h.value.Readiness == "ready" {
 			return fmt.Errorf("supporting resolve requires needs-resolution context")
 		}
-	case "refresh":
-		intake, err := a.checkIntake(h.value.Intake, h.value.Scope.Ticket)
-		if err != nil {
-			return err
-		}
-		return checkIntakeWork(intake, work.Sources)
-	case "update":
+	case "refresh", "update":
 	default:
 		return fmt.Errorf("unsupported supporting work kind %q", work.Kind)
 	}

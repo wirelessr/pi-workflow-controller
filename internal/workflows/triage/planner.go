@@ -127,6 +127,13 @@ func (a *acceptance) checkPlanner(ref contract.Ref, h contextHistory, previous *
 	if err := a.checkPlannerContextChange(h, previous); err != nil {
 		return err
 	}
+	if err := checkPlannerSnapshot(v, h); err != nil {
+		return err
+	}
+	return a.checkSupportingWork(h, v.SupportingWork)
+}
+
+func checkPlannerSnapshot(v PlannerState, h contextHistory) error {
 	if !nonblank(v.Rationale) || !texts(v.Gaps) {
 		return fmt.Errorf("planner requires rationale and nonblank gaps")
 	}
@@ -161,7 +168,7 @@ func (a *acceptance) checkPlanner(ref contract.Ref, h contextHistory, previous *
 			return err
 		}
 	}
-	return a.checkSupportingWork(h, v.SupportingWork)
+	return nil
 }
 
 func (p *plannerCaller) step(ctx context.Context) (contract.Ref, error) {

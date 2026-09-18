@@ -363,6 +363,10 @@ func (a *acceptance) checkWiki(ref, intake contract.Ref) (WikiSearch, error) {
 	if err != nil {
 		return p.Data, err
 	}
+	return checkWikiPublication(p, intake)
+}
+
+func checkWikiPublication(p publication[WikiSearch], intake contract.Ref) (WikiSearch, error) {
 	v := p.Data
 	if v.Intake != intake || v.Scope != "wiki-only" || len(v.Queries) == 0 || !texts(v.Queries) || !texts(v.Gaps) {
 		return v, fmt.Errorf("wiki search provenance missing")
@@ -479,7 +483,6 @@ func checkContext(ctx context.Context, r *engine.Run, ref contract.Ref, scope Sc
 }
 
 func (a *acceptance) checkContext(ref contract.Ref, scope Scope, intakeRef, wikiRef contract.Ref, intake Intake, wiki WikiSearch, history ...contextHistory) (Context, error) {
-	ctx := a.ctx
 	p, err := readAccepted[Context](a, ref, ContextSchema)
 	if err != nil {
 		return p.Data, err
@@ -502,6 +505,14 @@ func (a *acceptance) checkContext(ref contract.Ref, scope Scope, intakeRef, wiki
 	}
 	sources := ih.sources
 	sources[intakeRef], sources[wikiRef] = ip.Files, wp.Files
+	return checkContextPublication(a.ctx, ref, p, scope, intakeRef, wikiRef, intake, wiki, sources, history...)
+}
+
+func checkContextPublication(ctx context.Context, ref contract.Ref, p publication[Context], scope Scope, intakeRef, wikiRef contract.Ref, intake Intake, wiki WikiSearch, sources map[contract.Ref][]file, history ...contextHistory) (Context, error) {
+	v := p.Data
+	if v.Intake != intakeRef || v.Wiki != wikiRef || !reflect.DeepEqual(v.Scope, scope) || !nonblank(v.Problem) {
+		return v, fmt.Errorf("context source/scope mismatch")
+	}
 	if len(history) == 0 {
 		if v.Previous != nil || len(v.ResolvedGaps) != 0 {
 			return v, fmt.Errorf("initial context cannot invent resolution lineage")

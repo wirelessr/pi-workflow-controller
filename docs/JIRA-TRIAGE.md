@@ -157,6 +157,15 @@ Triage 的 private `acceptance` 只在一次同步驗收中保留按完整 `cont
 
 此接線只消除同次驗收的重複讀取，不刪 `noSymlinks`、雙 digest、ownership、scope、receipt、UTC、completeness 或 cleanup。Lineage 語意走訪、必要跨邊界重驗、raw evidence 解析及 journal/state 持久化仍有成本。測試保留真 engine/Store/RPC，涵蓋 decoded 值隔離、exact Ref/schema、取消，以及任務前後與 handoff 的 evidence 篡改拒絕。
 
+### 測試分層
+
+同一份 `triageCases` 定義各業務情境的成功／失敗與 readiness 期望，兩個 test drivers 依明列的 `validationStage` 分流，不靠 skip 或 live opt-in 隱藏案例：
+
+- `TestTriageValidation`：契約與資料規則直接走正式 publication validators。使用真 Store 的 BeginAttempt／Stage／Publish／Read，包含 schema、filesystem、raw evidence 與必要 localhost HTTP，不 mock parser 或 validator。每個案例有自己的 candidate/evidence，只共享唯讀 baseline Store publications；負例檢查具體拒絕原因，正例檢查資料與完成狀態。
+- `TestIntakeToContext`：保留真 engine／RPC 的流程測試，包括 dispatch/task binding、runtime-resolution prerequisite、exact committed inputs、跨 Step／版本 owners、持續 session／handoff、最後 accepted state、取消／timeout／限額／cleanup，以及 HTTP acquisition 的跨階段傳遞。
+
+Store publication 不等於 engine committed Ref。前一層只驗已載入資料與 Store 邊界，不能宣稱派工、session 或 cleanup 已被測到；後一層負責這些整合保證。Production loaders 仍先做 committed resolution，再呼叫同一份 publication validators，未以測試分層放寬原驗收。新增／搬移案例需核對原有斷言及兩層對照，不只比較總數或單一快案例。
+
 ## 驗證與下一步
 
 現有 engine／Store／RPC subprocess fixtures 驗證 deadline opt-out、nullable stats、usage handoff、attempt timeout recovery、cleanup 拒絕、committed Ref 與計數保留。這些是框架與匿名 workflow closure，不是完整 Jira Planner，也不是 Agent 必然遵守軟性規則的證明。

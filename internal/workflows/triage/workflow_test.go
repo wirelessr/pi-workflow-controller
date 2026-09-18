@@ -1255,82 +1255,673 @@ func corruptInputEvidence(ref contract.Ref) error {
 	return os.WriteFile(filepath.Join(filepath.Dir(ref.Path), p.Files[0].Path), []byte("changed after acceptance"), 0600)
 }
 
+type triageCase struct {
+	name    string
+	stages  int
+	failure bool
+	ready   bool
+}
+
+var triageCases = []triageCase{
+	{"work-tamper-during-worker", 7, true, false},
+	{"work-tamper-evidence-before-support", 4, true, false}, {"work-tamper-evidence-after-support", 7, true, false}, {"work-tamper-evidence-handoff", 8, true, false},
+	{"work-read-isolation", 8, false, true}, {"work-read-cancellation", 8, false, true}, {"work-read-exact-ref", 8, false, true},
+	{"work-unproposed-transition", 7, true, false}, {"work-skipped-context", 10, true, false},
+	{"work-wrong-task", 7, true, false}, {"work-resolve-changed-intake", 7, true, false}, {"work-refresh-work-mismatch", 7, true, false},
+	{"work-reuse", 9, false, true},
+	{"work-resolve", 7, false, true}, {"work-time", 6, false, true}, {"work-refresh", 8, false, true}, {"work-update", 8, false, true},
+	{"work-update-incomplete", 8, false, true}, {"work-update-partial", 8, false, false}, {"work-ticket-only", 6, false, false},
+	{"work-handoff", 9, false, true}, {"work-repeat", 13, false, true},
+	{"work-no-proposal", 4, true, false}, {"work-bad-kind", 4, true, false}, {"work-blank-reason", 4, true, false}, {"work-no-basis", 4, true, false},
+	{"work-local-basis", 4, true, false}, {"work-foreign-basis", 4, true, false}, {"work-uncommitted-basis", 4, true, false}, {"work-missing-file", 4, true, false},
+	{"work-resolve-ready", 4, true, false}, {"work-refresh-ready", 4, true, false}, {"work-refresh-empty", 4, true, false}, {"work-unknown-source", 4, true, false},
+	{"work-duplicate-source", 4, true, false}, {"work-blank-source-reason", 4, true, false}, {"work-extra-sources", 4, true, false}, {"work-extra-control", 4, true, false},
+	{"work-wrong-result-context", 8, true, false}, {"work-drop-gap", 8, true, false},
+	{"work-worker-provider-failure", 5, true, false}, {"work-worker-timeout", 5, true, false}, {"work-worker-cancel", 5, true, false},
+	{"work-planner-provider-failure", 8, true, false}, {"work-planner-timeout", 8, true, false},
+	{"work-cleanup-failure", 4, true, false}, {"work-worker-cleanup-failure", 5, true, false},
+	{"work-attempt-cap", 4, true, false}, {"work-final-cap", 7, true, false}, {"work-session-cap", 4, true, false},
+	{"work-tamper-proposal", 4, true, false}, {"work-tamper-history", 8, true, false},
+	{"planner-ready", 4, false, true}, {"planner-incomplete", 4, false, false}, {"planner-ticket-only", 4, false, false}, {"planner-empty", 4, false, true}, {"planner-no-evidence", 4, false, true}, {"planner-reuse-handoff", 6, false, true},
+	{"planner-reuse", 5, false, true}, {"planner-handoff", 5, false, true}, {"planner-history", 8, false, true}, {"planner-support", 5, false, true},
+	{"planner-wrong-context", 4, true, false}, {"planner-wrong-previous", 5, true, false}, {"planner-invented-previous", 4, true, false}, {"planner-drop-gap", 4, true, false},
+	{"planner-foreign-evidence", 4, true, false}, {"planner-uncommitted-evidence", 4, true, false}, {"planner-local-evidence", 4, true, false}, {"planner-missing-file", 4, true, false},
+	{"planner-duplicate-id", 4, true, false}, {"planner-blank-assessment", 4, true, false}, {"planner-blank-rationale", 4, true, false}, {"planner-empty-requirements", 4, true, false}, {"planner-extra-control", 4, true, false},
+	{"planner-uncommitted-input", 3, true, false}, {"planner-wrong-scope", 3, true, false}, {"planner-missing-model", 3, true, false},
+	{"planner-provider-failure", 5, true, false}, {"planner-cancel", 5, true, false}, {"planner-timeout", 5, true, false}, {"planner-cleanup-failure", 4, true, false}, {"planner-attempt-cap", 4, true, false}, {"planner-session-cap", 4, true, false}, {"planner-tampered-handoff", 4, true, false},
+	{"support-ticket-only", 3, false, false}, {"support-wiki-partial", 3, false, false}, {"support-incomplete", 3, false, false}, {"support-wrong-epoch", 3, true, false}, {"support-missing-file", 3, true, false},
+	{"support-complete", 3, false, true}, {"support-subwindow", 3, false, true}, {"support-partial", 3, false, false}, {"support-unavailable", 3, false, false}, {"support-empty", 3, false, false},
+	{"support-lookup-conflict", 3, false, false}, {"support-malformed-lookup", 3, false, false}, {"support-lookup-environment", 3, true, false}, {"support-lookup-release", 3, true, false},
+	{"support-zero-window", 3, true, false}, {"support-reversed-window", 3, true, false}, {"support-nonutc", 3, true, false}, {"support-no-basis", 3, true, false}, {"support-no-result", 3, true, false}, {"support-blank-filter", 3, true, false}, {"support-no-outcome", 3, true, false}, {"support-invalid-status", 3, true, false}, {"support-foreign-basis", 3, true, false}, {"support-uncommitted-result", 3, true, false},
+	{"support-resolve-altered-query", 4, true, false}, {"support-resolve-retag-basis", 4, true, false},
+	{"support-resolve-empty-prior", 4, false, true}, {"support-resolve-empty-next", 4, false, true}, {"support-resolve-empty-both", 4, false, true},
+	{"support-resolve-success", 4, false, true}, {"support-resolve-repeat", 5, false, true}, {"support-resolve-dropped-history", 4, true, false},
+	{"support-resolve-provider-failure", 4, true, false}, {"support-resolve-cancel", 4, true, false}, {"support-resolve-timeout", 4, true, false}, {"support-resolve-cleanup-failure", 4, true, false}, {"support-resolve-attempt-cap", 3, true, false},
+	{"update-page", 6, false, true}, {"update-comments-repage", 6, false, true}, {"update-comments-missing", 6, false, false}, {"update-comments-false-complete", 4, true, false},
+	{"update-add", 6, false, true}, {"update-remove", 6, false, true}, {"update-replace", 6, false, true}, {"update-repeat", 9, false, true},
+	{"update-content", 6, false, true}, {"update-retain-content", 6, false, true}, {"update-partial", 6, false, false}, {"update-issue-failure", 6, false, false},
+	{"update-retain-gap", 6, false, false}, {"update-resolve-gap", 6, false, true}, {"update-drop-gap", 6, true, false},
+	{"update-history-lookup", 6, false, true}, {"update-then-resolve", 8, false, true}, {"update-then-refresh", 9, false, true},
+	{"update-truncated", 4, true, false}, {"update-unrecorded-change", 4, true, false}, {"update-foreign-ref", 4, true, false}, {"update-wrong-previous", 4, true, false}, {"update-no-metadata", 4, true, false},
+	{"update-wrong-task", 4, true, false}, {"update-no-issue", 4, true, false}, {"update-duplicate-work", 4, true, false}, {"update-blank-reason", 4, true, false}, {"update-unrecorded-add", 4, true, false},
+	{"update-omitted-slot", 4, true, false}, {"update-new-ref", 4, true, false}, {"update-removed-still-in-raw", 4, true, false}, {"update-issue-failure-remove", 4, true, false}, {"update-history-alias", 4, true, false},
+	{"update-old-wiki-binding", 5, true, false}, {"update-provider-failure", 4, true, false}, {"update-cancel", 4, true, false}, {"update-timeout", 4, true, false}, {"update-cleanup-failure", 4, true, false}, {"update-attempt-cap", 3, true, false}, {"update-uncommitted-input", 3, true, false},
+	{"refresh-content-failure", 6, false, false}, {"refresh-content-failure-repeat", 9, false, false}, {"refresh-content-new-analysis", 4, true, false}, {"refresh-escalated-task", 4, true, false},
+	{"analysis-without-content", 1, true, false}, {"initial-update", 1, true, false},
+	{"refresh-issue-partial", 6, false, false}, {"refresh-issue-missing", 6, false, false}, {"refresh-issue-repeat", 9, false, false},
+	{"refresh-page", 6, false, true}, {"refresh-attachment", 6, false, true}, {"refresh-invalidated", 6, false, true},
+	{"refresh-historical-wiki", 6, false, true}, {"refresh-wiki-partial", 6, false, false}, {"refresh-repeat", 9, false, true}, {"refresh-then-resolve", 8, false, true},
+	{"refresh-unselected-copy", 4, true, false}, {"refresh-foreign-ref", 4, true, false}, {"refresh-wrong-previous", 4, true, false}, {"refresh-work-changed", 4, true, false}, {"refresh-no-metadata", 4, true, false}, {"refresh-dropped-source", 4, true, false}, {"refresh-false-complete", 4, true, false},
+	{"refresh-old-wiki-binding", 5, true, false}, {"refresh-false-no-matches", 5, true, false}, {"refresh-drop-gap", 6, true, false}, {"refresh-dropped-history", 6, true, false}, {"refresh-context-foreign-ref", 6, true, false},
+	{"refresh-provider-failure", 4, true, false}, {"refresh-cancel", 4, true, false}, {"refresh-timeout", 4, true, false}, {"refresh-cleanup-failure", 4, true, false}, {"refresh-attempt-cap", 3, true, false}, {"refresh-uncommitted-input", 3, true, false},
+	{"missing-attachment-size", 1, true, false},
+	{"blank-stack", 3, true, false}, {"blank-pop", 3, true, false}, {"blank-binding", 3, true, false}, {"blank-target", 3, true, false}, {"whitespace-target", 3, true, false},
+	{"duplicate-attachment", 1, true, false}, {"conflicting-attachment", 1, true, false}, {"duplicate-empty-attachment", 1, true, false}, {"null-comment", 1, true, false}, {"http-page-null", 3, false, false},
+	{"http-complete", 3, false, true}, {"http-page-failure", 3, false, false}, {"http-page-total", 3, false, false}, {"http-page-empty", 3, false, false}, {"http-page-offset", 3, false, false}, {"http-page-duplicate", 3, false, false}, {"http-page-short", 3, false, false}, {"http-page-partial", 3, false, false}, {"http-malformed-issue", 3, false, false}, {"http-malformed-fields", 3, false, false}, {"http-linked-failure", 3, false, false}, {"http-attachment-partial", 3, false, false}, {"http-unsafe-zip", 3, false, false}, {"http-oversized", 3, false, false}, {"http-metadata-limit", 3, false, false},
+	{"resolve-ready", 3, false, true}, {"resolve-acquisition-gap", 5, false, false},
+	{"resolve-wiki", 5, false, true}, {"resolve-wiki-unavailable", 5, false, true}, {"resolve-wiki-not-run", 5, false, true}, {"resolve-wiki-partial-again", 5, false, false}, {"resolve-repeat", 7, false, true}, {"resolve-time", 4, false, true}, {"resolve-identity", 4, false, true}, {"resolve-ticket-only", 4, false, false},
+	{"resolve-drop-gap", 5, true, false}, {"resolve-foreign-evidence", 5, true, false}, {"resolve-replace-valid-time", 5, true, false}, {"resolve-wrong-previous", 5, true, false}, {"resolve-old-evidence", 5, true, false}, {"resolve-dropped-history", 5, true, false},
+	{"resolve-provider-failure", 4, true, false}, {"resolve-cancel", 4, true, false}, {"resolve-timeout", 4, true, false}, {"resolve-cleanup-failure", 4, true, false}, {"resolve-attempt-cap", 3, true, false}, {"resolve-uncommitted-input", 3, true, false},
+	{"wiki-history-identity", 3, false, true}, {"wiki-history-conflict", 3, true, false}, {"wiki-history-environment", 3, true, false}, {"wiki-history-release", 3, true, false}, {"conflicting-foreign-lookup", 3, true, false},
+	{"ticket-only", 3, false, false}, {"wiki-not-run", 3, false, false},
+	{"false-ready", 3, true, false}, {"dropped-gap", 3, true, false}, {"self-paired", 3, true, false}, {"lookup-conflict", 3, true, false}, {"lookup-environment", 3, true, false}, {"lookup-release", 3, true, false}, {"missing-lookup", 3, true, false},
+	{"complete", 3, false, true}, {"wiki-matches", 3, false, true}, {"epoch-millis", 3, false, true}, {"local-paired", 3, false, true}, {"dst-offsets", 3, false, true},
+	{"missing-page", 3, false, false}, {"changed-total", 3, false, false}, {"missing-fields", 3, false, false}, {"unsafe-attachment", 3, false, false}, {"oversized-attachment", 3, false, false}, {"vision-pending", 3, false, false}, {"wiki-partial", 3, false, false}, {"wiki-unavailable", 3, false, false}, {"identity-conflict", 3, false, false}, {"time-unresolved", 3, false, false}, {"time-conflict", 3, false, false},
+	{"false-complete", 1, true, false}, {"duplicate-comment", 1, true, false}, {"wrong-page-offset", 1, true, false}, {"missing-linked", 1, true, false}, {"missing-attachment", 1, true, false}, {"truncated-attachment", 1, true, false}, {"raw-key", 1, true, false}, {"unknown-file", 1, true, false}, {"file-escape", 1, true, false},
+	{"wiki-false-empty", 2, true, false}, {"wiki-ref", 2, true, false},
+	{"wrong-scope", 3, true, false}, {"wrong-environment", 3, true, false}, {"wrong-tenant", 3, true, false}, {"no-release", 3, true, false}, {"guessed-zone", 3, true, false}, {"wrong-utc", 3, true, false}, {"wrong-window", 3, true, false}, {"foreign-ref", 3, true, false}, {"uncommitted-ref", 3, true, false}, {"missing-resolution", 3, true, false}, {"no-evidence", 3, true, false}, {"local-no-pair", 3, true, false}, {"wrong-offset", 3, true, false},
+	{"attempt-timeout", 1, true, false}, {"provider-failure", 1, true, false}, {"cancel", 1, true, false}, {"cleanup-failure", 1, true, false}, {"attempt-cap", 1, true, false},
+}
+
+// Data/contract scenarios use the real Store and publication validators below.
+// Dispatch, cross-Step ownership, session and failure scenarios stay on RPC.
+// Truncated intake, blank proposal reason and history-alias negatives also stay
+// there to detect a production loader accidentally bypassing its validator.
+func validationStage(name string) string {
+	switch name {
+	case "duplicate-attachment", "conflicting-attachment", "duplicate-empty-attachment", "missing-attachment-size", "null-comment",
+		"analysis-without-content", "missing-page", "changed-total", "missing-fields", "unsafe-attachment", "oversized-attachment", "vision-pending",
+		"false-complete", "duplicate-comment", "wrong-page-offset", "missing-linked", "missing-attachment", "raw-key", "unknown-file", "file-escape":
+		return "intake"
+	case "wiki-partial", "wiki-unavailable", "wiki-not-run", "wiki-false-empty", "wiki-ref":
+		return "wiki"
+	case "blank-stack", "blank-pop", "blank-binding", "blank-target", "whitespace-target", "false-ready", "dropped-gap", "self-paired",
+		"lookup-conflict", "lookup-environment", "lookup-release", "missing-lookup", "conflicting-foreign-lookup",
+		"wiki-history-identity", "wiki-history-conflict", "wiki-history-environment", "wiki-history-release",
+		"epoch-millis", "local-paired", "dst-offsets", "identity-conflict", "time-unresolved", "time-conflict",
+		"wrong-scope", "wrong-environment", "wrong-tenant", "no-release", "guessed-zone", "wrong-utc", "wrong-window", "foreign-ref", "uncommitted-ref", "missing-resolution", "no-evidence", "local-no-pair", "wrong-offset":
+		return "context"
+	case "support-wrong-epoch", "support-missing-file", "support-subwindow", "support-unavailable", "support-empty",
+		"support-lookup-conflict", "support-malformed-lookup", "support-lookup-environment", "support-lookup-release",
+		"support-zero-window", "support-reversed-window", "support-nonutc", "support-no-basis", "support-no-result", "support-blank-filter", "support-no-outcome", "support-invalid-status", "support-foreign-basis", "support-uncommitted-result":
+		return "support"
+	case "planner-empty", "planner-no-evidence", "planner-drop-gap", "planner-foreign-evidence", "planner-uncommitted-evidence", "planner-local-evidence", "planner-missing-file", "planner-duplicate-id", "planner-blank-assessment", "planner-blank-rationale", "planner-empty-requirements", "planner-extra-control":
+		return "planner"
+	case "work-bad-kind", "work-no-basis", "work-local-basis", "work-foreign-basis", "work-uncommitted-basis", "work-missing-file", "work-resolve-ready", "work-refresh-ready", "work-refresh-empty", "work-unknown-source", "work-duplicate-source", "work-blank-source-reason", "work-extra-sources", "work-extra-control":
+		return "proposal"
+	case "refresh-unselected-copy", "refresh-foreign-ref", "refresh-wrong-previous", "refresh-no-metadata", "refresh-dropped-source", "refresh-false-complete", "refresh-content-new-analysis", "refresh-content-failure", "refresh-issue-partial", "refresh-issue-missing",
+		"update-comments-repage", "update-comments-missing", "update-comments-false-complete", "update-content", "update-retain-content", "update-truncated", "update-unrecorded-change", "update-foreign-ref", "update-wrong-previous", "update-no-metadata", "update-no-issue", "update-duplicate-work", "update-blank-reason", "update-unrecorded-add", "update-omitted-slot", "update-new-ref", "update-removed-still-in-raw", "update-issue-failure-remove", "update-issue-failure":
+		return "intake-revision"
+	}
+	return ""
+}
+
+// Store publications here are not engine-committed dispatch inputs. These tests
+// exercise schema/filesystem and publication rules, not session orchestration.
+func storeFixture(t *testing.T, store *contract.Store, schema string, data any, files map[string][]byte, escape bool) (contract.Ref, error) {
+	t.Helper()
+	id := contract.Identity{RunID: store.RunID(), InvocationID: contract.NewID(), AttemptID: contract.NewID(), DispatchToken: contract.NewID()}
+	req := contract.Request{Identity: id, Prompt: "anonymous contract validation", Output: contract.OutputSpec{SchemaID: schema}}
+	attempt, err := store.BeginAttempt(id, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCandidate(t, protocol.Control{CandidatePath: attempt.CandidatePath()}, req, data, files, escape)
+	staged, err := attempt.Stage(t.Context(), contract.Spec{SchemaID: schema})
+	if err != nil {
+		return contract.Ref{}, err
+	}
+	defer func() {
+		if err := staged.Discard(); err != nil {
+			t.Error(err)
+		}
+	}()
+	return attempt.Publish(t.Context(), staged)
+}
+
+func storedPublication[T any](t *testing.T, store *contract.Store, ref contract.Ref, expected ...T) publication[T] {
+	t.Helper()
+	raw, err := store.Read(t.Context(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p publication[T]
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatal(err)
+	}
+	if len(expected) != 0 && !reflect.DeepEqual(p.Data, expected[0]) {
+		t.Fatal("Store publication changed fixture data")
+	}
+	return p
+}
+
+type validationInputs struct {
+	intakeRef contract.Ref
+	wikiRef   contract.Ref
+	intake    publication[Intake]
+	wiki      publication[WikiSearch]
+}
+
+func testIntakePublicationRevision(t *testing.T, store *contract.Store, name string, base validationInputs) (bool, error) {
+	t.Helper()
+	updating := strings.HasPrefix(name, "update-")
+	task := stageTask{Stage: "intake-revision", SourceWork: []intakeWork{{Source: "comment:1", Reason: "retry missing comment page"}}}
+	if updating {
+		task.Stage, task.SourceWork = "intake-update", nil
+	} else if strings.HasPrefix(name, "refresh-issue-") {
+		task.SourceWork = []intakeWork{{Source: "issue", Reason: "caller declared issue snapshot stale"}}
+	} else if strings.HasPrefix(name, "refresh-content-") {
+		task.SourceWork = []intakeWork{{Source: "attachment-content:a1", Reason: "update content without automatically repeating analysis"}}
+		if name == "refresh-content-new-analysis" {
+			task.SourceWork = append(task.SourceWork, intakeWork{Source: "attachment-analysis:a1", Reason: "new analysis result"})
+		}
+	}
+	var requests atomic.Int32
+	observe := func(*http.Request) { requests.Add(1) }
+	var server *httptest.Server
+	if updating {
+		server = updateHTTPFixture(t, name, observe)
+	} else {
+		mode := "complete"
+		if strings.HasPrefix(name, "refresh-issue-") {
+			mode = "malformed-issue"
+		}
+		if name == "refresh-issue-missing" {
+			mode = "issue-failure"
+		}
+		_, files := intakeFixture("complete")
+		server = acquireFixture(t, mode, files["bundle"], "text/plain", observe)
+	}
+	v, files, fetched := refreshIntakeFixture(t, t.Context(), name, 4, []contract.Ref{base.intakeRef, base.wikiRef}, task, server.URL)
+	if requests.Load() != fetched || fetched == 0 {
+		t.Fatal("revision fixture did not preserve actual acquisition")
+	}
+	ref, err := storeFixture(t, store, IntakeSchema, v, files, false)
+	if err != nil {
+		return false, err
+	}
+	p := storedPublication[Intake](t, store, ref, v)
+	if err := checkIntakeRevision(p.Data, base.intake.Data, base.intakeRef); err != nil {
+		return false, err
+	}
+	inventory := base.intake.Data.Issue
+	inventory.Ref = &base.intakeRef
+	v, err = checkIntakePublication(t.Context(), ref, p, testScope().Ticket, map[contract.Ref][]file{base.intakeRef: base.intake.Files}, &inventory)
+	if err != nil {
+		return false, err
+	}
+	if v.Acquisition == nil || v.Acquisition.Ref != nil || !hasFile(p.Files, v.Acquisition.FileID) {
+		t.Fatal("revision lost its own acquisition diagnostics")
+	}
+	switch name {
+	case "update-content", "update-retain-content", "refresh-content-failure":
+		oldAnalysis := base.intake.Data.Attachments[0].Analysis
+		oldAnalysis.Ref = &base.intakeRef
+		if !reflect.DeepEqual(v.Attachments[0].Analysis, oldAnalysis) {
+			t.Fatal("revision relabeled historical analysis")
+		}
+		if name == "update-retain-content" {
+			oldContent := base.intake.Data.Attachments[0].Content
+			oldContent.Ref = &base.intakeRef
+			if !reflect.DeepEqual(v.Attachments[0].Content, oldContent) {
+				t.Fatal("revision relabeled historical content")
+			}
+		} else if v.Attachments[0].Content.Ref != nil || !hasFile(p.Files, v.Attachments[0].Content.FileID) {
+			t.Fatal("revision lost new content/partial bytes")
+		}
+	case "update-comments-repage":
+		if len(v.Comments) != 1 || v.Comments[0].Source.Ref != nil || len(base.intake.Data.Comments) != 2 {
+			t.Fatal("repagination changed history or kept the obsolete page")
+		}
+	case "update-comments-missing":
+		page := v.Comments[2].Source
+		if v.Complete || page.Status != "partial" || page.Ref != nil || !hasFile(p.Files, page.FileID) {
+			t.Fatal("partial page lost its status or raw evidence")
+		}
+	}
+	return v.Complete, nil
+}
+
+func validationError(name string) string {
+	switch name {
+	case "duplicate-attachment", "conflicting-attachment", "duplicate-empty-attachment", "missing-attachment-size":
+		return "invalid raw attachment"
+	case "null-comment", "duplicate-comment":
+		return "duplicate/incomplete comment"
+	case "analysis-without-content", "refresh-content-new-analysis":
+		return "analysis without attachment content"
+	case "false-complete", "refresh-false-complete", "update-comments-false-complete":
+		return "intake completeness/gaps mismatch"
+	case "wrong-page-offset":
+		return "invalid comment page metadata"
+	case "missing-linked", "update-removed-still-in-raw", "update-issue-failure-remove":
+		return "linked issue inventory omitted entries"
+	case "missing-attachment", "update-omitted-slot":
+		return "attachment inventory omitted entries"
+	case "truncated-attachment", "update-truncated":
+		return "truncated attachment"
+	case "raw-key":
+		return "raw issue key mismatch"
+	case "unknown-file":
+		return "missing evidence file"
+	case "file-escape":
+		return "invalid or duplicate file reference"
+	case "support-invalid-status":
+		return "/attempts/2/queries/1/status"
+	case "planner-extra-control":
+		return "additional properties 'model' not allowed"
+	case "work-extra-control":
+		return "/supporting_work"
+	case "work-bad-kind":
+		return "/supporting_work/kind"
+	case "wiki-false-empty":
+		return "wiki completion inconsistent"
+	case "wiki-ref":
+		return "wiki search provenance missing"
+	case "blank-stack", "blank-pop", "blank-binding", "blank-target", "whitespace-target":
+		return "resolved identity requires complete target facts"
+	case "false-ready":
+		return "context readiness/gaps mismatch"
+	case "dropped-gap":
+		return "context dropped upstream gap"
+	case "self-paired":
+		return "local timestamp cannot be its own absolute evidence"
+	case "lookup-conflict", "lookup-environment", "lookup-release", "wiki-history-conflict", "wiki-history-environment", "wiki-history-release", "wrong-environment", "wrong-tenant", "no-release", "support-lookup-environment", "support-lookup-release":
+		return "identity conflicts with target/DB resolution receipt"
+	case "missing-lookup":
+		return "resolved identity requires target/DB resolution receipt"
+	case "conflicting-foreign-lookup", "foreign-ref", "uncommitted-ref", "support-foreign-basis", "support-uncommitted-result":
+		return "evidence is not an exact committed input"
+	case "wrong-scope":
+		return "context source/scope mismatch"
+	case "guessed-zone", "wrong-utc":
+		return "UTC conversion mismatch"
+	case "wrong-window":
+		return "UTC window must match observed anchors"
+	case "missing-resolution":
+		return "active identity and time resolution required"
+	case "no-evidence":
+		return "fact lacks evidence"
+	case "local-no-pair":
+		return "local timestamp needs same-event absolute evidence"
+	case "wrong-offset", "support-wrong-epoch":
+		return "calculated local/epoch offset mismatch"
+	case "support-missing-file":
+		return "unknown evidence file"
+	case "support-zero-window", "support-reversed-window", "support-nonutc":
+		return "supporting query requires a nonzero UTC window"
+	case "support-no-basis", "support-no-result", "support-blank-filter", "support-no-outcome":
+		return "supporting query lacks conditions, basis or result evidence"
+	case "planner-drop-gap":
+		return "planning cannot remove supporting context gaps"
+	case "planner-foreign-evidence", "planner-uncommitted-evidence", "planner-local-evidence", "planner-missing-file":
+		return "planner evidence must name an exact supporting input owner/file"
+	case "planner-duplicate-id", "planner-blank-assessment":
+		return "planner hypotheses require unique IDs, statements and assessments"
+	case "planner-blank-rationale":
+		return "planner requires rationale and nonblank gaps"
+	case "planner-empty-requirements":
+		return "planner questions require concrete evidence requirements"
+	case "work-blank-reason", "work-no-basis":
+		return "supporting work requires reason and basis"
+	case "work-local-basis", "work-foreign-basis", "work-uncommitted-basis", "work-missing-file":
+		return "supporting work basis must name an exact supporting input owner/file"
+	case "work-resolve-ready":
+		return "supporting resolve requires needs-resolution context"
+	case "work-refresh-ready", "work-refresh-empty":
+		return "local intake revision requires incomplete intake and explicit work"
+	case "work-unknown-source":
+		return "unknown source work selector"
+	case "work-duplicate-source", "work-blank-source-reason", "update-duplicate-work", "update-blank-reason":
+		return "source work requires unique selectors and reasons"
+	case "work-extra-sources":
+		return "only refresh accepts source selectors"
+	case "refresh-unselected-copy", "refresh-foreign-ref", "update-unrecorded-change", "update-foreign-ref", "update-history-alias":
+		return "unselected source must retain exact prior provenance"
+	case "refresh-wrong-previous", "update-wrong-previous":
+		return "intake revision must bind exact previous ticket/source"
+	case "refresh-no-metadata", "update-no-metadata":
+		return "intake revision requires own acquisition metadata/diagnostics"
+	case "refresh-dropped-source":
+		return "intake revision dropped unrecorded source"
+	case "update-no-issue":
+		return "intake update requires a new issue result"
+	case "update-unrecorded-add":
+		return "unrequested source added"
+	case "update-new-ref":
+		return "source work needs a new local result"
+	}
+	return ""
+}
+
+func validationRejection(name string, err error) error {
+	if err == nil {
+		return fmt.Errorf("expected validation rejection")
+	}
+	phase := ""
+	switch name {
+	case "file-escape":
+		phase = "files"
+	case "support-invalid-status", "planner-extra-control", "work-extra-control", "work-bad-kind":
+		phase = "schema"
+	}
+	var execution *engine.Failure
+	expectedCode := engine.WorkflowFailed
+	if phase != "" {
+		expectedCode = engine.ContractInvalid
+	}
+	if errors.As(err, &execution) && execution.Code != expectedCode {
+		return fmt.Errorf("expected %s classification, not execution failure: %w", expectedCode, err)
+	}
+	var failure *contract.Error
+	var pathError *os.PathError
+	if phase != "" {
+		if !errors.As(err, &failure) || failure.Code != contract.ContractInvalid || failure.Phase != phase {
+			return fmt.Errorf("expected ContractInvalid at %s, not execution failure: %w", phase, err)
+		}
+	} else if errors.As(err, &failure) || errors.As(err, &pathError) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("expected semantic rejection, not execution/Store failure: %w", err)
+	}
+	want := validationError(name)
+	if want == "" || !strings.Contains(err.Error(), want) {
+		return fmt.Errorf("expected rejection containing %q: %w", want, err)
+	}
+	if name == "work-extra-control" && !strings.Contains(err.Error(), "additional properties 'model' not allowed") {
+		return fmt.Errorf("expected extra model control rejection: %w", err)
+	}
+	return nil
+}
+
+func newValidationStore(t *testing.T) *contract.Store {
+	t.Helper()
+	registry, err := contract.NewRegistry(Resources(), Schemas())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := contract.NewStore(registry, contract.Options{BaseDir: t.TempDir(), Prompt: "anonymous validation cases", Limits: contract.DefaultLimits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return store
+}
+
+func TestValidationRejectionFailures(t *testing.T) {
+	store := newValidationStore(t)
+	for _, mode := range []string{"report-storage", "cancellation"} {
+		t.Run(mode, func(t *testing.T) {
+			id := contract.Identity{RunID: store.RunID(), InvocationID: contract.NewID(), AttemptID: contract.NewID(), DispatchToken: contract.NewID()}
+			req := contract.Request{Identity: id, Prompt: "anonymous rejection diagnostics", Output: contract.OutputSpec{SchemaID: PlannerSchema}}
+			attempt, err := store.BeginAttempt(id, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v := PlannerState{Hypotheses: []PlannerHypothesis{}, Pending: []PlannerQuestion{}, Gaps: []string{}, SupportingWork: &SupportingWork{Kind: "logs", Basis: []Evidence{}, Sources: []intakeWork{}}}
+			writeCandidate(t, protocol.Control{CandidatePath: attempt.CandidatePath()}, req, v, nil, false)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if mode == "report-storage" {
+				if err := os.Mkdir(filepath.Join(attempt.Dir(), "validation.json"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				cancel()
+			}
+			_, err = attempt.Stage(ctx, contract.Spec{SchemaID: PlannerSchema})
+			if mode == "report-storage" {
+				var failure *contract.Error
+				if !errors.As(err, &failure) || failure.Code != contract.StorageFailed || !strings.Contains(err.Error(), "/supporting_work/kind") {
+					t.Fatalf("fixture did not retain storage failure around the intended schema rejection: %v", err)
+				}
+			} else if !errors.Is(err, context.Canceled) {
+				t.Fatalf("fixture did not cancel Stage: %v", err)
+			}
+			if validationRejection("work-bad-kind", err) == nil {
+				t.Fatal("execution failure counted as expected schema rejection")
+			}
+		})
+	}
+}
+
+func assertSupportingData(t *testing.T, p publication[Context], wantQueries int) {
+	t.Helper()
+	count := 0
+	for _, attempt := range p.Data.Attempts {
+		for _, q := range attempt.Queries {
+			count++
+			if q.From == p.Data.Time.From && q.To == p.Data.Time.To {
+				t.Fatal("query window was conflated with observed interval")
+			}
+			if q.Filter == "tenant:17" && q.Status != "partial" {
+				t.Fatal("successful narrow query erased earlier partial status")
+			}
+		}
+	}
+	if count != wantQueries {
+		t.Fatalf("query history count=%d, want=%d", count, wantQueries)
+	}
+	for _, id := range []string{"events-broad", "events-narrow", "events-broad-metadata", "events-narrow-metadata"} {
+		if !hasFile(p.Files, id) {
+			t.Fatalf("missing raw query evidence %s", id)
+		}
+	}
+}
+
+func TestTriageValidation(t *testing.T) {
+	store := newValidationStore(t)
+	// Shared inputs are immutable Store publications, never a reused Agent or
+	// engine Run. Each scenario produces its own candidate and local evidence.
+	bases := map[string]validationInputs{}
+	inputs := func(t *testing.T, key string) validationInputs {
+		t.Helper()
+		if base, ok := bases[key]; ok {
+			return base
+		}
+		intakeMode, wikiMode := "complete", "complete"
+		switch key {
+		case "missing-page", "revision-incomplete":
+			intakeMode = "missing-page"
+		case "support":
+			intakeMode = "support-complete"
+		case "wiki-partial":
+			wikiMode = key
+		default:
+			if strings.HasPrefix(key, "wiki-history-") {
+				wikiMode = key
+			}
+		}
+		iv, files := intakeFixture(intakeMode)
+		if key == "revision-incomplete" {
+			iv.Comments = append(iv.Comments, CommentPage{Start: 1, Source: unavailable(iv.Gaps[0])})
+		}
+		ir, err := storeFixture(t, store, IntakeSchema, iv, files, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ip := storedPublication[Intake](t, store, ir)
+		if _, err := checkIntakePublication(t.Context(), ir, ip, testScope().Ticket, nil, nil); err != nil {
+			t.Fatal("invalid test prerequisite: ", err)
+		}
+		wv, files := wikiFixture(wikiMode, ir)
+		wr, err := storeFixture(t, store, WikiSchema, wv, files, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wp := storedPublication[WikiSearch](t, store, wr)
+		if _, err := checkWikiPublication(wp, ir); err != nil {
+			t.Fatal("invalid test prerequisite: ", err)
+		}
+		base := validationInputs{ir, wr, ip, wp}
+		bases[key] = base
+		return base
+	}
+	for _, tc := range triageCases {
+		stage := validationStage(tc.name)
+		if stage == "" {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			key := "complete"
+			switch {
+			case stage == "support":
+				key = "support"
+			case tc.name == "false-ready" || tc.name == "dropped-gap":
+				key = "missing-page"
+			case tc.name == "planner-drop-gap":
+				key = "wiki-partial"
+			case strings.HasPrefix(tc.name, "wiki-history-"):
+				key = tc.name
+			case stage == "intake-revision":
+				key = "revision-complete"
+				if strings.HasPrefix(tc.name, "refresh-") {
+					key = "revision-incomplete"
+				}
+			case stage == "proposal" && (strings.HasPrefix(tc.name, "work-refresh-") || tc.name == "work-unknown-source" || tc.name == "work-duplicate-source" || tc.name == "work-blank-source-reason") && tc.name != "work-refresh-ready":
+				key = "missing-page"
+			}
+			base := inputs(t, key)
+			scope := testScope()
+			switch tc.name {
+			case "blank-stack":
+				scope.Stack = ""
+			case "blank-pop":
+				scope.Pop = ""
+			case "blank-binding":
+				scope.Binding = ""
+			case "blank-target":
+				scope.Stack, scope.Pop, scope.Binding = "", "", ""
+			case "whitespace-target":
+				scope.Stack, scope.Pop, scope.Binding = " ", " ", " "
+			}
+			var err error
+			var ready bool
+			sources := map[contract.Ref][]file{base.intakeRef: base.intake.Files, base.wikiRef: base.wiki.Files}
+			switch stage {
+			case "intake":
+				v, files := intakeFixture(tc.name)
+				var ref contract.Ref
+				ref, err = storeFixture(t, store, IntakeSchema, v, files, tc.name == "file-escape")
+				if err == nil {
+					v, err = checkIntakePublication(t.Context(), ref, storedPublication[Intake](t, store, ref, v), scope.Ticket, nil, nil)
+					ready = v.Complete
+				}
+			case "wiki":
+				v, files := wikiFixture(tc.name, base.intakeRef)
+				var ref contract.Ref
+				ref, err = storeFixture(t, store, WikiSchema, v, files, false)
+				if err == nil {
+					v, err = checkWikiPublication(storedPublication[WikiSearch](t, store, ref, v), base.intakeRef)
+					ready = wikiComplete(v)
+				}
+			case "context", "support":
+				refs := []contract.Ref{base.intakeRef, base.wikiRef}
+				v, files := contextFixture(tc.name, scope, refs, base.intake.Data, base.wiki.Data)
+				if stage == "support" {
+					var requests atomic.Int32
+					server := supportingHTTPFixture(t, tc.name, &requests)
+					v, files = supportingContextFixture(t, t.Context(), server.URL, tc.name, 0, stageTask{RuntimeResolutionAllowed: true}, refs, v, files)
+					if requests.Load() != 3 {
+						t.Fatal("supporting fixture did not preserve actual acquisition")
+					}
+				}
+				var ref contract.Ref
+				ref, err = storeFixture(t, store, ContextSchema, v, files, false)
+				if err == nil {
+					p := storedPublication[Context](t, store, ref, v)
+					v, err = checkContextPublication(t.Context(), ref, p, scope, base.intakeRef, base.wikiRef, base.intake.Data, base.wiki.Data, sources)
+					ready = v.Readiness == "ready"
+					if err == nil && !tc.failure && stage == "support" {
+						assertSupportingData(t, p, 2)
+					}
+				}
+			case "planner", "proposal":
+				cv, files := contextFixture("complete", scope, []contract.Ref{base.intakeRef, base.wikiRef}, base.intake.Data, base.wiki.Data)
+				cr, e := storeFixture(t, store, ContextSchema, cv, files, false)
+				if e != nil {
+					t.Fatal(e)
+				}
+				cp := storedPublication[Context](t, store, cr)
+				if _, e := checkContextPublication(t.Context(), cr, cp, scope, base.intakeRef, base.wikiRef, base.intake.Data, base.wiki.Data, sources); e != nil {
+					t.Fatal("invalid test prerequisite: ", e)
+				}
+				sources[cr] = cp.Files
+				h := contextHistory{ref: cr, value: cp.Data, sources: sources}
+				req := contract.Request{Inputs: []contract.Ref{cr, base.intakeRef, base.wikiRef}}
+				task := stageTask{Gaps: cp.Data.Gaps}
+				var v PlannerState
+				if stage == "proposal" {
+					kind := "update"
+					if tc.name == "work-resolve-ready" {
+						kind = "resolve"
+					} else if strings.HasPrefix(tc.name, "work-refresh-") || tc.name == "work-unknown-source" || tc.name == "work-duplicate-source" || tc.name == "work-blank-source-reason" {
+						kind = "refresh"
+					}
+					v = plannerWorkFixture(t, tc.name, kind, req, task, 1, base.intakeRef)
+				} else {
+					v = plannerFixture(t, tc.name, req, task, 1, base.intakeRef)
+				}
+				var data any = v
+				if tc.name == "planner-extra-control" || tc.name == "work-extra-control" {
+					var extra map[string]any
+					if err := json.Unmarshal(testJSON(v), &extra); err != nil {
+						t.Fatal(err)
+					}
+					if stage == "proposal" {
+						extra["supporting_work"].(map[string]any)["model"] = "agent-selected-model"
+					} else {
+						extra["model"] = "agent-selected-model"
+					}
+					data = extra
+				}
+				var ref contract.Ref
+				ref, err = storeFixture(t, store, PlannerSchema, data, nil, false)
+				if err == nil {
+					v = storedPublication[PlannerState](t, store, ref, v).Data
+					err = checkPlannerSnapshot(v, h)
+					if err == nil {
+						err = checkSupportingProposal(h, v.SupportingWork)
+					}
+					if err == nil && v.SupportingWork != nil && v.SupportingWork.Kind == "refresh" {
+						err = checkIntakeWork(base.intake.Data, v.SupportingWork.Sources)
+					}
+					ready = cp.Data.Readiness == "ready"
+				}
+			case "intake-revision":
+				ready, err = testIntakePublicationRevision(t, store, tc.name, base)
+			default:
+				t.Fatal("unknown validation stage")
+			}
+			if (err != nil) != tc.failure || (!tc.failure && ready != tc.ready) {
+				t.Fatalf("stage=%s ready=%t error=%v", stage, ready, err)
+			}
+			if tc.failure {
+				if err := validationRejection(tc.name, err); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func TestIntakeToContext(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		stages  int
-		failure bool
-		ready   bool
-	}{
-		{"work-tamper-during-worker", 7, true, false},
-		{"work-tamper-evidence-before-support", 4, true, false}, {"work-tamper-evidence-after-support", 7, true, false}, {"work-tamper-evidence-handoff", 8, true, false},
-		{"work-read-isolation", 8, false, true}, {"work-read-cancellation", 8, false, true}, {"work-read-exact-ref", 8, false, true},
-		{"work-unproposed-transition", 7, true, false}, {"work-skipped-context", 10, true, false},
-		{"work-wrong-task", 7, true, false}, {"work-resolve-changed-intake", 7, true, false}, {"work-refresh-work-mismatch", 7, true, false},
-		{"work-reuse", 9, false, true},
-		{"work-resolve", 7, false, true}, {"work-time", 6, false, true}, {"work-refresh", 8, false, true}, {"work-update", 8, false, true},
-		{"work-update-incomplete", 8, false, true}, {"work-update-partial", 8, false, false}, {"work-ticket-only", 6, false, false},
-		{"work-handoff", 9, false, true}, {"work-repeat", 13, false, true},
-		{"work-no-proposal", 4, true, false}, {"work-bad-kind", 4, true, false}, {"work-blank-reason", 4, true, false}, {"work-no-basis", 4, true, false},
-		{"work-local-basis", 4, true, false}, {"work-foreign-basis", 4, true, false}, {"work-uncommitted-basis", 4, true, false}, {"work-missing-file", 4, true, false},
-		{"work-resolve-ready", 4, true, false}, {"work-refresh-ready", 4, true, false}, {"work-refresh-empty", 4, true, false}, {"work-unknown-source", 4, true, false},
-		{"work-duplicate-source", 4, true, false}, {"work-blank-source-reason", 4, true, false}, {"work-extra-sources", 4, true, false}, {"work-extra-control", 4, true, false},
-		{"work-wrong-result-context", 8, true, false}, {"work-drop-gap", 8, true, false},
-		{"work-worker-provider-failure", 5, true, false}, {"work-worker-timeout", 5, true, false}, {"work-worker-cancel", 5, true, false},
-		{"work-planner-provider-failure", 8, true, false}, {"work-planner-timeout", 8, true, false},
-		{"work-cleanup-failure", 4, true, false}, {"work-worker-cleanup-failure", 5, true, false},
-		{"work-attempt-cap", 4, true, false}, {"work-final-cap", 7, true, false}, {"work-session-cap", 4, true, false},
-		{"work-tamper-proposal", 4, true, false}, {"work-tamper-history", 8, true, false},
-		{"planner-ready", 4, false, true}, {"planner-incomplete", 4, false, false}, {"planner-ticket-only", 4, false, false}, {"planner-empty", 4, false, true}, {"planner-no-evidence", 4, false, true}, {"planner-reuse-handoff", 6, false, true},
-		{"planner-reuse", 5, false, true}, {"planner-handoff", 5, false, true}, {"planner-history", 8, false, true}, {"planner-support", 5, false, true},
-		{"planner-wrong-context", 4, true, false}, {"planner-wrong-previous", 5, true, false}, {"planner-invented-previous", 4, true, false}, {"planner-drop-gap", 4, true, false},
-		{"planner-foreign-evidence", 4, true, false}, {"planner-uncommitted-evidence", 4, true, false}, {"planner-local-evidence", 4, true, false}, {"planner-missing-file", 4, true, false},
-		{"planner-duplicate-id", 4, true, false}, {"planner-blank-assessment", 4, true, false}, {"planner-blank-rationale", 4, true, false}, {"planner-empty-requirements", 4, true, false}, {"planner-extra-control", 4, true, false},
-		{"planner-uncommitted-input", 3, true, false}, {"planner-wrong-scope", 3, true, false}, {"planner-missing-model", 3, true, false},
-		{"planner-provider-failure", 5, true, false}, {"planner-cancel", 5, true, false}, {"planner-timeout", 5, true, false}, {"planner-cleanup-failure", 4, true, false}, {"planner-attempt-cap", 4, true, false}, {"planner-session-cap", 4, true, false}, {"planner-tampered-handoff", 4, true, false},
-		{"support-ticket-only", 3, false, false}, {"support-wiki-partial", 3, false, false}, {"support-incomplete", 3, false, false}, {"support-wrong-epoch", 3, true, false}, {"support-missing-file", 3, true, false},
-		{"support-complete", 3, false, true}, {"support-subwindow", 3, false, true}, {"support-partial", 3, false, false}, {"support-unavailable", 3, false, false}, {"support-empty", 3, false, false},
-		{"support-lookup-conflict", 3, false, false}, {"support-malformed-lookup", 3, false, false}, {"support-lookup-environment", 3, true, false}, {"support-lookup-release", 3, true, false},
-		{"support-zero-window", 3, true, false}, {"support-reversed-window", 3, true, false}, {"support-nonutc", 3, true, false}, {"support-no-basis", 3, true, false}, {"support-no-result", 3, true, false}, {"support-blank-filter", 3, true, false}, {"support-no-outcome", 3, true, false}, {"support-invalid-status", 3, true, false}, {"support-foreign-basis", 3, true, false}, {"support-uncommitted-result", 3, true, false},
-		{"support-resolve-altered-query", 4, true, false}, {"support-resolve-retag-basis", 4, true, false},
-		{"support-resolve-empty-prior", 4, false, true}, {"support-resolve-empty-next", 4, false, true}, {"support-resolve-empty-both", 4, false, true},
-		{"support-resolve-success", 4, false, true}, {"support-resolve-repeat", 5, false, true}, {"support-resolve-dropped-history", 4, true, false},
-		{"support-resolve-provider-failure", 4, true, false}, {"support-resolve-cancel", 4, true, false}, {"support-resolve-timeout", 4, true, false}, {"support-resolve-cleanup-failure", 4, true, false}, {"support-resolve-attempt-cap", 3, true, false},
-		{"update-page", 6, false, true}, {"update-comments-repage", 6, false, true}, {"update-comments-missing", 6, false, false}, {"update-comments-false-complete", 4, true, false},
-		{"update-add", 6, false, true}, {"update-remove", 6, false, true}, {"update-replace", 6, false, true}, {"update-repeat", 9, false, true},
-		{"update-content", 6, false, true}, {"update-retain-content", 6, false, true}, {"update-partial", 6, false, false}, {"update-issue-failure", 6, false, false},
-		{"update-retain-gap", 6, false, false}, {"update-resolve-gap", 6, false, true}, {"update-drop-gap", 6, true, false},
-		{"update-history-lookup", 6, false, true}, {"update-then-resolve", 8, false, true}, {"update-then-refresh", 9, false, true},
-		{"update-truncated", 4, true, false}, {"update-unrecorded-change", 4, true, false}, {"update-foreign-ref", 4, true, false}, {"update-wrong-previous", 4, true, false}, {"update-no-metadata", 4, true, false},
-		{"update-wrong-task", 4, true, false}, {"update-no-issue", 4, true, false}, {"update-duplicate-work", 4, true, false}, {"update-blank-reason", 4, true, false}, {"update-unrecorded-add", 4, true, false},
-		{"update-omitted-slot", 4, true, false}, {"update-new-ref", 4, true, false}, {"update-removed-still-in-raw", 4, true, false}, {"update-issue-failure-remove", 4, true, false}, {"update-history-alias", 4, true, false},
-		{"update-old-wiki-binding", 5, true, false}, {"update-provider-failure", 4, true, false}, {"update-cancel", 4, true, false}, {"update-timeout", 4, true, false}, {"update-cleanup-failure", 4, true, false}, {"update-attempt-cap", 3, true, false}, {"update-uncommitted-input", 3, true, false},
-		{"refresh-content-failure", 6, false, false}, {"refresh-content-failure-repeat", 9, false, false}, {"refresh-content-new-analysis", 4, true, false}, {"refresh-escalated-task", 4, true, false},
-		{"analysis-without-content", 1, true, false}, {"initial-update", 1, true, false},
-		{"refresh-issue-partial", 6, false, false}, {"refresh-issue-missing", 6, false, false}, {"refresh-issue-repeat", 9, false, false},
-		{"refresh-page", 6, false, true}, {"refresh-attachment", 6, false, true}, {"refresh-invalidated", 6, false, true},
-		{"refresh-historical-wiki", 6, false, true}, {"refresh-wiki-partial", 6, false, false}, {"refresh-repeat", 9, false, true}, {"refresh-then-resolve", 8, false, true},
-		{"refresh-unselected-copy", 4, true, false}, {"refresh-foreign-ref", 4, true, false}, {"refresh-wrong-previous", 4, true, false}, {"refresh-work-changed", 4, true, false}, {"refresh-no-metadata", 4, true, false}, {"refresh-dropped-source", 4, true, false}, {"refresh-false-complete", 4, true, false},
-		{"refresh-old-wiki-binding", 5, true, false}, {"refresh-false-no-matches", 5, true, false}, {"refresh-drop-gap", 6, true, false}, {"refresh-dropped-history", 6, true, false}, {"refresh-context-foreign-ref", 6, true, false},
-		{"refresh-provider-failure", 4, true, false}, {"refresh-cancel", 4, true, false}, {"refresh-timeout", 4, true, false}, {"refresh-cleanup-failure", 4, true, false}, {"refresh-attempt-cap", 3, true, false}, {"refresh-uncommitted-input", 3, true, false},
-		{"missing-attachment-size", 1, true, false},
-		{"blank-stack", 3, true, false}, {"blank-pop", 3, true, false}, {"blank-binding", 3, true, false}, {"blank-target", 3, true, false}, {"whitespace-target", 3, true, false},
-		{"duplicate-attachment", 1, true, false}, {"conflicting-attachment", 1, true, false}, {"duplicate-empty-attachment", 1, true, false}, {"null-comment", 1, true, false}, {"http-page-null", 3, false, false},
-		{"http-complete", 3, false, true}, {"http-page-failure", 3, false, false}, {"http-page-total", 3, false, false}, {"http-page-empty", 3, false, false}, {"http-page-offset", 3, false, false}, {"http-page-duplicate", 3, false, false}, {"http-page-short", 3, false, false}, {"http-page-partial", 3, false, false}, {"http-malformed-issue", 3, false, false}, {"http-malformed-fields", 3, false, false}, {"http-linked-failure", 3, false, false}, {"http-attachment-partial", 3, false, false}, {"http-unsafe-zip", 3, false, false}, {"http-oversized", 3, false, false}, {"http-metadata-limit", 3, false, false},
-		{"resolve-ready", 3, false, true}, {"resolve-acquisition-gap", 5, false, false},
-		{"resolve-wiki", 5, false, true}, {"resolve-wiki-unavailable", 5, false, true}, {"resolve-wiki-not-run", 5, false, true}, {"resolve-wiki-partial-again", 5, false, false}, {"resolve-repeat", 7, false, true}, {"resolve-time", 4, false, true}, {"resolve-identity", 4, false, true}, {"resolve-ticket-only", 4, false, false},
-		{"resolve-drop-gap", 5, true, false}, {"resolve-foreign-evidence", 5, true, false}, {"resolve-replace-valid-time", 5, true, false}, {"resolve-wrong-previous", 5, true, false}, {"resolve-old-evidence", 5, true, false}, {"resolve-dropped-history", 5, true, false},
-		{"resolve-provider-failure", 4, true, false}, {"resolve-cancel", 4, true, false}, {"resolve-timeout", 4, true, false}, {"resolve-cleanup-failure", 4, true, false}, {"resolve-attempt-cap", 3, true, false}, {"resolve-uncommitted-input", 3, true, false},
-		{"wiki-history-identity", 3, false, true}, {"wiki-history-conflict", 3, true, false}, {"wiki-history-environment", 3, true, false}, {"wiki-history-release", 3, true, false}, {"conflicting-foreign-lookup", 3, true, false},
-		{"ticket-only", 3, false, false}, {"wiki-not-run", 3, false, false},
-		{"false-ready", 3, true, false}, {"dropped-gap", 3, true, false}, {"self-paired", 3, true, false}, {"lookup-conflict", 3, true, false}, {"lookup-environment", 3, true, false}, {"lookup-release", 3, true, false}, {"missing-lookup", 3, true, false},
-		{"complete", 3, false, true}, {"wiki-matches", 3, false, true}, {"epoch-millis", 3, false, true}, {"local-paired", 3, false, true}, {"dst-offsets", 3, false, true},
-		{"missing-page", 3, false, false}, {"changed-total", 3, false, false}, {"missing-fields", 3, false, false}, {"unsafe-attachment", 3, false, false}, {"oversized-attachment", 3, false, false}, {"vision-pending", 3, false, false}, {"wiki-partial", 3, false, false}, {"wiki-unavailable", 3, false, false}, {"identity-conflict", 3, false, false}, {"time-unresolved", 3, false, false}, {"time-conflict", 3, false, false},
-		{"false-complete", 1, true, false}, {"duplicate-comment", 1, true, false}, {"wrong-page-offset", 1, true, false}, {"missing-linked", 1, true, false}, {"missing-attachment", 1, true, false}, {"truncated-attachment", 1, true, false}, {"raw-key", 1, true, false}, {"unknown-file", 1, true, false}, {"file-escape", 1, true, false},
-		{"wiki-false-empty", 2, true, false}, {"wiki-ref", 2, true, false},
-		{"wrong-scope", 3, true, false}, {"wrong-environment", 3, true, false}, {"wrong-tenant", 3, true, false}, {"no-release", 3, true, false}, {"guessed-zone", 3, true, false}, {"wrong-utc", 3, true, false}, {"wrong-window", 3, true, false}, {"foreign-ref", 3, true, false}, {"uncommitted-ref", 3, true, false}, {"missing-resolution", 3, true, false}, {"no-evidence", 3, true, false}, {"local-no-pair", 3, true, false}, {"wrong-offset", 3, true, false},
-		{"attempt-timeout", 1, true, false}, {"provider-failure", 1, true, false}, {"cancel", 1, true, false}, {"cleanup-failure", 1, true, false}, {"attempt-cap", 1, true, false},
-	} {
+	for _, tc := range triageCases {
+		if validationStage(tc.name) != "" {
+			continue
+		}
 		t.Run(tc.name, func(t *testing.T) {
 			working := strings.HasPrefix(tc.name, "work-")
 			transitionProbe := slices.Contains([]string{"work-unproposed-transition", "work-skipped-context", "work-wrong-task", "work-resolve-changed-intake", "work-refresh-work-mismatch"}, tc.name)
@@ -2280,6 +2871,11 @@ func TestIntakeToContext(t *testing.T) {
 			if count != tc.stages || (report.ExitCode != 0) != tc.failure {
 				t.Fatalf("stages=%d outcome=%s failure=%v", count, report.Outcome, report.Failure)
 			}
+			if tc.name == "truncated-attachment" || tc.name == "update-history-alias" || tc.name == "work-blank-reason" {
+				if err := validationRejection(tc.name, report.Failure); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.name == "update-wrong-task" && !strings.Contains(fmt.Sprint(report.Failure), "intake revision changed dispatched task/work/previous") {
 				t.Fatalf("wrong task was not rejected at dispatch binding: %v", report.Failure)
 			}
@@ -2403,13 +2999,9 @@ func TestIntakeToContext(t *testing.T) {
 					t.Fatal("committed context lost provenance/state")
 				}
 				if supporting && supportingAllowed {
-					queryCount := 0
+					assertSupportingData(t, published, 2*(count-2))
 					for _, attempt := range published.Data.Attempts {
 						for _, q := range attempt.Queries {
-							queryCount++
-							if q.From == published.Data.Time.From && q.To == published.Data.Time.To {
-								t.Fatal("query window was conflated with observed interval")
-							}
 							for _, evidence := range append(slices.Clone(q.Basis), q.Evidence...) {
 								owner, ownerFiles := result.Context, published.Files
 								if evidence.Ref != nil {
@@ -2425,17 +3017,6 @@ func TestIntakeToContext(t *testing.T) {
 									t.Fatal("query lost exact committed owner")
 								}
 							}
-							if q.Filter == "tenant:17" && q.Status != "partial" {
-								t.Fatal("successful narrow query erased earlier partial status")
-							}
-						}
-					}
-					if queryCount != 2*(count-2) {
-						t.Fatalf("query history count=%d", queryCount)
-					}
-					for _, id := range []string{"events-broad", "events-narrow", "events-broad-metadata", "events-narrow-metadata"} {
-						if !hasFile(published.Files, id) {
-							t.Fatalf("missing raw query evidence %s", id)
 						}
 					}
 					if strings.HasPrefix(tc.name, "support-resolve-") {
@@ -2530,6 +3111,12 @@ func TestIntakeToContext(t *testing.T) {
 				}
 				if tc.name == "provider-failure" && failure.Code != engine.ProviderFailed {
 					t.Fatalf("provider failure reclassified: %+v", failure)
+				}
+				// Vary only the external error text; keep the real RPC failure code.
+				collision := *failure
+				collision.Message = validationError("truncated-attachment")
+				if validationRejection("truncated-attachment", &collision) == nil {
+					t.Fatal("execution failure text counted as semantic rejection")
 				}
 				for _, a := range report.Snapshot.Attempts {
 					if a.Output != nil {
