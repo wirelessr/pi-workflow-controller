@@ -176,6 +176,6 @@ go test -p 1 -count=1 ./internal/workflows/triage ./internal/runtime ./internal/
 
 完整回歸與發布方法見 [VERIFICATION](VERIFICATION.md)。既有 shared-discovery 的 parent pid／`.recovering`／ownership gate 保留，屬於 runtime 對自有 process 的安全責任，不因 Agent 操作規則採軟性提示而取消。
 
-局部補取、完整任務內 inventory 更新，以及 identity/time supporting-source／query 工作紀錄已有上述 private 匿名切片；Planner 已能以受驗收 proposal 派送上述既有 supporting 任務並接回新版規劃狀態。下一步仍需 Agent 技能操作的授權 live 驗收。不以新增 executable 代替，也不重做已完成 intake 或將第一次缺欄位當作結案。之後逐單元加入 bounded workers、reframe、包含工作結果／feedback 的每 Step 可重建狀態與每三輪 checkpoint、同版三方驗證及 deterministic report。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
+局部補取、完整任務內 inventory 更新，以及 identity/time supporting-source／query 工作紀錄已有上述 private 匿名切片；Planner 已能以受驗收 proposal 派送上述既有 supporting 任務並接回新版規劃狀態。後續主線依 [Workflow 重用與 refactor 計畫](WORKFLOW-REUSE.md) 的 R1–R4 前置 gate 收斂共用機制，再按 M1–M7 接一般調查 worker、adaptive loop、checkpoint/recovery、三方驗證與報告，不為每個 milestone 新建 session、Store、reader、scheduler 或 test host。已完成的 supporting/state/handoff/讀取去重/測試分層不重做。真 Agent 技能操作與模型 live 驗收保持獨立未驗 gate，不是目前可自行啟動的下一步。不以新增 executable 代替，也不將第一次缺欄位當作結案。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
 
 不提供 OS sandbox、任意 detached 子孫清理、crash resume、exactly-once 或外部副作用 rollback；保留 [DESIGN](../DESIGN.md) 的既有非保證範圍。

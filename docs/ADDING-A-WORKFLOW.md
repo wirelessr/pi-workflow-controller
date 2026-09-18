@@ -1,6 +1,6 @@
 # 新增 workflow：接手 agent 指南
 
-先讀 repo 根目錄的 [專案憲法](../AGENTS.md)，以下流程與個別 workflow 設計不得默默改變其責任邊界。
+先讀 repo 根目錄的 [專案憲法](../AGENTS.md)，以及 [Workflow 重用與 refactor 計畫](WORKFLOW-REUSE.md)。後者的能力登記、R/M 相依與每單元 reuse map 是必要開工 gate，不是可略過的參考；以下流程與個別 workflow 設計不得默默改變其責任邊界。
 
 本文件是新增 predefined workflow 的工作入口，不是新 DSL、全域 skill 或安裝器。Workflow 使用 Go control flow；新 workflow 的業務選擇由使用者確認，不從當前 agent、smoke-echo 或 code-review 默默繼承。
 
@@ -30,7 +30,7 @@
 
 ## 2. 實作前先定義
 
-在 `docs/<WORKFLOW>.md` 記錄下面的決策。一般工程細節自行處理；規格歧義、權限／安全風險或必須擴大範圍時先確認。
+在 `docs/<WORKFLOW>.md` 記錄下面的決策。先完成重用計畫要求的 API/callers 對照、機制與政策差異、必要 consumer 遷移及前置單元核對；找不到共用入口不代表可以另複製一套。一般工程細節自行處理；規格歧義、權限／安全風險或必須擴大範圍時先確認。
 
 - **輸入／產出：** CLI 仍是 `run <workflow> "單行 Prompt"`。業務如何解析這個字串、最後交付什麼，不能靠模型自己猜。框架的單行／UTF-8／大小 preflight 不等於業務 URL/ticket 等格式驗證。
 - **角色／session：** 每個角色職責、哪些沿用同一 handle、哪些需要新 Pi、必要分支、join 模式。不要讓 Pi 自行 spawn、選下一節點或控制 Controller。
@@ -67,7 +67,7 @@
 
 ## 5. Skills 與資源交付
 
-需要專用 skills 時，把原始檔放新 workflow package 的資源目錄，以 `go:embed` 打包；執行時展開至本 run 擁有的目錄，提供對應 Pi **絕對 SKILL.md 路徑**並要求全文讀完再執行。參考 `review/resources.go` 的做法，不直接呼叫 review 專用 extractor 當通用安裝器。
+需要專用 skills 時，把原始檔放新 workflow package 的資源目錄，以 `go:embed` 打包；執行時展開至本 run 擁有的目錄，提供對應 Pi **絕對 SKILL.md 路徑**並要求全文讀完再執行。出現第二個實際 consumer 時，依重用計畫 R5 從 `review/resources.go` 收斂共用 extraction 機械部分並遷移原 consumer；不直接呼叫 review 專用 extractor 當通用安裝器，也不複製後改名另養一套。這不授權另造 acquisition tools 或共通安全 instructions。
 
 - 動手前讀目標 Pi 已安裝版本的 skills／settings 文件與必要 resource-loader source。普通 `repo/skills/` 不保證被 Pi 自動 discovery。
 - 保留 references/scripts/assets 的相對結構；引用以 SKILL.md 所在目錄解析，不以 code checkout cwd 解析。展開應 exclusive、不覆蓋其他 run 或全域內容。
@@ -139,6 +139,8 @@ go test -count=1 ./internal/engine -run '^ExampleWorkflow$'
 
 必要驗收依新增行為具體化，至少考慮：
 
+- [ ] 已核對 reuse map、實際 exports/callers、前置 R/M 單元；沒有新增未說明差異的同質機制或把尚未實作的計畫 API 當現況。
+- [ ] 共用 refactor 已遷移原 consumers，舊副本移除或有核實保留理由；錯誤/拒絕條件/會計變化已明列，沒有藉 DRY 削弱保證。
 - [ ] 真 engine/Store/filesystem，只替代外部 API/provider/RPC；不 stub Step、不 mock 內部轉換或編排。
 - [ ] 必要角色／parallel join／retry budget／fresh 或 reused context 與規格一致，以 channel/RPC/filesystem barrier 控制，不靠 sleep 猜 race。
 - [ ] schema／identity／來源 Ref／版本拒絕、資料不足、空結果／缺失角色、業務 reject、最後產出及正確 producer 定位。
@@ -170,6 +172,7 @@ Opt-in suite 的 skip 不算 PASS；各組實際執行／blocked／未執行及�
 - [ ] `docs/<WORKFLOW>.md` 記已批准的公開模型配置、session／contract／錯誤／權限／清理決策，以及匿名測試方法／限制；實際 review/verification 證據只存 repo 外，不把 cached auth 或某次 inference 成功當產品保證。
 - [ ] 必要 gates 全部通過才宣稱完成；blocked 明列，不拿先前結果或其他 workflow 代替。
 - [ ] 按 [VERIFICATION 的發布 scan 策略](VERIFICATION.md) 檢查內容、本地 links、index 與待發布 history。獲授權後只提交 source、專用 embedded resources、schemas、匿名 tests 與通用 docs；不得把本機報告或真實來源納入 commit，也不將交接 SHA 寫入 repo 文件。未獲要求不 commit/push／開 PR。
+- [ ] 更新重用能力登記及工程狀態：實際共用 API/callers、已完成且禁止重做單元、剩餘依賴與下一個未阻擋工作。接手者不得只看歷史待辦而重做已提交成果。
 - [ ] 不修改既有全域定義，不將 code-review 內容自動寫入個人 wiki。
 
 給下一個 agent 的起始訊息可以是：「在指定 HEAD 接手，先讀 README 與 `docs/ADDING-A-WORKFLOW.md`，核對 working tree。此次新增 `<name>`，已批准的輸入、角色／模型、權限、contracts、期限、真實驗收目標如下……未決項目如下……。依指南完成實作、獨立 review、分組驗收與發布安全檢查；實際採證只存 repo 外，commit 另依授權，不擴大框架範圍。」

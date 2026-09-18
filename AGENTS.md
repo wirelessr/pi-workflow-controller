@@ -65,10 +65,26 @@ Planner Agent 可以提出下一步工作；Controller 依已批准的 contract�
 - 驗收 exact 待提交 tree，清楚列出 skips、未執行與未驗 live 能力。匿名 fixtures、工具存在、skill 可載入、Agent 實際成功操作是不同層級的證據。
 - Repository 只保留通用 source、匿名 tests 與文件。真資料、認證、個人路徑、逐次工程報告及交接 metadata 留在 repo 外指定位置；不覆蓋不明來源變更，不自行發布。
 
+## 七、共用機制不能隨 workflow 重造
+
+**新 workflow 的預設工作是組合既有執行機制、定義自己的業務 contracts 與轉移，不是複製上一個 workflow 的底層接線。** 共用能力的歸屬及本輪收斂順序見 [Workflow 重用與 refactor 計畫](docs/WORKFLOW-REUSE.md)；接手與 review 都必須核對，不把計畫中的 API 當成已存在。
+
+- 每個實作單元開始前，列出將使用的既有 API、實際 callers、必要的新業務資料，以及剩餘機制缺口。至少比較其他 workflows 與 engine/runtime/contract/testutil，不能只看當前 package 就宣稱沒有可重用能力。
+- 同一保證只因角色名、schema、file map/slice 形狀或小量參數不同，不得另寫一套機制。缺共用入口時，先從已驗證實作抽出最小中性能力，遷移既有 consumers，再接新工作；不以「先複製，以後再抽」繞過。
+- 共用機制放在其責任層：process/discovery 在 runtime，committed 授權與流程原語在 engine，contract/file 表示及檢查在 contract，測試 transport 在 testutil。不讓 engine 依賴特定 workflow，也不讓新 workflow import 另一 workflow 的私有業務實作作為共用層。
+- Startup preflight、cleanup 確認、envelope/file 消費、測試 host transport 是必查的共用性項目。不能每個 workflow 自行拼出不同的安全保證；尚未收斂的既有實作須依計畫遷移，不因寫入本條就宣稱已完成。
+- 共用前先列差異矩陣：取消、錯誤分類、ownership、path/symlink、限額、穩定性及生命週期。不得挑較弱版本統一，也不得將更強檢查默默套到舊 API。新增自動拒絕條件、改變錯誤時點或會計，都要明列並驗收，不稱為零行為 refactor。
+- 業務 Evidence/Status、claim/verdict、角色/模型、scope、reframe 與安全重做條件可以不同，不硬合成大量 optional fields、通用判讀或可配置流程。沒有第二個實際用途時，不預造共用層；即使有多個 consumers，也不因 DRY 引入 WorkflowBase、通用 scheduler、DAG/DSL、plugin/installer 或工具權限框架。普通 Go 控制流程與少量重複不是抽象化理由。
+- 不另造 Store/journal/commit、session 管理、retry 計數或 final artifact registry。使用既有原語；`Parallel` 不是限流 queue，`Retry` 不是整個調查狀態機，policy hard cap 也不是排程策略。
+- 共用 refactor 的完成條件包含實際 consumer 遷移、舊副本移除或核實的保留理由、原契約及新邊界回歸。只新增未使用 helper、只移檔案，或留下兩套繼續演化，不算收斂完成。
+- 後續 milestones 必須遵守已記錄的相依與重用決策。接手先核對 source、完成單元與採證，不回復歷史版本、不重做已完成工作；要改變既定邊界或繞過相依，先指出具體新衝突並取得確認，再同步計畫。
+- 本條是開發／review gate，不新增對 workflow nodes 的共通安全 prompt、runtime hook 或工具 allowlist，也不以 DRY 為由取消前六條保證。
+
 ## 閱讀入口
 
 - [PRD](PRD.md)：產品範圍與 Controller 唯一派工。
 - [DESIGN](DESIGN.md)：分層、commit／Ref、runtime、錯誤與 cleanup 的精確語義。
 - [新增 workflow 指南](docs/ADDING-A-WORKFLOW.md)：接線、contracts、review 與驗收程序。
+- [Workflow 重用與 refactor 計畫](docs/WORKFLOW-REUSE.md)：共用能力歸屬、實作相依與接手防重造 gate。
 - [Jira triage](docs/JIRA-TRIAGE.md)：上述原則在調查 workflow 的具體應用與目前能力。
 - [VERIFICATION](docs/VERIFICATION.md)：分組 gates、發布檢查與非保證範圍。
