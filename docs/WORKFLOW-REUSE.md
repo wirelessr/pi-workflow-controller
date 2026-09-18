@@ -2,7 +2,7 @@
 
 本文件落實 [專案憲法第七條](../AGENTS.md)，是開發、review 與接手的必要入口。規範共用機制的收斂順序，不新增 WorkflowBase、DSL、工具權限框架或外部 workflow config。
 
-**目前是計畫，不是新 API 已實作的宣告。** 下方 R1–R4 的目標入口尚待實作／遷移；具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
+**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，實際入口見下表；R2–R4 的目標入口尚待實作／遷移，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
 
 ## 1. 單一規範來源與接手 gate
 
@@ -24,7 +24,7 @@
 | Stage／Confirm／Publish、committed resolver | `contract/`、`engine/resolve.go`、`step.go` | 直接重用；禁止第二個 Store／commit／journal |
 | Result／FinalSelection／FinalDelivery | `engine/api.go`、`resolve.go`、`run.go` | 直接重用；禁止另一個 final artifact registry |
 | Context usage 與 cleanup report | `engine/session.go`、`runtime/types.go` | 已有 API；triage 的容量／續作策略尚需接線 |
-| Discovery 自動 preflight | `workflows/review/safety.go`，由 review 的 open closure 呼叫 | R1：移到共用 persisted-start 邊界 |
+| Discovery 自動 preflight | `runtime.New` 固定有效 BridgeDir；`Pi.Start` → `runtime/preflight.go` 的 `preflightDiscovery` | R1 已接線：review 私有 guard 已移除；smoke/review/triage 共用 Start，仍須部署版本核對/live 驗收 |
 | 嚴格收尾確認 | `workflows/triage/workflow.go` 與 `planner.go` 的相同 report 判定 | R2：共用嚴格判定，普通 CloseSession 不改義 |
 | Envelope／file consumer | review `readReviewContract`、triage `readAccepted`／`publication`／`file` | R3a：共用表示與 committed 消費入口 |
 | Published／checkout 二次讀檔 | review `readCheckFile`／`readPublishedFile`、triage `rawFile`、contract `copyStable` | R3b：先區分保證，再收斂機械部分 |
@@ -39,12 +39,16 @@
 
 ### R1：共用 persisted-start preflight
 
+**已實作接線：** runtime.New 將相對 BridgeDir 依 Controller 建構 cwd 固定成絕對路徑；每次 Pi.Start 在版本檢查成功後、session 目錄／persisted child 建立前呼叫共用 guard。拒絕採既有 BridgeUnavailable，phase=preflight、Origin=Protocol、DispatchAccepted=No；parent typed cause 沿用原 startupError。已配置的 handle 保留 total-session 會計並關閉，不虛構 Wait，不配置 attempt。Guard 以 NONBLOCK／NOFOLLOW 及 bounded read 維持原 regular-file／1MiB 限制，檢查迴圈前後的取消；不聲稱 filesystem syscall 可強制中斷。Review 舊 guard 與獨立目錄解析已移除，其他 Close／commit／領域語義不改。
+
+以下保留目標與完成條件，逐次驗證證據在 repo 外；匿名回歸不代表 live 驗收。
+
 **目標與責任層：** 在 runtime 使用已解析的有效 `BridgeDir`，於每次 persisted child spawn 前執行共同唯讀檢查。不是每個 workflow 自行決定是否呼叫的可選 wrapper。
 
 - 遷移 review-private 的可程式化 parent PID／`.recovering` 判準；smoke-echo、review 及後續 triage 的 Controller-owned startup 都走同一邊界。
 - 只檢查，不清除、不 claim、不 resume 他人 session。不增加跨 process 鎖或 supervisor，preflight 不是鎖。
 - 部署版本／實際 recovery 判準的人工核對仍保留。不能因移入 runtime 就聲稱支援所有 Pi/WebUI 版本。
-- README 已揭露目前只有 review 另有自動 preflight，其他入口需要操作前核對。R1 是收斂及增加自動覆蓋，**不是既有全面自動保證的零行為搬移**。
+- 遷移前只有 review 另有自動 preflight，其他入口需要操作前核對；現況 README 已改為共用 runtime 自動覆蓋，仍保留部署核對。R1 **不是既有全面自動保證的零行為搬移**。
 - 實作前明列 smoke 新增拒絕條件、review 的失敗時點／error code/phase、OpenSession 計數與 journal 影響。不得自行退還已消耗 session 額度，或以改寫舊 Close／fatal 語義解決差異；未確認的必要語義變更先提出。
 
 **完成出口：** 所有 Controller-owned persisted-start callers 實際受同一檢查；BridgeDir 不再由 review 另解一份；舊 private 實作移除，必要 compatibility wrapper 只能轉送。使用隔離的匿名 discovery fixtures 驗正常／阻擋／取消／錯誤、spawn 前停止、有效目錄選擇與原 startup/cleanup/accounting 行為。更新 README 與 workflow 現況說明。未授權 live 就標未驗，不用測試 bypass flag 移除產品 gate。

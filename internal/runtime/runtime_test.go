@@ -404,6 +404,7 @@ func TestPiSubprocess(t *testing.T) {
 type fixture struct {
 	t           *testing.T
 	s           *session
+	pi          *Pi
 	conn        net.Conn
 	encoder     *json.Encoder
 	events      chan control
@@ -488,6 +489,7 @@ func newFixture(t *testing.T, mode string, configure func(*Options)) (*fixture, 
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.pi = p
 	done := make(chan struct{})
 	var started Session
 	var startErr error

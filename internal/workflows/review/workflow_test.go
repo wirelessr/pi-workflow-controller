@@ -145,7 +145,8 @@ type workflowFixture struct {
 func newWorkflowFixture(t *testing.T, scenario workflowScenario) *workflowFixture {
 	t.Helper()
 	t.Setenv("NODE_TLS_REJECT_UNAUTHORIZED", "1")
-	t.Setenv("PI_BRIDGE_DIR", t.TempDir())
+	// Only the runtime's explicit directory controls discovery, not this setting.
+	t.Setenv("PI_BRIDGE_DIR", filepath.Join(t.TempDir(), "not-the-runtime-bridge"))
 	t.Setenv("GORACE", "atexit_sleep_ms=0")
 	source := newAcquisitionFixture(t)
 	if scenario.missing {
@@ -213,6 +214,11 @@ func newWorkflowFixture(t *testing.T, scenario workflowScenario) *workflowFixtur
 	bridge := filepath.Join(dir, "bridge")
 	if err := os.Mkdir(bridge, 0700); err != nil {
 		t.Fatal(err)
+	}
+	if scenario.stop == "preflight" {
+		if err := os.WriteFile(filepath.Join(bridge, "other.json.recovering"), []byte("keep"), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	pi, err := runtime.New(runtime.Options{Executable: executable, Args: []string{"-test.run=^TestCheckProtocolSubprocess$", "--"}, Env: []string{"PWC_CHECK_PROTOCOL=1", "PWC_ENGINE_MANUAL_CANDIDATE=1", "PWC_ENGINE_CONTROL=" + listener.Addr().String(), "PI_CODING_AGENT_DIR=" + filepath.Join(dir, "agent"), "GORACE=atexit_sleep_ms=0"}, BridgeDir: bridge, Policy: definition.Policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return f.run.Observe(ctx, o) }})
 	if err != nil {
@@ -595,6 +601,12 @@ func (f *workflowFixture) finish() engine.Report {
 			}
 		}
 		for _, cleanup := range report.Cleanup {
+			if f.scenario.stop == "preflight" {
+				if cleanup.ProcessExited || cleanup.WaitCompleted || cleanup.Identity.PID != 0 || len(cleanup.Unconfirmed) != 0 {
+					f.t.Fatalf("preflight invented a process cleanup: %+v", cleanup)
+				}
+				continue
+			}
 			if !cleanup.ProcessExited || !cleanup.WaitCompleted {
 				f.t.Fatalf("owned child exit unconfirmed: %+v", cleanup)
 			}
@@ -779,6 +791,25 @@ func TestWorkflowProductionRejectsInvalidResults(t *testing.T) {
 				t.Fatal("rejected prepare/validation exposed report")
 			}
 		})
+	}
+}
+
+func TestWorkflowProductionSharedPreflight(t *testing.T) {
+	f := newWorkflowFixture(t, workflowScenario{stop: "preflight"})
+	report := f.finish()
+	var failure *runtime.Failure
+	if report.Outcome != engine.Failed || report.ExitCode != 1 || !errors.As(report.Failure, &failure) || failure.Code != runtime.BridgeUnavailable || failure.Phase != "preflight" || failure.HandleID == "" || failure.DispatchAccepted != runtime.AcceptedNo {
+		t.Fatalf("review bypassed common preflight: %+v", report)
+	}
+	if len(report.Snapshot.Sessions) != 1 || report.Snapshot.Sessions[failure.HandleID].State != "Closed" || len(report.Snapshot.Attempts) != 0 || report.Final != nil {
+		t.Fatalf("review preflight lost startup accounting: %+v", report)
+	}
+	if _, err := os.Stat(filepath.Join(f.run.Dir(), "sessions", failure.HandleID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("review preflight created persistent resources: %v", err)
+	}
+	claim := filepath.Join(report.Snapshot.Input.LaunchCWD, "bridge", "other.json.recovering")
+	if raw, err := os.ReadFile(claim); err != nil || string(raw) != "keep" {
+		t.Fatalf("review modified foreign discovery: %v", err)
 	}
 }
 

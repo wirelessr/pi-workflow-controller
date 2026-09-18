@@ -61,7 +61,7 @@ Schema 唯一來源是 `internal/workflows/review/schemas/`，embed 後由 Go re
 
 需 Go build 或交付 binary、Pi 0.84.3／Node、Python 3（自有 report renderer）、git、已認證 gh（含 GitHub repo 讀取權）、上述 Fireworks 模型，以及既有 deployed WebUI／hub。工具 skills（gh/jira/confluence）與其認證由環境提供，不包含在 binary；缺規格來源記為限制，不猜測。Node TLS 驗證不可停用。依環境需要用 `NODE_TLS_REJECT_UNAUTHORIZED=1 pi-workflow-controller ...`，不修改全域 settings。
 
-每個 shared-discovery Pi 啟動前執行唯讀 parent-pid preflight；`.recovering` 或 dead/unverifiable parent 會 blocked。無 truthy pid 的 hub-state 等 JSON 依 deployed recovery 規則略過。實際驗收前須重新唯讀核對 deployed `index.ts`／`session-helpers.js` 的 recovery 判準；來源版本變動須重驗，不可只看 piPid。Preflight 不是鎖，獨立 task directory 不是 discovery 隔離。共享測試在受控時段循序執行，hub 僅 GET 本次自有 sessions。
+每個 shared-discovery Pi 啟動前，由共用 runtime 依有效 BridgeDir 執行唯讀 parent-pid preflight；workflow 不另解環境或維護私有 guard。`.recovering` 或 dead/unverifiable parent 會以 `BridgeUnavailable`／`preflight` blocked，已建立的 handle 仍計入 total-session 額度，不產生 attempt 或 persisted child。無 truthy pid 的 hub-state 等 JSON 依 deployed recovery 規則略過。實際驗收前須重新唯讀核對 deployed `index.ts`／`session-helpers.js` 的 recovery 判準；來源版本變動須重驗，不可只看 piPid。Preflight 不是鎖，獨立 task directory 不是 discovery 隔離。共享測試在受控時段循序執行，hub 僅 GET 本次自有 sessions。
 
 測試方法與 gates 見 [VERIFICATION](VERIFICATION.md)，最終輸出 API 見 [FINAL-DELIVERY](FINAL-DELIVERY.md)。Tests、獨立開發品質 review 與獲授權真 PR E2E 必須分組核對，不以 smoke-echo 或 substitute 代替。Repository 只保留匿名方法、可重現 tests 與限制；真 PR/ticket、traces/history、執行日期／IDs／PID／SHA、認證狀態及逐次報告只留 repo 外受限位置，不回指私有路徑。
 

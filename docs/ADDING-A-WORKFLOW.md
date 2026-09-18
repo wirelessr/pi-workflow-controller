@@ -125,7 +125,7 @@ schema Resource/Definition + RunPolicy
 go test -count=1 ./internal/engine -run '^ExampleWorkflow$'
 ```
 
-這個 example **會驗證 schema／definition registry 並核對輸出，但不呼叫 Execute、不啟動 Pi**。Closure 內的 Step/Decode/Decision/FinalSelection 由 Go compiler 檢查目前 API；`fixture/example-model` 只是占位，沒有認證或模型能力驗證。它沒有註冊進正式 CLI，也沒有實作 skills/resources 或 shared-discovery preflight，不能直接當成可交付 workflow。
+這個 example **會驗證 schema／definition registry 並核對輸出，但不呼叫 Execute、不啟動 Pi**。Closure 內的 Step/Decode/Decision/FinalSelection 由 Go compiler 檢查目前 API；`fixture/example-model` 只是占位，沒有認證或模型能力驗證。它沒有註冊進正式 CLI，也沒有實作 skills/resources 或驗證 live shared-discovery 啟動，不能直接當成可交付 workflow。真正執行 OpenSession 時會沿用共用 runtime preflight，不需在新 workflow 再寫一份 guard。
 
 另參考：
 
@@ -149,7 +149,7 @@ go test -count=1 ./internal/engine -run '^ExampleWorkflow$'
 - [ ] 該 workflow 自己的真 Pi＋真 provider＋真實輸入＋既有 hub 唯讀 E2E，不以 smoke-echo 或別的 workflow 通過代替。
 - [ ] 正式獨立 code／scale-failure／simplicity review，必要 local-correctness 補審；runner 採證與 tests PASS 不能替代。只修核實有規格／使用影響的問題，補回歸並複審，不無限擴大極端案例。
 
-**Shared-discovery gate：**每個 persisted Pi 啟動前，重新唯讀核對 deployed WebUI recovery source 與 discovery，依實際判準檢查父 `pid`（不是只看 `piPid`）及 `.recovering`。會 delete/resume 他人 stale session、異常 claim 或來源判準無法確定時 blocked，不代清理。當前 recovery 略過無 truthy pid 的 hub-state 類 JSON；不能把這個例外擴成忽略未知真 session。Preflight 不是鎖，獨立 task 不是 discovery 隔離，shared tests 需在受控時段循序執行；hub 只看自有 session，不 kill/resume/switch 他人。
+**Shared-discovery gate：**共用 runtime 已在每次 version probe 成功後、persisted spawn 前執行 readonly preflight，使用與 child 相同的有效 BridgeDir；新 workflow 不另實作或繞過。這不能代替以下部署核對：每個 persisted Pi 啟動前，重新唯讀核對 deployed WebUI recovery source 與 discovery，依實際判準檢查父 `pid`（不是只看 `piPid`）及 `.recovering`。會 delete/resume 他人 stale session、異常 claim 或來源判準無法確定時 blocked，不代清理。當前 recovery 略過無 truthy pid 的 hub-state 類 JSON；不能把這個例外擴成忽略未知真 session。Preflight 不是鎖，獨立 task 不是 discovery 隔離，shared tests 需在受控時段循序執行；hub 只看自有 session，不 kill/resume/switch 他人。
 
 基本命令（live/E2E 另依本次已批准目標與安全 gate 執行）：
 

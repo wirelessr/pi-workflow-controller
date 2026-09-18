@@ -391,11 +391,11 @@ scope 成功 → C：接收已通過的那一組 A Ref + B Ref → 最終驗收
 
 ### 6.1 啟動與資源載入
 
-1. 檢查 `pi --version` 是目前列入支援表的 `0.84.3`；不靜默降級為 `agent_end`。新版本須先通過 protocol tests 再擴支援表。
+1. 檢查 `pi --version` 是目前列入支援表的 `0.84.3`；不靜默降級為 `agent_end`。新版本須先通過 protocol tests 再擴支援表。Version probe 成功後、建立 session 目錄及 persisted child 前，由共用 runtime 對有效 BridgeDir 執行唯讀 parent-pid／`.recovering` preflight；拒絕為 `BridgeUnavailable`、phase `preflight`、`DispatchAccepted=No`。OpenSession 已登記的 handle 仍消耗 total-session 額度，關閉該未啟動 handle 不虛構 Wait／process cleanup，也不產生 attempt。
 2. 使用 `exec.Command` argv，不經 shell 拼接 Prompt。macOS child 以 `Setpgid: true` 建立自己的 process group。
 3. 使用 `--mode rpc --provider ... --model <exact-id> --thinking ... --session-dir ... --name ...`，不在 CLI 帶 provider secret。
 4. 保留全域 Pi 設定、skills、context files 與 extension 載入；不使用 `--no-extensions`，不自動提升 project trust。Role cwd 預設 launch cwd，也可由 workflow 明確指定。
-5. 使用同一個已存在的 `PI_BRIDGE_DIR` 或 deployed WebUI 預設 discovery 目錄；不建立隔離的 discovery 目錄令 hub 看不到 session。避免繼承父 session 的固定 `PI_HTTP_PORT`，由 extension 尋找 port。
+5. 使用同一個已存在的 `PI_BRIDGE_DIR` 或 deployed WebUI 預設 discovery 目錄；不建立隔離的 discovery 目錄令 hub 看不到 session。Runtime.New 依明示 Options.BridgeDir、parent 環境、home 預設選定目錄；相對值依建構時 Controller cwd 固定為絕對路徑。Child env、preflight、owned discovery 及 cleanup 都使用此值，不受 role cwd 或 Options.Env 同名項目影響。避免繼承父 session 的固定 `PI_HTTP_PORT`，由 extension 尋找 port。
 6. 保持 stdin pipe 開啟。stdout 一個 reader，stderr 持續 drain 到有界檔案。
 7. 用 `get_state` 確認 RPC 可用、provider/model/thinking 與 session identity 正確。Model 模糊匹配或不支援的 thinking 不可靜默接受。
 8. 查到對應 sessionId/piPid 的 discovery 後標示 HubVisible；startup 期限內未出現則 `BridgeUnavailable`，保留診斷後清理。這是檔案觀測，不建置 hub API 整合。
@@ -408,7 +408,7 @@ Online 表示 process 與 RPC 存活，不代表 provider 認證／推論成功�
 - 有界 line buffer，不使用 Go Scanner 預設 64 KiB 限制，也不無限增長。
 - 每個 command 唯一 request ID。單 writer 序列化 stdin；reader 分流 response 與 event。
 - 每個輸入 frame 取得單調遞增 seq。Command response 依 ID 關聯；agent event 不宣稱有 dispatch ID。
-- 第一次 `get_state` readiness response 使用剩餘 startup deadline；RPC ready 後才使用一般 response timeout。Start 的 parent typed cancellation／deadline cause 保留，runtime 自己的 startup timeout 依階段記 StartFailed／BridgeUnavailable。
+- 第一次 `get_state` readiness response 使用剩餘 startup deadline；RPC ready 後才使用一般 response timeout。Start 的 parent typed cancellation／deadline cause 保留，runtime 自己的 startup timeout 在 preflight／discovery 階段記 BridgeUnavailable，其餘階段記 StartFailed。所有階段共用原 StartupTimeout，不另開 preflight budget；同步 filesystem syscall 仍有既定不可中斷限制。
 - Append cursor 保留在 session 層，跨 Step 只讀增量 entries。Event／entry hashes 增量配對後釋放，1024 限制的是未匹配 backlog，不是 attempt lifetime 訊息總數；已驗證的線性 append lineage 用 checkpoint 摘要保存，fork／rewind 保守拒絕，不保留無界 node map。
 - Entries 查詢由相關完成／entry 事件喚醒，streaming delta 不驅動查詢；沒有進度時由 50ms backoff 至 5 秒，保留 event 先於 entry append 的 fallback。
 - Ack 前到達的 event 也必須保留；不能由等待 ack 的 goroutine 丟棄。

@@ -53,6 +53,63 @@ func (r *smokeLocalModel) Start(ctx context.Context, spec runtime.SessionSpec) (
 	return r.Runtime.Start(ctx, spec)
 }
 
+func TestSmokePreflightSubprocess(t *testing.T) {
+	if os.Getenv("PWC_SMOKE_PREFLIGHT") != "1" {
+		return
+	}
+	for _, arg := range os.Args {
+		if arg == "--version" {
+			_, _ = os.Stdout.WriteString("0.84.3\n")
+			os.Exit(0)
+		}
+	}
+	os.Exit(2)
+}
+
+func TestSmokeEchoSharedPreflight(t *testing.T) {
+	registry, err := engine.NewRegistry(workflows.Definitions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := registry.Lookup("smoke-echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas, err := contract.NewRegistry(workflows.Resources(), workflows.Schemas())
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, bridge := t.TempDir(), t.TempDir()
+	claim := filepath.Join(bridge, "other.json.recovering")
+	if err := os.WriteFile(claim, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := engine.New(context.Background(), definition, engine.Input{Prompt: "anonymous echo", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: schemas, RuntimeOptions: runtime.Options{
+		Executable: executable, Args: []string{"-test.run=^TestSmokePreflightSubprocess$", "--"}, Env: []string{"PWC_SMOKE_PREFLIGHT=1", "GORACE=atexit_sleep_ms=0"}, BridgeDir: bridge,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := r.Execute()
+	var failure *runtime.Failure
+	if report.Outcome != engine.Failed || report.ExitCode != 1 || !errors.As(report.Failure, &failure) || failure.Code != runtime.BridgeUnavailable || failure.Phase != "preflight" || failure.HandleID == "" || failure.DispatchAccepted != runtime.AcceptedNo {
+		t.Fatalf("smoke bypassed common preflight: %+v", report)
+	}
+	if len(report.Snapshot.Sessions) != 1 || report.Snapshot.Sessions[failure.HandleID].State != "Closed" || len(report.Snapshot.Attempts) != 0 || report.Final != nil || len(report.CleanupErrors) != 0 || len(report.FinalizationErrors) != 0 {
+		t.Fatalf("smoke preflight lifecycle: %+v", report)
+	}
+	if _, err := os.Stat(filepath.Join(r.Dir(), "sessions", failure.HandleID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("smoke created persistent resources: %v", err)
+	}
+	if raw, err := os.ReadFile(claim); err != nil || string(raw) != "keep" {
+		t.Fatalf("smoke modified foreign discovery: %v", err)
+	}
+}
+
 func TestSmokeEchoBundledDefinition(t *testing.T) {
 	for _, tc := range []struct {
 		name, prompt string

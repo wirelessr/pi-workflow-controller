@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -79,6 +80,227 @@ func TestCloseSlowObserverRemovesDiscoveryBeforeObserverStops(t *testing.T) {
 			}
 			if b, err := os.ReadFile(f.s.Identity().SessionFile); err != nil || string(b) != "preserved history" {
 				t.Fatalf("cleanup modified history: %q %v", b, err)
+			}
+		})
+	}
+}
+
+func TestPreflightDiscoveryReadOnly(t *testing.T) {
+	child := exec.Command("/usr/bin/true")
+	if err := child.Run(); err != nil {
+		t.Fatal(err)
+	}
+	deadPID := child.ProcessState.Pid()
+	for _, tc := range []struct {
+		name, filename, data string
+		blocked              bool
+	}{
+		{"empty", "", "", false},
+		{"live-parent-dead-pi", "live.json", fmt.Sprintf(`{"pid":%d,"piPid":%d}`, os.Getpid(), deadPID), false},
+		{"dead-parent-live-pi", "dead.json", fmt.Sprintf(`{"pid":%d,"piPid":%d}`, deadPID, os.Getpid()), true},
+		{"recovering", "session.json.recovering", "claimed", true},
+		{"malformed", "broken.json", `{`, false},
+		{"hub-state", "hub-state.json", `{"sessions":[]}`, false},
+		{"missing-parent", "missing.json", fmt.Sprintf(`{"piPid":%d}`, os.Getpid()), false},
+		{"zero-parent", "zero.json", `{"pid":0}`, false},
+		{"negative-parent", "negative.json", `{"pid":-1}`, true},
+		{"ignored-non-discovery", "notes.txt", "keep", false},
+		{"false-parent", "false.json", `{"pid":false}`, false},
+		{"null-parent", "null.json", `{"pid":null}`, false},
+		{"empty-parent", "empty.json", `{"pid":""}`, false},
+		{"null-entry", "null-entry.json", `null`, false},
+		{"string-parent", "string.json", `{"pid":"123"}`, true},
+		{"true-parent", "true.json", `{"pid":true}`, true},
+		{"object-parent", "object.json", `{"pid":{}}`, true},
+		{"array-parent", "array.json", `{"pid":[]}`, true},
+		{"fractional-parent", "fractional.json", `{"pid":1.5}`, true},
+		{"overflow-parent", "overflow.json", `{"pid":2147483648}`, true},
+		{"missing-directory", "", "", true},
+		{"symlink", "session.json", "", true},
+		{"directory", "session.json", "", true},
+		{"oversized", "session.json", "", true},
+		{"fifo", "session.json", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var bridge, path string
+			var before []os.DirEntry
+			var info os.FileInfo
+			f, err := newFixture(t, "normal", func(o *Options) {
+				bridge = o.BridgeDir
+				path = filepath.Join(bridge, tc.filename)
+				var err error
+				switch tc.name {
+				case "missing-directory":
+					o.BridgeDir = filepath.Join(bridge, "absent")
+				case "symlink":
+					target := filepath.Join(t.TempDir(), "target")
+					if err = os.WriteFile(target, []byte("keep"), 0600); err == nil {
+						err = os.Symlink(target, path)
+					}
+				case "directory":
+					err = os.Mkdir(path, 0700)
+				case "oversized":
+					err = os.WriteFile(path, bytes.Repeat([]byte(" "), (1<<20)+1), 0600)
+				case "fifo":
+					err = syscall.Mkfifo(path, 0600)
+				default:
+					if tc.filename != "" {
+						err = os.WriteFile(path, []byte(tc.data), 0600)
+					}
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, err = os.ReadDir(bridge)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.filename != "" {
+					info, err = os.Lstat(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			if tc.blocked {
+				got := requireCode(t, err, BridgeUnavailable)
+				if got.Phase != "preflight" || got.Origin != Protocol || got.HandleID == "" || got.DispatchAccepted != AcceptedNo || got.Cleanup != nil || f.s != nil || f.pid != 0 {
+					t.Fatalf("incorrect preflight rejection: %+v", got)
+				}
+				if _, err := os.Stat(filepath.Join(f.dir, "session")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("preflight created persistent session resources: %v", err)
+				}
+				if tc.name == "missing-directory" && !errors.Is(got, os.ErrNotExist) {
+					t.Fatalf("preflight lost filesystem cause: %v", got)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				report, err := f.s.Close(context.Background())
+				if err != nil || !report.WaitCompleted || !report.ProcessExited || len(report.DiscoveryRemoved) != 1 {
+					t.Fatalf("accepted startup cleanup: %+v %v", report, err)
+				}
+			}
+			after, err := os.ReadDir(bridge)
+			if err != nil || len(after) != len(before) {
+				t.Fatalf("discovery entries changed: %v", err)
+			}
+			if info != nil {
+				got, err := os.Lstat(path)
+				if err != nil || !os.SameFile(info, got) || info.Mode() != got.Mode() || info.Size() != got.Size() || !info.ModTime().Equal(got.ModTime()) {
+					t.Fatalf("discovery inode/mode/size/mtime changed: %v", err)
+				}
+				if info.Mode().IsRegular() {
+					raw, err := os.ReadFile(path)
+					want := []byte(tc.data)
+					if tc.name == "oversized" {
+						want = bytes.Repeat([]byte(" "), (1<<20)+1)
+					}
+					if err != nil || !bytes.Equal(raw, want) {
+						t.Fatalf("discovery bytes changed: %v", err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestStartupResolvedBridgeDirectory(t *testing.T) {
+	for _, source := range []string{"explicit", "environment", "home", "relative"} {
+		t.Run(source, func(t *testing.T) {
+			controllerCWD := t.TempDir()
+			t.Chdir(controllerCWD)
+			other := t.TempDir()
+			if err := os.WriteFile(filepath.Join(other, "other.json.recovering"), []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var bridge string
+			f := mustFixture(t, "normal", func(o *Options) {
+				bridge = o.BridgeDir
+				o.Env = append(o.Env, "PI_BRIDGE_DIR="+other)
+				switch source {
+				case "explicit":
+					t.Setenv("PI_BRIDGE_DIR", other)
+				case "environment":
+					t.Setenv("PI_BRIDGE_DIR", bridge)
+					o.BridgeDir = ""
+				case "home":
+					home := t.TempDir()
+					t.Setenv("HOME", home)
+					t.Setenv("PI_BRIDGE_DIR", "")
+					bridge = filepath.Join(home, ".pi/agent/extensions/pi-webui-extension/data")
+					if err := os.MkdirAll(bridge, 0700); err != nil {
+						t.Fatal(err)
+					}
+					o.BridgeDir = ""
+				case "relative":
+					t.Setenv("PI_BRIDGE_DIR", other)
+					var err error
+					o.BridgeDir, err = filepath.Rel(controllerCWD, bridge)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			path := filepath.Join(bridge, "fixture-session.json")
+			d, err := readDiscovery(path)
+			if err != nil || d.PiPID != f.pid || d.SessionFile != f.s.Identity().SessionFile {
+				t.Fatalf("child used a different discovery directory: %+v %v", d, err)
+			}
+			// Both cleanup and later startup must retain the directory chosen at New.
+			t.Chdir(t.TempDir())
+			claim := filepath.Join(bridge, "other.json.recovering")
+			if err := os.WriteFile(claim, []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			secondDir := filepath.Join(f.dir, "second", "pi")
+			s, err := f.pi.Start(f.ctx, SessionSpec{HandleID: "second-handle", Name: "second", Model: ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}, CWD: f.dir, SessionDir: secondDir})
+			if s != nil {
+				t.Cleanup(func() { _, _ = s.Close(context.Background()) })
+				t.Fatal("second startup bypassed the preflight")
+			}
+			got := requireCode(t, err, BridgeUnavailable)
+			if got.Phase != "preflight" || got.HandleID != "second-handle" || got.DispatchAccepted != AcceptedNo || got.Cleanup != nil {
+				t.Fatalf("second startup classification: %+v", got)
+			}
+			if _, err := os.Stat(filepath.Dir(secondDir)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("second startup created persistent resources: %v", err)
+			}
+			if _, err := f.s.Snapshot(f.ctx); err != nil {
+				t.Fatalf("preflight disturbed existing session: %v", err)
+			}
+			report, err := f.s.Close(context.Background())
+			if err != nil || !report.WaitCompleted || !report.ProcessExited || len(report.DiscoveryRemoved) != 1 {
+				t.Fatalf("cleanup used a different discovery directory: %+v %v", report, err)
+			}
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("owned discovery was not removed: %v", err)
+			}
+			for _, p := range []string{claim, filepath.Join(other, "other.json.recovering")} {
+				if raw, err := os.ReadFile(p); err != nil || string(raw) != "keep" {
+					t.Fatalf("foreign claim changed: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestPreflightDiscoveryCancellation(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(fmt.Sprint(deadline), func(t *testing.T) {
+			cause := errors.New("controller stop")
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			if deadline {
+				var stop context.CancelFunc
+				ctx, stop = context.WithDeadlineCause(ctx, time.Now().Add(-time.Second), cause)
+				defer stop()
+			} else {
+				cancel(cause)
+			}
+			if err := preflightDiscovery(ctx, filepath.Join(t.TempDir(), "absent")); !errors.Is(err, cause) {
+				t.Fatalf("preflight did not preserve context cause: %v", err)
 			}
 		})
 	}

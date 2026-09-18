@@ -47,6 +47,13 @@ func New(options Options) (*Pi, error) {
 		}
 		options.BridgeDir = filepath.Join(home, ".pi/agent/extensions/pi-webui-extension/data")
 	}
+	if !filepath.IsAbs(options.BridgeDir) {
+		bridge, err := filepath.Abs(options.BridgeDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve shared discovery directory: %w", err)
+		}
+		options.BridgeDir = bridge
+	}
 	options.Args = append([]string(nil), options.Args...)
 	options.Env = append([]string(nil), options.Env...)
 	return &Pi{options: options}, nil
@@ -117,7 +124,7 @@ func (p *Pi) Start(ctx context.Context, spec SessionSpec) (Session, error) {
 			err = contextError(ctx)
 		} else if startCtx.Err() != nil {
 			code := StartFailed
-			if phase == "discovery" {
+			if phase == "discovery" || phase == "preflight" {
 				code = BridgeUnavailable
 			}
 			err = &Failure{Code: code, Message: "Pi startup deadline exceeded", Cause: context.Cause(startCtx), Origin: Protocol}
@@ -153,6 +160,10 @@ func (p *Pi) Start(ctx context.Context, spec SessionSpec) (Session, error) {
 	}
 	if strings.TrimSpace(string(vb.data)) != "0.84.3" {
 		return nil, startupError(failure(UnsupportedPiVersion, "only Pi 0.84.3 is supported"))
+	}
+	phase = "preflight"
+	if err := preflightDiscovery(startCtx, p.options.BridgeDir); err != nil {
+		return nil, startupError(&Failure{Code: BridgeUnavailable, Message: err.Error(), Cause: err, Origin: Protocol})
 	}
 	phase = "spawn"
 	if err := os.MkdirAll(spec.SessionDir, 0700); err != nil {

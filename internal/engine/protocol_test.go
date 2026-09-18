@@ -44,6 +44,116 @@ func TestEngineProtocolSubprocess(t *testing.T) {
 
 func readProtocolJSON(path string, value any) error { return protocol.ReadJSON(path, value) }
 
+func TestEngineProtocolPreflightAccounting(t *testing.T) {
+	for _, exhaust := range []bool{false, true} {
+		t.Run(fmt.Sprint(exhaust), func(t *testing.T) {
+			dir := t.TempDir()
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			schemas, err := contract.NewRegistry(nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy := engine.DefaultRunPolicy()
+			policy.MaxLiveSessions = 1
+			policy.MaxTotalSessions = 2
+			policy.Runtime.StartupTimeout = 5 * time.Second
+			var rejected []*runtime.Failure
+			definition := engine.Definition{Name: "preflight", Version: "v1", Policy: policy, Execute: func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
+				role := engine.RoleSpec{Name: "worker", Model: runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}}
+				count := 1
+				if exhaust {
+					count = 2
+				}
+				for i := 0; i < count; i++ {
+					h, err := r.OpenSession(ctx, role)
+					var f *runtime.Failure
+					if h != nil || !errors.As(err, &f) || f.Code != runtime.BridgeUnavailable || f.Phase != "preflight" || f.Origin != runtime.Protocol || f.HandleID == "" || f.DispatchAccepted != runtime.AcceptedNo || f.Cleanup != nil || !errors.Is(err, os.ErrNotExist) {
+						return engine.Result{}, fmt.Errorf("preflight error/identity lost: handle=%v error=%+v", h, err)
+					}
+					rejected = append(rejected, f)
+					snapshot := r.Snapshot()
+					if len(snapshot.Sessions) != i+1 || len(snapshot.Attempts) != 0 || snapshot.Sessions[f.HandleID].State != "Closed" {
+						return engine.Result{}, fmt.Errorf("preflight did not retain and close the allocated handle: %+v", snapshot.Sessions)
+					}
+					if _, err := os.Stat(filepath.Join(r.Dir(), "sessions", f.HandleID)); !errors.Is(err, os.ErrNotExist) {
+						return engine.Result{}, fmt.Errorf("preflight created persistent resources: %v", err)
+					}
+				}
+				if exhaust {
+					h, err := r.OpenSession(ctx, role)
+					var f *runtime.Failure
+					if h != nil || !errors.As(err, &f) || f.Code != runtime.LimitExceeded || f.LimitScope != "run" {
+						return engine.Result{}, fmt.Errorf("preflight refunded the total-session budget: %v", err)
+					}
+				}
+				return engine.Result{}, rejected[0]
+			}}
+			r, err := engine.New(context.Background(), definition, engine.Input{Prompt: "anonymous startup", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: schemas, RuntimeOptions: runtime.Options{
+				Executable: executable, Args: []string{"-test.run=^TestEngineProtocolSubprocess$", "--"}, Env: []string{"PWC_ENGINE_PROTOCOL=1", "GORACE=atexit_sleep_ms=0"}, BridgeDir: filepath.Join(dir, "absent"),
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			report := r.Execute()
+			var failure *runtime.Failure
+			code := runtime.BridgeUnavailable
+			if exhaust {
+				code = runtime.LimitExceeded
+			}
+			if report.Outcome != engine.Failed || report.ExitCode != 1 || !errors.As(report.Failure, &failure) || failure.Code != code || len(report.CleanupErrors) != 0 || len(report.FinalizationErrors) != 0 {
+				t.Fatalf("preflight final outcome: %+v", report)
+			}
+			if len(report.Snapshot.Sessions) != len(rejected) || len(report.Snapshot.Attempts) != 0 {
+				t.Fatal("finalization lost startup accounting")
+			}
+			for _, cleanup := range report.Cleanup {
+				if cleanup.WaitCompleted || cleanup.ProcessExited || cleanup.Identity.PID != 0 || len(cleanup.Unconfirmed) != 0 {
+					t.Fatalf("preflight invented process cleanup: %+v", cleanup)
+				}
+			}
+			raw, err := os.ReadFile(filepath.Join(r.Dir(), "events.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoder := json.NewDecoder(strings.NewReader(string(raw)))
+			starts, closes := map[string]int{}, map[string]int{}
+			for {
+				var event struct {
+					Kind    string `json:"kind"`
+					Details struct {
+						HandleID string `json:"handle_id"`
+					} `json:"details"`
+				}
+				if err := decoder.Decode(&event); errors.Is(err, io.EOF) {
+					break
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if event.Kind == "SessionStarting" {
+					starts[event.Details.HandleID]++
+				}
+				if event.Kind == "SessionClosed" {
+					if starts[event.Details.HandleID] != 1 {
+						t.Fatal("session closed without its starting event")
+					}
+					closes[event.Details.HandleID]++
+				}
+			}
+			if len(starts) != len(rejected) || len(closes) != len(rejected) {
+				t.Fatal("journal lost preflight session accounting")
+			}
+			for _, rejected := range rejected {
+				if starts[rejected.HandleID] != 1 || closes[rejected.HandleID] != 1 {
+					t.Fatal("preflight session journal events missing or duplicated")
+				}
+			}
+		})
+	}
+}
+
 func TestEngineProtocolHandoff(t *testing.T) {
 	for _, mode := range []string{"usage", "attempt-timeout", "cleanup-error"} {
 		t.Run(mode, func(t *testing.T) {

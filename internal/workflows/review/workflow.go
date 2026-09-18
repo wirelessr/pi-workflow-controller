@@ -87,9 +87,6 @@ func executeSource(ctx context.Context, r *engine.Run, in engine.Input, source a
 		return result, err
 	}
 	open := func(role string) (*engine.SessionHandle, error) {
-		if err := preflightDiscovery(); err != nil {
-			return nil, err
-		}
 		return r.OpenSession(ctx, engine.RoleSpec{Name: "review-" + role, Model: model(role), CWD: work, AppendPrompt: roleRules})
 	}
 	prompt := func(role string, expected []ReviewerResult) string {
