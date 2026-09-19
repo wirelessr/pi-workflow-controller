@@ -1441,6 +1441,805 @@ func corruptInputEvidence(ref contract.Ref) error {
 	return os.WriteFile(filepath.Join(filepath.Dir(ref.Path), p.Files[0].Path), []byte("changed after acceptance"), 0600)
 }
 
+func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stageTask, step int) PlannerState {
+	t.Helper()
+	v := plannerFixture(t, "complete", req, task, step, contract.Ref{})
+	var delivered struct {
+		WorkerResults []contract.Ref `json:"worker_results"`
+		WikiResults   []contract.Ref `json:"wiki_results"`
+		AdaptiveNote  string         `json:"adaptive_note"`
+	}
+	if err := json.Unmarshal([]byte(req.Prompt), &delivered); err != nil {
+		t.Fatal(err)
+	}
+	if task.Requirements != plannerRequirements+"\n\n"+adaptiveRequirements {
+		t.Fatal("adaptive Planner lost its requirements")
+	}
+	previousWorkers, previousWikis := len(v.WorkerResults), len(v.WikiResults)
+	l := &InvestigationLedger{Action: "yield", Reason: "Hand accepted investigation state to later work; no verified conclusion", ConsumedBatch: []contract.Ref{}, Changes: []HypothesisChange{}}
+	if v.Ledger != nil {
+		l.Round, l.NoProgress = v.Ledger.Round, v.Ledger.NoProgress
+		l.ReframeRound, l.ReframeStreak = v.Ledger.ReframeRound, v.Ledger.ReframeStreak
+		if len(delivered.WikiResults) > previousWikis && v.Ledger.Action == "reframe" {
+			l.ReframeRound, l.ReframeStreak = l.Round, l.NoProgress
+		}
+	}
+	v.Context = req.Inputs[0]
+	v.WorkerTasks, v.SupportingWork, v.WikiTask = []WorkerTask{}, nil, nil
+	v.WorkerResults = append([]contract.Ref{}, delivered.WorkerResults...)
+	v.WikiResults = append([]contract.Ref{}, delivered.WikiResults...)
+	basis := slices.Clone(v.Hypotheses[0].Evidence)
+	if len(v.WorkerResults) > previousWorkers {
+		l.ConsumedBatch = slices.Clone(v.WorkerResults[previousWorkers:])
+		l.Round++
+		l.NoProgress++
+		if name == "m2-progress-explicit" && l.Round == 2 {
+			l.Changes = []HypothesisChange{{HypothesisID: "h1", Change: "Agent reports a changed interpretation without rewriting assessment", Reason: "The supplied comparison changes the hypothesis", Basis: []Evidence{{Ref: &v.WorkerResults[len(v.WorkerResults)-1], FileID: "worker-raw"}}}}
+			l.NoProgress, l.ReframeStreak = 0, 0
+		}
+	}
+	for _, ref := range v.WorkerResults {
+		var p publication[WorkerResult]
+		if err := protocol.ReadJSON(ref.Path, &p); err != nil {
+			t.Fatal(err)
+		}
+		for _, owner := range append([]contract.Ref{ref, p.Data.Proposal, p.Data.Context}, p.Data.Inputs...) {
+			if !slices.Contains(req.Inputs, owner) {
+				t.Fatal("adaptive Planner lost exact worker evidence owner")
+			}
+		}
+	}
+	for _, ref := range v.WikiResults {
+		var p publication[WikiSearch]
+		if err := protocol.ReadJSON(ref.Path, &p); err != nil || p.Data.Task == nil {
+			t.Fatal("missing investigation wiki binding", err)
+		}
+		for _, owner := range append([]contract.Ref{ref, p.Data.Task.Proposal, p.Data.Task.Context}, p.Data.Task.Inputs...) {
+			if !slices.Contains(req.Inputs, owner) {
+				t.Fatal("adaptive Planner lost exact wiki evidence owner")
+			}
+		}
+		for _, gap := range p.Data.Gaps {
+			if !slices.Contains(v.Gaps, gap) {
+				v.Gaps = append(v.Gaps, gap)
+			}
+		}
+	}
+	workers := func(ids ...string) {
+		l.Action = "workers"
+		for _, id := range ids {
+			v.WorkerTasks = append(v.WorkerTasks, WorkerTask{ID: id, SourceKind: "code", Responsibility: "evidence-only", Question: "Inspect anonymous evidence", Requirements: []string{"Keep actual limitations"}, Basis: slices.Clone(basis), DependsOn: []string{}})
+		}
+	}
+	wiki := func(reframe bool) {
+		l.Action = "wiki"
+		previous := contract.Ref{}
+		var c publication[Context]
+		if err := protocol.ReadJSON(v.Context.Path, &c); err != nil {
+			t.Fatal(err)
+		}
+		previous = c.Data.Wiki
+		if len(v.WikiResults) != 0 {
+			previous = v.WikiResults[len(v.WikiResults)-1]
+		}
+		var old publication[WikiSearch]
+		if err := protocol.ReadJSON(previous.Path, &old); err != nil {
+			t.Fatal(err)
+		}
+		v.WikiTask = &InvestigationWikiTask{ID: fmt.Sprintf("wiki-%d", step), Terms: []string{fmt.Sprintf("anonymous healthy control %d", step)}, PreviousTerms: slices.Clone(old.Data.Queries), Reason: "Agent chooses a healthy-control comparison", Basis: slices.Clone(basis)}
+		if reframe {
+			l.Action = "reframe"
+			l.Reframe = &InvestigationReframe{Change: "Compare healthy controls instead of repeating the failing trace", Reason: "Agent reports two rounds without hypothesis progress", Basis: slices.Clone(basis)}
+		}
+	}
+	switch {
+	case slices.Contains([]string{"m2-parallel-batches-yield", "m2-batch-consumed-order", "m2-batch-results-order", "m2-batch-foreign-ref"}, name) || strings.HasPrefix(name, "m2-branch-"):
+		if step == 1 {
+			workers("w1", "w2", "w3", "w4", "w5")
+			v.WorkerTasks[3].DependsOn = []string{"w1"}
+		} else if step == 2 {
+			workers("w4", "w5")
+			v.WorkerTasks[0].DependsOn = []string{"w1"}
+		}
+	case name == "m2-no-ready-feedback":
+		if step == 1 {
+			workers("waiting")
+			v.WorkerTasks[0].DependsOn = []string{"not-accepted"}
+		} else if step == 2 {
+			if !strings.Contains(delivered.AdaptiveNote, "No declared task has all dependencies in accepted worker results") || l.Round != 0 || l.NoProgress != 0 {
+				t.Fatal("no-ready dispatch did not return mechanical feedback without progress")
+			}
+			workers("w1")
+		}
+	case strings.HasPrefix(name, "m2-reframe-"):
+		if step < 3 {
+			workers(fmt.Sprintf("w%d", step))
+		} else if step == 3 || (name == "m2-reframe-repeat" && step == 6) {
+			wiki(true)
+		} else if name == "m2-reframe-repeat" && (step == 4 || step == 5) {
+			workers(fmt.Sprintf("w%d", step-1))
+		}
+	case name == "m2-wiki-support":
+		switch step {
+		case 1:
+			workers("w1")
+		case 2:
+			wiki(false)
+		case 3:
+			l.Action = "support"
+			v.SupportingWork = &SupportingWork{Kind: "resolve", Reason: "Resolve the existing time gap", Basis: slices.Clone(basis), Sources: []intakeWork{}}
+		}
+	case strings.HasPrefix(name, "m2-wiki-"):
+		if step == 1 {
+			wiki(false)
+		} else if step == 2 {
+			workers("w1")
+			v.WorkerTasks[0].Basis = []Evidence{{Ref: &v.WikiResults[0], FileID: "search"}}
+			if name == "m2-wiki-partial-runtime" || name == "m2-wiki-runtime" {
+				v.WorkerTasks[0].SourceKind = "logs"
+				v.WorkerTasks[0].Search = &WorkerSearch{Source: "anonymous", Filter: "trace=fixture", From: "2025-01-01T00:00:00Z", To: "2025-01-01T00:01:00Z", Basis: slices.Clone(basis)}
+			}
+		}
+	default:
+		if step == 1 {
+			workers("w1")
+		} else if step == 2 && name == "m2-progress-explicit" {
+			workers("w2")
+		} else if step == 2 && name == "m2-session-not-progress" {
+			l.Action = "plan"
+		}
+	}
+	if name == "m2-parallel-batches-yield" && step == 3 {
+		v.Gaps = append(v.Gaps, "Agent reports no further authorized comparison; later phase must retain uncertainty")
+	}
+	v.Ledger = l
+	if name == "m2-assessment-not-progress" && step == 2 {
+		v.Hypotheses[0].Assessment = "Entirely rewritten wording, with no reported hypothesis change"
+	}
+	if name == "m2-query-not-progress" || name == "m2-query-utc" {
+		for i := range v.WorkerTasks {
+			v.WorkerTasks[i].SourceKind = "logs"
+			v.WorkerTasks[i].Search = &WorkerSearch{Source: "anonymous", Filter: "trace=fixture", From: "2025-01-01T00:00:00Z", To: "2025-01-01T00:01:00Z", Basis: slices.Clone(basis)}
+		}
+	}
+	if step == 1 {
+		switch name {
+		case "m2-ledger-missing":
+			v.Ledger = nil
+		case "m2-action-mismatch":
+			l.Action = "yield"
+		case "m2-progress-without-batch":
+			l.Changes = []HypothesisChange{{HypothesisID: "h1", Change: "new", Reason: "not a worker round", Basis: basis}}
+		case "m2-round-initial":
+			l.Round = 1
+		case "m2-wiki-previous-terms":
+			v.WikiTask.PreviousTerms = []string{"invented previous query"}
+		case "m2-wiki-basis-owner":
+			v.WikiTask.Basis[0].Ref = nil
+		}
+	}
+	if step == 2 {
+		switch name {
+		case "m2-batch-consumed-order":
+			l.ConsumedBatch[0], l.ConsumedBatch[1] = l.ConsumedBatch[1], l.ConsumedBatch[0]
+		case "m2-batch-results-order":
+			v.WorkerResults[0], v.WorkerResults[1] = v.WorkerResults[1], v.WorkerResults[0]
+		case "m2-batch-foreign-ref":
+			v.WorkerResults[0].SHA256 = strings.Repeat("0", 64)
+		case "m2-consumed-drop":
+			l.ConsumedBatch = []contract.Ref{}
+		case "m2-consumed-foreign":
+			l.ConsumedBatch[0].SHA256 = strings.Repeat("0", 64)
+		case "m2-round-echo":
+			l.Round++
+		case "m2-streak-echo", "m2-session-not-progress":
+			if name == "m2-streak-echo" {
+				l.NoProgress = 0
+			}
+		case "m2-reframe-counter-echo":
+			l.ReframeRound++
+		case "m2-ledger-drop":
+			v.Ledger = nil
+		case "m2-progress-unknown-id", "m2-progress-owner", "m2-progress-duplicate":
+			l.Changes = []HypothesisChange{{HypothesisID: "h1", Change: "Agent-declared change", Reason: "comparison", Basis: basis}}
+			l.NoProgress = 0
+			if name == "m2-progress-unknown-id" {
+				l.Changes[0].HypothesisID = "unknown"
+			}
+			if name == "m2-progress-owner" {
+				l.Changes[0].Basis[0].Ref = nil
+			}
+			if name == "m2-progress-duplicate" {
+				l.Changes = append(l.Changes, l.Changes[0])
+			}
+		case "m2-wiki-drop-ref":
+			v.WikiResults = nil
+			v.WorkerTasks[0].Basis = slices.Clone(basis)
+		case "m2-wiki-partial-drop-gap":
+			v.Gaps = []string{}
+		}
+	}
+	if step == 3 {
+		switch name {
+		case "m2-reframe-required":
+			l.Action, l.Reframe, v.WikiTask = "plan", nil, nil
+		case "m2-reframe-same-terms":
+			v.WikiTask.Terms = slices.Clone(v.WikiTask.PreviousTerms)
+		case "m2-reframe-yield-gap":
+			l.Action, l.Reframe, v.WikiTask = "yield", nil, nil
+			v.Gaps = []string{"No further authorized evidence path; next phase must retain this gap"}
+		}
+	}
+	if step == 4 && name == "m2-reframe-wiki-reset" {
+		l.NoProgress = 0
+	}
+	return v
+}
+
+func m2PlannerData(t *testing.T, v PlannerState) map[string]any {
+	t.Helper()
+	var data map[string]any
+	if err := json.Unmarshal(testJSON(v), &data); err != nil {
+		t.Fatal(err)
+	}
+	// Agent JSON must explicitly retain empty deliveries; the compatibility
+	// Go type omits them for old non-adaptive callers.
+	data["worker_tasks"] = append([]WorkerTask{}, v.WorkerTasks...)
+	data["worker_results"] = append([]contract.Ref{}, v.WorkerResults...)
+	data["wiki_results"] = append([]contract.Ref{}, v.WikiResults...)
+	return data
+}
+
+func m2WikiFixture(t *testing.T, name string, req contract.Request) (WikiSearch, map[string][]byte) {
+	t.Helper()
+	var task struct {
+		Intake       contract.Ref          `json:"intake"`
+		Task         InvestigationWikiTask `json:"task"`
+		Binding      WikiTaskBinding       `json:"binding"`
+		Requirements string                `json:"requirements"`
+	}
+	if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(task.Binding.Inputs, req.Inputs) || !slices.Contains(req.Inputs, task.Binding.Proposal) || !slices.Contains(req.Inputs, task.Binding.Context) || task.Requirements != investigationWikiRequirements {
+		t.Fatal("wiki task lost exact binding/requirements")
+	}
+	mode := "complete"
+	if strings.Contains(name, "partial") {
+		mode = "wiki-partial"
+	}
+	v, files := wikiFixture(mode, task.Intake)
+	v.Task, v.Queries = &task.Binding, slices.Clone(task.Task.Terms)
+	files["search"] = testJSON(map[string]any{"queries": v.Queries, "status": v.Status, "gaps": v.Gaps})
+	switch name {
+	case "m2-wiki-binding-proposal":
+		v.Task.Proposal = task.Binding.Context
+	case "m2-wiki-binding-context":
+		v.Task.Context = task.Binding.Proposal
+	case "m2-wiki-binding-task":
+		v.Task.TaskID = "unproposed"
+	case "m2-wiki-binding-inputs":
+		v.Task.Inputs = []contract.Ref{}
+	case "m2-wiki-binding-intake":
+		v.Intake = task.Binding.Context
+	case "m2-wiki-omitted-term":
+		v.Queries = []string{"not the dispatched term"}
+	}
+	return v, files
+}
+
+// All barriers use the existing Host events and the real engine snapshot. Only
+// the event-loop goroutine owns these maps; the workflow never mutates them.
+type m2Barrier struct {
+	held     map[string]protocol.Event
+	attempts map[string]string
+	order    []string
+	waiting  string
+	proved   bool
+	faulted  bool
+}
+
+func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
+	t.Helper()
+	if len(b.held) != 3 || b.faulted {
+		return
+	}
+	snapshot := r.Snapshot()
+	if !b.proved {
+		live, planners, workers := 0, 0, 0
+		for _, s := range snapshot.Sessions {
+			if s.State == "Closed" {
+				continue
+			}
+			live++
+			if s.Role.Name == "triage-planner" {
+				planners++
+			}
+			if strings.HasPrefix(s.Role.Name, "triage-worker-") {
+				workers++
+			}
+		}
+		if live != 4 || planners != 1 || workers != 3 {
+			t.Fatalf("M2 barrier live=%d planners=%d workers=%d", live, planners, workers)
+		}
+		for _, id := range []string{"w1", "w2", "w3"} {
+			if snapshot.Attempts[b.attempts[id]].Output != nil {
+				t.Fatal("worker committed before all three prompts reached barrier")
+			}
+		}
+		b.proved = true
+	}
+	if b.waiting != "" {
+		a := snapshot.Attempts[b.attempts[b.waiting]]
+		if a.State != engine.Succeeded || a.Output == nil || snapshot.Sessions[a.HandleID].State != "Closed" {
+			return
+		}
+		b.waiting = ""
+	}
+	if len(b.order) == 3 {
+		return
+	}
+	id := []string{"w3", "w2", "w1"}[len(b.order)]
+	ack := "settle"
+	if id == "w2" {
+		if strings.HasPrefix(name, "m2-branch-") && name != "m2-branch-binding" {
+			b.faulted = true
+			if name != "m2-branch-abort-unacknowledged" {
+				// A streaming sibling must leave the fixture's prompt-ack
+				// barrier so the real RPC abort can be acknowledged.
+				if err := b.held["w1"].Reply(protocol.Control{Type: "hold"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		switch name {
+		case "m2-branch-provider-failure", "m2-branch-abort-unacknowledged":
+			ack = "provider-error"
+		case "m2-branch-cancel", "m2-branch-timeout":
+			ack = "hold"
+		case "m2-branch-cleanup-failure":
+			sid := snapshot.Sessions[snapshot.Attempts[b.attempts[id]].HandleID].Identity.SessionID
+			path := filepath.Join(bridge, sid+".json")
+			if err := os.Rename(path, path+".recovering"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := b.held[id].Reply(protocol.Control{Type: ack}); err != nil {
+		t.Fatal(err)
+	}
+	b.order = append(b.order, id)
+	b.waiting = id
+	if name == "m2-branch-cancel" && id == "w2" {
+		r.Cancel(engine.OriginControllerUser)
+	}
+}
+
+func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models sliceModels, input contract.Ref, name string) (contract.Ref, error) {
+	t.Helper()
+	plannerModel := runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}
+	if name == "m2-parallel-batches-yield" || name == "m2-no-ready-feedback" || name == "m2-wiki-support" {
+		return executeInvestigation(ctx, r, scope, plannerModel, models, input)
+	}
+	p, err := startPlanner(ctx, r, scope, plannerModel, input)
+	if err != nil {
+		return contract.Ref{}, err
+	}
+	p.adaptive = true
+	if name == "m2-session-not-progress" || name == "m2-wiki-handoff" {
+		_, err = p.step(ctx)
+		if err == nil {
+			if name == "m2-wiki-handoff" {
+				_, err = p.searchWiki(ctx, models)
+			} else {
+				_, err = p.workReady(ctx, models)
+				if err == nil {
+					_, err = p.step(ctx)
+				}
+			}
+		}
+		if err == nil {
+			old, before := p, r.Snapshot()
+			p, err = p.handoff(ctx)
+			if err == nil && (!old.stopped || !slices.Equal(p.workerResults, old.workerResults) || !slices.Equal(p.wikiResults, old.wikiResults) || p.last == nil || *p.last != *old.last || len(r.Snapshot().Attempts) != len(before.Attempts)) {
+				t.Error("fresh session lost accepted state/deliveries or reset attempt accounting")
+			}
+		}
+	}
+	if err == nil {
+		var ref contract.Ref
+		ref, err = p.adapt(ctx, models)
+		if err == nil {
+			return ref, nil
+		}
+	}
+	if p == nil {
+		return contract.Ref{}, err
+	}
+	last := p.last
+	ordinal := 1
+	switch name {
+	case "m2-ledger-missing", "m2-action-mismatch", "m2-progress-without-batch", "m2-round-initial", "m2-wiki-previous-terms", "m2-wiki-basis-owner":
+		ordinal = 0
+	case "m2-reframe-required", "m2-reframe-same-terms", "m2-wiki-partial-runtime":
+		ordinal = 2
+	case "m2-reframe-wiki-reset":
+		ordinal = 3
+	}
+	var committed []engine.AttemptState
+	for _, attempt := range r.Snapshot().Attempts {
+		if attempt.Output != nil && attempt.Output.SchemaID == PlannerSchema {
+			committed = append(committed, attempt)
+		}
+	}
+	slices.SortFunc(committed, func(a, b engine.AttemptState) int {
+		if a.LastSeq < b.LastSeq {
+			return -1
+		}
+		if a.LastSeq > b.LastSeq {
+			return 1
+		}
+		return 0
+	})
+	if ordinal == 0 {
+		if last != nil {
+			t.Error("invalid first Planner publication became accepted state")
+		}
+	} else if len(committed) < ordinal || last == nil || *last != *committed[ordinal-1].Output {
+		t.Error("failed adaptive call replaced its exact last accepted Planner Ref")
+	}
+	workers, wikis := slices.Clone(p.workerResults), slices.Clone(p.wikiResults)
+	if !p.stopped {
+		t.Error("failed adaptive caller was not stopped")
+	}
+	if strings.HasPrefix(name, "m2-branch-") && (len(workers) != 0 || last == nil) {
+		t.Error("partial batch became a Planner checkpoint/delivery")
+	}
+	if last != nil {
+		var state publication[PlannerState]
+		if e := protocol.ReadJSON(last.Path, &state); e != nil {
+			t.Error(e)
+		} else if strings.HasPrefix(name, "m2-branch-") && (state.Data.Previous != nil || state.Data.Ledger.Round != 0) {
+			t.Error("batch failure replaced last accepted Planner state")
+		}
+	}
+	if _, e := p.workReady(ctx, models); e == nil {
+		t.Error("failed caller allowed another batch")
+	}
+	if _, e := p.step(ctx); e == nil {
+		t.Error("failed caller allowed another Planner Step")
+	}
+	if _, e := p.searchWiki(ctx, models); e == nil {
+		t.Error("failed caller allowed another wiki search")
+	}
+	if _, e := p.handoff(ctx); e == nil {
+		t.Error("failed caller allowed fresh handoff")
+	}
+	if _, e := p.support(ctx, models); e == nil {
+		t.Error("failed caller allowed supporting work")
+	}
+	if p.last != last || !slices.Equal(workers, p.workerResults) || !slices.Equal(wikis, p.wikiResults) {
+		t.Error("rejected retries changed last/deliveries")
+	}
+	return contract.Ref{}, err
+}
+
+func m2AssertWikiOwners(t *testing.T, inputs []contract.Ref) {
+	t.Helper()
+	found := false
+	for _, ref := range inputs {
+		if ref.SchemaID != WikiSchema {
+			continue
+		}
+		var p publication[WikiSearch]
+		if err := protocol.ReadJSON(ref.Path, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.Data.Task == nil {
+			continue
+		}
+		found = true
+		for _, owner := range append([]contract.Ref{p.Data.Task.Proposal, p.Data.Task.Context}, p.Data.Task.Inputs...) {
+			if !slices.Contains(inputs, owner) {
+				t.Fatal("new wiki lost original exact evidence owner")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("new investigation wiki absent from consumer Inputs")
+	}
+}
+
+func m2AssertWorkerInputs(t *testing.T, r *engine.Run, req contract.Request, request workerRequest, original ContextResult, name string) {
+	t.Helper()
+	if request.Requirements != workerRequirements || request.Context != original.Context || !slices.Contains(req.Inputs, request.Proposal) || !slices.Contains(req.Inputs, request.Context) {
+		t.Fatal("M2 worker changed original context or lost explicit proposal/requirements")
+	}
+	var state publication[PlannerState]
+	if err := protocol.ReadJSON(request.Proposal.Path, &state); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(state.Data.WorkerTasks, func(task WorkerTask) bool { return reflect.DeepEqual(task, request.Task) }) {
+		t.Fatal("worker differs from declared task")
+	}
+	if len(state.Data.WikiResults) > 0 {
+		m2AssertWikiOwners(t, req.Inputs)
+	}
+	for _, dep := range request.Dependencies {
+		attempt := r.Snapshot().Attempts[dep.AttemptID]
+		if !slices.Contains(req.Inputs, dep) || attempt.Output == nil || *attempt.Output != dep || attempt.State != engine.Succeeded || r.Snapshot().Sessions[attempt.HandleID].State != "Closed" {
+			t.Fatal("dependent work dispatched before committed, closed dependency")
+		}
+	}
+	if name == "m2-parallel-batches-yield" && request.Task.ID == "w4" {
+		if len(request.Dependencies) != 1 || len(state.Data.WorkerResults) != 3 {
+			t.Fatal("dependent task leaked into the first batch")
+		}
+		var dep publication[WorkerResult]
+		if err := protocol.ReadJSON(request.Dependencies[0].Path, &dep); err != nil || dep.Data.TaskID != "w1" {
+			t.Fatal("dependency ID lost exact result binding", err)
+		}
+	}
+	model := r.Snapshot().Sessions[r.Snapshot().Attempts[req.Identity.AttemptID].HandleID].Role.Model
+	if model != (runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: "high"}) {
+		t.Fatal("M2 evidence-only worker changed model binding")
+	}
+}
+
+func m2StoreSchema(t *testing.T, store *contract.Store, base validationInputs, name string) {
+	t.Helper()
+	v := PlannerState{Context: base.intakeRef, Hypotheses: []PlannerHypothesis{}, Pending: []PlannerQuestion{}, Gaps: []string{}, Rationale: "Anonymous schema boundary", Ledger: &InvestigationLedger{Action: "yield", Reason: "Accepted investigation only", ConsumedBatch: []contract.Ref{}, Changes: []HypothesisChange{}}}
+	var data any = m2PlannerData(t, v)
+	if _, err := storeFixture(t, store, PlannerSchema, data, nil, false); err != nil {
+		t.Fatal("invalid M2 schema prerequisite", err)
+	}
+	schema, field := PlannerSchema, "action"
+	switch name {
+	case "m2-store-action":
+		v.Ledger.Action = "final-report"
+		data = m2PlannerData(t, v)
+	case "m2-store-counter":
+		v.Ledger.Round = -1
+		data = m2PlannerData(t, v)
+		field = "round"
+	case "m2-store-extra-control":
+		raw := m2PlannerData(t, v)
+		raw["ledger"].(map[string]any)["model"] = "agent-selected"
+		data, field = raw, "model"
+	case "m2-store-wiki-binding":
+		wiki, files := wikiFixture("complete", base.intakeRef)
+		wiki.Task = &WikiTaskBinding{Proposal: base.intakeRef, Context: base.intakeRef, TaskID: "", Inputs: []contract.Ref{base.intakeRef}}
+		_, err := storeFixture(t, store, WikiSchema, wiki, files, false)
+		var failure *contract.Error
+		if !errors.As(err, &failure) || failure.Code != contract.ContractInvalid || failure.Phase != "schema" || !strings.Contains(err.Error(), "task_id") {
+			t.Fatalf("expected wiki binding schema rejection: %v", err)
+		}
+		return
+	}
+	_, err := storeFixture(t, store, schema, data, nil, false)
+	var failure *contract.Error
+	if !errors.As(err, &failure) || failure.Code != contract.ContractInvalid || failure.Phase != "schema" || !strings.Contains(err.Error(), field) {
+		t.Fatalf("expected %s schema rejection: %v", field, err)
+	}
+}
+
+func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref contract.Ref, original ContextResult, expected PlannerState, barrier m2Barrier, prompts, hellos int) {
+	t.Helper()
+	if report.Final != nil || len(report.Snapshot.Retries) != 0 {
+		t.Fatal("investigation invented final delivery/retry policy")
+	}
+	if report.Snapshot.Policy.MaxLiveSessions != 4 || len(report.Snapshot.Attempts) != prompts || len(report.Snapshot.Sessions) != hellos {
+		t.Fatal("M2 run limits/accounting changed")
+	}
+	planners := 0
+	for _, s := range report.Snapshot.Sessions {
+		if s.State != "Closed" {
+			t.Fatal("M2 run returned before joining/closing every session")
+		}
+		if s.Role.Name == "triage-planner" {
+			planners++
+			if s.Role.Model != (runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}) {
+				t.Fatalf("M2 Planner model changed: %+v", s.Role.Model)
+			}
+		}
+	}
+	if (tc.name == "m2-wiki-support" || tc.name == "m2-wiki-handoff" || tc.name == "m2-session-not-progress") && planners != 2 {
+		t.Fatalf("M2 support/handoff must retain the Planner model in both sessions, got %d sessions", planners)
+	}
+	if len(report.Cleanup) != len(report.Snapshot.Sessions) {
+		t.Fatal("M2 cleanup accounting lost a session report")
+	}
+	for _, c := range report.Cleanup {
+		if !c.WaitCompleted || !c.ProcessExited {
+			t.Fatal("M2 cleanup did not confirm local Wait/process exit")
+		}
+		if tc.name != "m2-branch-cleanup-failure" && tc.name != "m2-branch-abort-unacknowledged" && !c.ConfirmsLocalClose(c.Identity.SessionID) {
+			t.Fatalf("M2 cleanup not strict: WaitError=%q KillError=%q DiscoveryError=%q Unconfirmed=%v StderrTail=%.300q", c.WaitError, c.KillError, c.DiscoveryError, c.Unconfirmed, c.StderrTail)
+		}
+	}
+	if tc.name == "m2-branch-cleanup-failure" || tc.name == "m2-branch-abort-unacknowledged" {
+		if len(report.CleanupErrors) == 0 {
+			t.Fatal("M2 cleanup failure was swallowed")
+		}
+	} else if len(report.CleanupErrors) != 0 {
+		t.Fatal("M2 has unexpected cleanup failures")
+	}
+	if tc.name == "m2-branch-abort-unacknowledged" {
+		if !slices.ContainsFunc(report.Cleanup, func(c runtime.CleanupReport) bool { return slices.Contains(c.Unconfirmed, "abort not acknowledged") }) {
+			t.Fatal("frozen sibling lost abort/cleanup diagnostics")
+		}
+	}
+	for _, a := range report.Snapshot.Attempts {
+		if !slices.Contains([]engine.State{engine.Succeeded, engine.Failed, engine.CancelledState, engine.TimedOutState}, a.State) {
+			t.Fatal("M2 returned with an unjoined attempt")
+		}
+	}
+	if tc.failure {
+		if ref.AttemptID != "" || len(report.Result.Outputs) != 0 {
+			t.Fatal("failed investigation exposed checkpoint outputs")
+		}
+		want := engine.WorkflowFailed
+		switch tc.name {
+		case "m2-branch-provider-failure", "m2-branch-abort-unacknowledged", "m2-planner-provider-failure":
+			want = engine.ProviderFailed
+		case "m2-branch-cancel":
+			want = engine.Cancelled
+		case "m2-branch-timeout":
+			want = engine.TimedOut
+		case "m2-branch-cleanup-failure":
+			want = engine.CleanupFailed
+		case "m2-branch-schema":
+			want = engine.ContractInvalid
+		case "m2-attempt-cap":
+			want = engine.LimitExceeded
+		}
+		var failure *engine.Failure
+		if want == engine.WorkflowFailed {
+			var contractErr *contract.Error
+			if errors.As(report.Failure, &failure) || errors.As(report.Failure, &contractErr) || errors.Is(report.Failure, context.Canceled) || errors.Is(report.Failure, context.DeadlineExceeded) {
+				t.Fatalf("M2 semantic rejection became execution/contract failure: %v", report.Failure)
+			}
+		} else if !errors.As(report.Failure, &failure) || failure.Code != want {
+			t.Fatalf("M2 expected %s, got %v", want, report.Failure)
+		}
+		if tc.name == "m2-branch-timeout" && failure.Origin != engine.OriginAttemptDeadline {
+			t.Fatal("M2 timeout lost attempt deadline origin")
+		}
+		messages := map[string]string{
+			"m2-batch-consumed-order": "consumed batch mismatch", "m2-batch-results-order": "consumed batch mismatch", "m2-batch-foreign-ref": "distinct workflow-accepted refs",
+			"m2-ledger-missing": "adaptive ledger", "m2-ledger-drop": "retained ledger", "m2-action-mismatch": "action and proposed work differ",
+			"m2-progress-without-batch": "progress requires a consumed worker round", "m2-round-initial": "round/streak/reframe echo mismatch",
+			"m2-consumed-drop": "consumed batch mismatch", "m2-consumed-foreign": "consumed batch mismatch", "m2-round-echo": "round/streak/reframe echo mismatch", "m2-streak-echo": "round/streak/reframe echo mismatch", "m2-reframe-counter-echo": "round/streak/reframe echo mismatch",
+			"m2-progress-unknown-id": "distinct declared ID", "m2-progress-duplicate": "distinct declared ID", "m2-progress-owner": "exact input owner/file",
+			"m2-reframe-required": "two rounds without reported hypothesis progress require reframe", "m2-reframe-same-terms": "changed wiki terms", "m2-reframe-wiki-reset": "round/streak/reframe echo mismatch",
+			"m2-wiki-partial-runtime": "completed investigation wiki prerequisite", "m2-wiki-partial-drop-gap": "cannot hide investigation wiki gaps", "m2-wiki-drop-ref": "exact wiki deliveries",
+			"m2-wiki-previous-terms": "previous_terms differ", "m2-wiki-basis-owner": "exact input owner/file",
+			"m2-wiki-binding-proposal": "expected triage.planner.v1", "m2-wiki-binding-context": "proposal/task/context/history mismatch", "m2-wiki-binding-task": "proposal/task/context/history mismatch", "m2-wiki-binding-inputs": "wiki inputs mismatch", "m2-wiki-binding-intake": "wiki search provenance missing", "m2-wiki-omitted-term": "omitted a dispatched search term",
+			"m2-branch-binding": "proposal/context/task/inputs mismatch", "m2-query-utc": "UTC", "m2-incomplete-no-gap": "complete/incomplete delivery with gaps",
+		}
+		if message, ok := messages[tc.name]; ok && !strings.Contains(report.Failure.Error(), message) {
+			t.Fatalf("wrong M2 rejection, want %q: %v", message, report.Failure)
+		}
+		if tc.name == "m2-wiki-partial-runtime" {
+			var originalWiki publication[WikiSearch]
+			if err := protocol.ReadJSON(original.Wiki.Path, &originalWiki); err != nil || !wikiComplete(originalWiki.Data) {
+				t.Fatal("runtime gate fixture did not start with completed historical wiki", err)
+			}
+			partial := false
+			for _, a := range report.Snapshot.Attempts {
+				if a.Output == nil {
+					continue
+				}
+				if a.Output.SchemaID == WorkerSchema {
+					t.Fatal("partial investigation wiki permitted runtime worker dispatch")
+				}
+				if a.Output.SchemaID == WikiSchema {
+					var wiki publication[WikiSearch]
+					if err := protocol.ReadJSON(a.Output.Path, &wiki); err != nil {
+						t.Fatal(err)
+					}
+					partial = partial || (wiki.Data.Task != nil && wiki.Data.Status == "partial" && len(wiki.Data.Gaps) > 0)
+				}
+			}
+			if !partial {
+				t.Fatal("runtime prerequisite failure lacked actual partial investigation wiki")
+			}
+		}
+		if strings.HasPrefix(tc.name, "m2-branch-") {
+			if !barrier.proved {
+				t.Fatal("branch failure did not exercise three live workers")
+			}
+			committed := 0
+			planners := 0
+			for _, a := range report.Snapshot.Attempts {
+				if a.Output != nil && a.Output.SchemaID == WorkerSchema {
+					committed++
+				}
+				if a.Output != nil && a.Output.SchemaID == PlannerSchema {
+					planners++
+				}
+			}
+			if committed < 1 || planners != 1 {
+				t.Fatal("failure did not preserve partial publication without a new Planner checkpoint")
+			}
+		}
+		return
+	}
+	var accepted publication[PlannerState]
+	if err := protocol.ReadJSON(ref.Path, &accepted); err != nil || !reflect.DeepEqual(accepted.Data, expected) {
+		t.Fatal("M2 final accepted state differs from the submitted snapshot", err)
+	}
+	state := accepted.Data
+	if state.Ledger == nil || state.Ledger.Action != "yield" || report.Result.Outputs["planner"] != ref {
+		t.Fatal("yield is not the exact accepted investigation state")
+	}
+	attempt := report.Snapshot.Attempts[ref.AttemptID]
+	if attempt.State != engine.Succeeded || attempt.Output == nil || *attempt.Output != ref {
+		t.Fatal("yield was not engine committed")
+	}
+	wantRound, wantStreak, wantReframe, wantBoundary := 1, 1, 0, 0
+	switch tc.name {
+	case "m2-progress-explicit":
+		wantRound, wantStreak = 2, 0
+	case "m2-parallel-batches-yield", "m2-reframe-yield-gap":
+		wantRound, wantStreak = 2, 2
+	case "m2-reframe-complete", "m2-reframe-partial":
+		wantRound, wantStreak, wantReframe, wantBoundary = 2, 2, 2, 2
+	case "m2-reframe-repeat":
+		wantRound, wantStreak, wantReframe, wantBoundary = 4, 4, 4, 4
+	}
+	l := state.Ledger
+	if l.Round != wantRound || l.NoProgress != wantStreak || l.ReframeRound != wantReframe || l.ReframeStreak != wantBoundary {
+		t.Fatalf("ledger counters round=%d streak=%d reframe=%d boundary=%d", l.Round, l.NoProgress, l.ReframeRound, l.ReframeStreak)
+	}
+	if tc.name == "m2-progress-explicit" && (len(l.Changes) != 1 || state.Hypotheses[0].Assessment != "Unverified; compare runtime evidence") {
+		t.Fatal("Agent-declared progress was coupled to assessment text")
+	}
+	if tc.name == "m2-parallel-batches-yield" {
+		if !barrier.proved || !slices.Equal(barrier.order, []string{"w3", "w2", "w1"}) {
+			t.Fatal("reverse completion barrier was not exercised")
+		}
+		if len(state.WorkerResults) != 5 {
+			t.Fatal("multiple batches lost results")
+		}
+		for i, ref := range state.WorkerResults {
+			var worker publication[WorkerResult]
+			if err := protocol.ReadJSON(ref.Path, &worker); err != nil || worker.Data.TaskID != fmt.Sprintf("w%d", i+1) {
+				t.Fatal("joined refs not in declared order", err)
+			}
+		}
+		if report.Snapshot.Attempts[barrier.attempts["w3"]].LastSeq >= report.Snapshot.Attempts[barrier.attempts["w2"]].LastSeq || report.Snapshot.Attempts[barrier.attempts["w2"]].LastSeq >= report.Snapshot.Attempts[barrier.attempts["w1"]].LastSeq {
+			t.Fatal("actual committed order did not reverse declaration order")
+		}
+	}
+	if len(state.WikiResults) > 0 {
+		var old publication[Context]
+		if err := protocol.ReadJSON(original.Context.Path, &old); err != nil || old.Data.Wiki != original.Wiki || old.Data.Intake != original.Intake {
+			t.Fatal("investigation rebound original context/wiki/intake", err)
+		}
+		for _, wikiRef := range state.WikiResults {
+			var wiki publication[WikiSearch]
+			if err := protocol.ReadJSON(wikiRef.Path, &wiki); err != nil || wiki.Data.Task == nil || wiki.Data.Task.Context != original.Context || wiki.Data.Intake != original.Intake || wikiRef == original.Wiki {
+				t.Fatal("new wiki lost its own exact historical binding", err)
+			}
+			for _, gap := range wiki.Data.Gaps {
+				if !slices.Contains(state.Gaps, gap) {
+					t.Fatal("partial wiki gap was hidden by old complete context")
+				}
+			}
+		}
+	}
+	if tc.name == "m2-wiki-support" {
+		if state.Context == original.Context {
+			t.Fatal("support action did not produce a revised context")
+		}
+		var next publication[Context]
+		if err := protocol.ReadJSON(state.Context.Path, &next); err != nil || next.Data.Previous == nil || *next.Data.Previous != original.Context || next.Data.Intake != original.Intake || next.Data.Wiki != original.Wiki || next.Data.Readiness != "ready" {
+			t.Fatal("support revision lost original provenance/readiness", err)
+		}
+	}
+}
+
 type triageCase struct {
 	name    string
 	stages  int
@@ -1449,6 +2248,22 @@ type triageCase struct {
 }
 
 var triageCases = []triageCase{
+	{"m2-batch-consumed-order", 8, true, false}, {"m2-batch-results-order", 8, true, false}, {"m2-batch-foreign-ref", 8, true, false},
+	{"m2-parallel-batches-yield", 11, false, true}, {"m2-no-ready-feedback", 7, false, true},
+	{"m2-progress-explicit", 8, false, true}, {"m2-assessment-not-progress", 6, false, true},
+	{"m2-files-not-progress", 6, false, true}, {"m2-query-not-progress", 6, false, true}, {"m2-session-not-progress", 7, false, true},
+	{"m2-ledger-missing", 4, true, false}, {"m2-action-mismatch", 4, true, false}, {"m2-progress-without-batch", 4, true, false}, {"m2-round-initial", 4, true, false},
+	{"m2-consumed-drop", 6, true, false}, {"m2-consumed-foreign", 6, true, false}, {"m2-round-echo", 6, true, false}, {"m2-streak-echo", 6, true, false},
+	{"m2-reframe-counter-echo", 6, true, false}, {"m2-ledger-drop", 6, true, false}, {"m2-progress-unknown-id", 6, true, false}, {"m2-progress-owner", 6, true, false}, {"m2-progress-duplicate", 6, true, false},
+	{"m2-reframe-complete", 10, false, true}, {"m2-reframe-partial", 10, false, true}, {"m2-reframe-repeat", 16, false, true}, {"m2-reframe-yield-gap", 8, false, true},
+	{"m2-reframe-required", 8, true, false}, {"m2-reframe-same-terms", 8, true, false}, {"m2-reframe-wiki-reset", 10, true, false},
+	{"m2-wiki-worker", 8, false, true}, {"m2-wiki-runtime", 8, false, true}, {"m2-wiki-handoff", 8, false, true}, {"m2-wiki-support", 10, false, true}, {"m2-wiki-partial-worker", 8, false, true},
+	{"m2-wiki-partial-runtime", 6, true, false}, {"m2-wiki-partial-drop-gap", 6, true, false}, {"m2-wiki-drop-ref", 6, true, false},
+	{"m2-wiki-previous-terms", 4, true, false}, {"m2-wiki-basis-owner", 4, true, false},
+	{"m2-wiki-binding-proposal", 5, true, false}, {"m2-wiki-binding-context", 5, true, false}, {"m2-wiki-binding-task", 5, true, false}, {"m2-wiki-binding-inputs", 5, true, false}, {"m2-wiki-binding-intake", 5, true, false}, {"m2-wiki-omitted-term", 5, true, false},
+	{"m2-branch-abort-unacknowledged", 7, true, false}, {"m2-branch-provider-failure", 7, true, false}, {"m2-branch-cancel", 7, true, false}, {"m2-branch-timeout", 7, true, false}, {"m2-branch-cleanup-failure", 7, true, false}, {"m2-branch-binding", 7, true, false}, {"m2-branch-schema", 7, true, false},
+	{"m2-query-utc", 5, true, false}, {"m2-incomplete-no-gap", 5, true, false}, {"m2-planner-provider-failure", 6, true, false}, {"m2-attempt-cap", 5, true, false},
+	{"m2-store-action", 0, true, false}, {"m2-store-counter", 0, true, false}, {"m2-store-extra-control", 0, true, false}, {"m2-store-wiki-binding", 0, true, false},
 	{"m1-dependencies-incomplete", 7, false, true},
 	{"m1-support", 10, false, true}, {"m1-logs", 6, false, true},
 	{"m1-worker-timeout", 5, true, false}, {"m1-worker-cancel", 5, true, false}, {"m1-planner-provider-failure", 6, true, false},
@@ -1537,6 +2352,9 @@ var triageCases = []triageCase{
 // Truncated intake, blank proposal reason and history-alias negatives also stay
 // there to detect a production loader accidentally bypassing its validator.
 func validationStage(name string) string {
+	if strings.HasPrefix(name, "m2-store-") {
+		return "m2-schema"
+	}
 	if strings.HasPrefix(name, "m1-store-") {
 		return "worker"
 	}
@@ -2002,6 +2820,10 @@ func TestTriageValidation(t *testing.T) {
 				key = "missing-page"
 			}
 			base := inputs(t, key)
+			if stage == "m2-schema" {
+				m2StoreSchema(t, store, base, tc.name)
+				return
+			}
 			scope := testScope()
 			switch tc.name {
 			case "blank-stack":
@@ -2141,6 +2963,7 @@ func TestIntakeToContext(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			m1 := strings.HasPrefix(tc.name, "m1-")
+			m2 := strings.HasPrefix(tc.name, "m2-")
 			working := strings.HasPrefix(tc.name, "work-") || tc.name == "m1-support"
 			transitionProbe := slices.Contains([]string{"work-unproposed-transition", "work-skipped-context", "work-wrong-task", "work-resolve-changed-intake", "work-refresh-work-mismatch"}, tc.name)
 			workKind, workFixture := "update", "update-replace"
@@ -2164,6 +2987,12 @@ func TestIntakeToContext(t *testing.T) {
 			revising := refreshing || updating
 			acquiring := (resolving && !supporting) || revising || strings.HasPrefix(tc.name, "http-")
 			mode := tc.name
+			if m2 {
+				mode = "complete"
+				if tc.name == "m2-wiki-support" {
+					mode = "time-unresolved"
+				}
+			}
 			if revising {
 				mode = "wiki-matches"
 			}
@@ -2327,7 +3156,11 @@ func TestIntakeToContext(t *testing.T) {
 			if err := os.Mkdir(bridge, 0700); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			fixtureTimeout := 20 * time.Second
+			if m2 {
+				fixtureTimeout = 90 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), fixtureTimeout)
 			defer cancel()
 			host, err := protocol.NewHost(ctx, 16)
 			if err != nil {
@@ -2363,6 +3196,12 @@ func TestIntakeToContext(t *testing.T) {
 			policy.Runtime.CleanupTimeout = 3 * time.Second
 			policy.Runtime.AbortGrace = 50 * time.Millisecond
 			policy.Runtime.HealthInterval = time.Hour
+			if m2 {
+				policy.MaxLiveSessions = 4 // Three ready workers plus the persistent Planner.
+				if tc.name == "m2-attempt-cap" {
+					policy.MaxTotalAttempts = 5
+				}
+			}
 			if tc.name == "attempt-cap" {
 				policy.MaxTotalAttempts = 1
 			}
@@ -2395,6 +3234,9 @@ func TestIntakeToContext(t *testing.T) {
 				var err error
 				models := sliceModels{FetchThinking: "high", Analysis: runtime.ModelSpec{Provider: "fixture", ID: "analysis", Thinking: "high"}}
 				result, err = executeSlice(ctx, run, scope, models)
+				if err == nil && m2 {
+					plannerRef, err = m2Run(t, ctx, run, scope, models, result.Context, tc.name)
+				}
 				if err == nil && resolving && !working {
 					beforeResolution = result
 					if tc.name == "resolve-uncommitted-input" {
@@ -2718,7 +3560,7 @@ func TestIntakeToContext(t *testing.T) {
 				// No final selection: these are supporting refs, not a report.
 				if err == nil {
 					outputs = map[string]contract.Ref{"intake": result.Intake, "wiki": result.Wiki, "context": result.Context}
-					if planning {
+					if planning || m2 {
 						outputs["planner"] = plannerRef
 					}
 				}
@@ -2726,6 +3568,9 @@ func TestIntakeToContext(t *testing.T) {
 			}}
 			var transport runtime.Runtime = pi
 			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" || tc.name == "planner-timeout" || tc.name == "work-worker-timeout" || tc.name == "work-planner-timeout" || tc.name == "m1-worker-timeout" {
+				transport = deadlineRuntime{pi}
+			}
+			if tc.name == "m2-branch-timeout" {
 				transport = deadlineRuntime{pi}
 			}
 			r, err = engine.New(ctx, def, engine.Input{Prompt: "CASE-17", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
@@ -2744,11 +3589,20 @@ func TestIntakeToContext(t *testing.T) {
 			var refreshRequests int32
 			var revisionIntake contract.Ref
 			observedSupportingRefs := map[contract.Ref]bool{}
+			barrier := m2Barrier{held: map[string]protocol.Event{}, attempts: map[string]string{}}
+			var barrierTick <-chan time.Time
+			if m2 {
+				ticker := time.NewTicker(5 * time.Millisecond)
+				defer ticker.Stop()
+				barrierTick = ticker.C
+			}
 		loop:
 			for {
 				select {
 				case <-done:
 					break loop
+				case <-barrierTick:
+					barrier.release(t, r, tc.name, bridge)
 				case <-ctx.Done():
 					t.Fatal("slice exceeded test deadline")
 				case e, ok := <-host.Events():
@@ -2770,12 +3624,40 @@ func TestIntakeToContext(t *testing.T) {
 								}
 							}
 						}
+						if m2 {
+							snapshot := r.Snapshot()
+							openingPlanner := false
+							live := 0
+							for _, s := range snapshot.Sessions {
+								if s.State != "Closed" {
+									live++
+									if s.Role.Name == "triage-planner" && (s.Identity.SessionID == e.Message.SessionID || s.Identity.SessionID == "") {
+										openingPlanner = true
+									}
+								}
+							}
+							if openingPlanner {
+								for _, s := range snapshot.Sessions {
+									if s.State != "Closed" && s.Identity.SessionID != "" && s.Identity.SessionID != e.Message.SessionID {
+										t.Fatal("M2 fresh Planner opened before prior sessions closed")
+									}
+								}
+							}
+							if live > 4 {
+								t.Fatalf("M2 exceeded three workers plus live Planner: %d", live)
+							}
+							hellos[e.Message.SessionID] = e.Message
+							continue
+						}
 						for _, s := range r.Snapshot().Sessions {
 							if s.Identity.SessionID != "" && s.Identity.SessionID != e.Message.SessionID && s.State != "Closed" && !(m1 && workerOpening && s.Role.Name == "triage-planner") {
 								t.Fatalf("new stage before old cleanup: %+v", s)
 							}
 						}
 						hellos[e.Message.SessionID] = e.Message
+						continue
+					}
+					if m2 && e.Message.Type == "held" {
 						continue
 					}
 					if (tc.name == "cancel" || tc.name == "attempt-timeout" || strings.HasSuffix(tc.name, "-cancel") || strings.HasSuffix(tc.name, "-timeout")) && e.Message.Type == "held" {
@@ -2830,7 +3712,61 @@ func TestIntakeToContext(t *testing.T) {
 					}
 					var data any
 					var files map[string][]byte
-					if req.Output.SchemaID == WorkerSchema {
+					if m2 && count > 3 {
+						switch req.Output.SchemaID {
+						case PlannerSchema:
+							plannerSteps++
+							expectedPlanner = m2PlannerFixture(t, tc.name, req, task, plannerSteps)
+							data = m2PlannerData(t, expectedPlanner)
+						case WikiSchema:
+							data, files = m2WikiFixture(t, tc.name, req)
+						case WorkerSchema:
+							var request workerRequest
+							if err := json.Unmarshal([]byte(req.Prompt), &request); err != nil {
+								t.Fatal(err)
+							}
+							m2AssertWorkerInputs(t, r, req, request, result, tc.name)
+							fixtureName := tc.name
+							if request.Task.SourceKind == "logs" {
+								fixtureName = "m1-logs"
+							}
+							if tc.name == "m2-query-utc" {
+								fixtureName = "m1-query-utc"
+							}
+							if tc.name == "m2-incomplete-no-gap" {
+								fixtureName = "m1-incomplete-no-gap"
+							}
+							v, raw := workerFixture(fixtureName, request, req.Inputs)
+							if tc.name == "m2-files-not-progress" {
+								raw["additional-raw"] = []byte("another anonymous document")
+								v.Evidence = append(v.Evidence, Evidence{FileID: "additional-raw"})
+							}
+							if request.Task.ID == "w2" {
+								if tc.name == "m2-branch-binding" {
+									v.TaskID = "not-dispatched"
+								}
+								if tc.name == "m2-branch-schema" {
+									v.Status = "invented-status"
+								}
+							}
+							data, files = v, raw
+							if (slices.Contains([]string{"m2-parallel-batches-yield", "m2-batch-consumed-order", "m2-batch-results-order", "m2-batch-foreign-ref"}, tc.name) || strings.HasPrefix(tc.name, "m2-branch-")) && slices.Contains([]string{"w1", "w2", "w3"}, request.Task.ID) {
+								barrier.held[request.Task.ID], barrier.attempts[request.Task.ID] = e, req.Identity.AttemptID
+							}
+						case ContextSchema:
+							if tc.name != "m2-wiki-support" || task.SupportingProposal == nil {
+								t.Fatal("unexpected M2 supporting task")
+							}
+							m2AssertWikiOwners(t, req.Inputs)
+							var prior publication[Context]
+							if err := protocol.ReadJSON(req.Inputs[2].Path, &prior); err != nil {
+								t.Fatal(err)
+							}
+							data, files = resolutionFixture("resolve-time", "time-unresolved", scope, req.Inputs, intake, wiki, prior.Data)
+						default:
+							t.Fatal("unexpected M2 schema")
+						}
+					} else if req.Output.SchemaID == WorkerSchema {
 						var request workerRequest
 						if err := json.Unmarshal([]byte(req.Prompt), &request); err != nil {
 							t.Fatal(err)
@@ -3112,7 +4048,18 @@ func TestIntakeToContext(t *testing.T) {
 					} else {
 						writeCandidate(t, e.Message, req, data, files, tc.name == "file-escape")
 					}
+					if m2 && req.Output.SchemaID == WorkerSchema {
+						for _, attemptID := range barrier.attempts {
+							if attemptID == req.Identity.AttemptID {
+								barrier.release(t, r, tc.name, bridge)
+								continue loop
+							}
+						}
+					}
 					ack := "settle"
+					if tc.name == "m2-planner-provider-failure" && plannerSteps == 2 {
+						ack = "provider-error"
+					}
 					if m1 && req.Output.SchemaID == WorkerSchema && tc.name == "m1-worker-provider-failure" {
 						ack = "provider-error"
 					}
@@ -3200,6 +4147,10 @@ func TestIntakeToContext(t *testing.T) {
 			}
 			if report.Final != nil {
 				t.Fatal("slice invented final report")
+			}
+			if m2 {
+				m2AssertOutcome(t, tc, report, plannerRef, result, expectedPlanner, barrier, count, len(hellos))
+				return
 			}
 			supportingAllowed := targetAuthorized && intake.Complete && wikiComplete(wiki)
 			if supporting {

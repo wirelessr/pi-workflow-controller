@@ -134,6 +134,8 @@ R1–R4 的匿名驗收與 consumer 遷移完成後才啟動 M1，不因某個 h
 
 M1 已接入 `plannerCaller.work` 的單項明列 worker 派工與 Planner 結果交接；`taskStep` 供既有 slice adapter 與 worker 共用，原 session/Step/strict-close 語義不另造。`worker_results` 明交 exact refs 及真正 owners，fresh handoff／support 改版不重綁歷史結果；原 query checker/schema 等義共用。這不是自動批次、產品入口或 live 驗收，具體 contracts 見 [Jira triage](JIRA-TRIAGE.md)。逐次 review/gates/commit 狀態仍在外部工程紀錄。
 
+M2 已以 `executeInvestigation`／`adapt` 接明列 action，`workReady` 先限制最多三個 ready tasks 再使用真 Parallel，live Planner 另計。Ledger 只依 Agent 明報 changes 及 exact batch Refs 計數，不由 Go 比較領域內容。Reframe wiki 是獨立 committed Ref，沿原 WikiSearch/completeness，歷史 context binding 不重寫；模型由 caller 分別明示，不能將 Planner 默綁一般分析模型。單項 worker 及 supporting/fresh handoff 舊 callers 沿用共同執行機械。M3+／產品入口／live 尚未完成。
+
 M3 保存當時已有的工作結果／feedback；M5 新增 verifier 時，同步擴充可重建 state 與恢復驗收。不得把尚未存在的角色填成占位資料就宣稱完成，也不得要求 M4 先完成 M5 才能提供的 verifier，形成相依循環。
 
 依賴表示本輪預設施工順序，不是宣稱每項都是框架缺口。要拆分或調整順序，先說明具體獨立性、維持哪些保證並取得確認，再更新此表，不讓接手者自行解讀成跳過。

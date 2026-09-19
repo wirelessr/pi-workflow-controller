@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"pi-workflow-controller/internal/contract"
+	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
 )
 
@@ -201,6 +202,10 @@ func (a *acceptance) workerDispatch(scope Scope, proposal contract.Ref, taskID s
 	if err != nil {
 		return request, nil, nil, err
 	}
+	sources, err = a.wikiSources(scope, sources, state.Data.WikiResults, records)
+	if err != nil {
+		return request, nil, nil, err
+	}
 	if task.SourceKind == "db" || task.SourceKind == "logs" || task.SourceKind == "metrics" {
 		intake, err := a.checkIntake(h.value.Intake, scope.Ticket)
 		if err != nil {
@@ -212,6 +217,15 @@ func (a *acceptance) workerDispatch(scope Scope, proposal contract.Ref, taskID s
 		}
 		if !intake.Complete || !wikiComplete(wiki) {
 			return request, nil, nil, fmt.Errorf("runtime worker requires completed intake/wiki prerequisites")
+		}
+		if len(state.Data.WikiResults) > 0 {
+			latest, err := readAccepted[WikiSearch](a, state.Data.WikiResults[len(state.Data.WikiResults)-1], WikiSchema)
+			if err != nil {
+				return request, nil, nil, err
+			}
+			if !wikiComplete(latest.Data) {
+				return request, nil, nil, fmt.Errorf("runtime worker requires completed investigation wiki prerequisite")
+			}
 		}
 	}
 	request = workerRequest{Stage: "worker-" + task.SourceKind + "-" + task.Responsibility, Scope: scope, Proposal: proposal, Context: h.ref, Task: task, Dependencies: dependencies, Requirements: workerRequirements}
@@ -310,55 +324,78 @@ func (p *plannerCaller) work(ctx context.Context, models sliceModels, taskID str
 		return contract.Ref{}, fmt.Errorf("worker dispatch requires an accepted state and usable planner")
 	}
 	p.stopped = true
-	a := newAcceptance(ctx, p.r)
-	records, err := a.loadWorkerResults(p.scope, p.workerResults)
+	prepared, err := prepareWorker(ctx, p.r, p.scope, p.history.ref, *p.last, p.workerResults, taskID)
 	if err != nil {
 		return contract.Ref{}, err
 	}
-	request, inputs, _, err := a.workerDispatch(p.scope, *p.last, taskID, records)
+	ref, err := runWorker(ctx, p.r, p.r.Root(), models, prepared)
 	if err != nil {
 		return contract.Ref{}, err
 	}
-	if request.Context != p.history.ref {
-		return contract.Ref{}, fmt.Errorf("worker proposal differs from current context")
-	}
-	state, err := readAccepted[PlannerState](a, *p.last, PlannerSchema)
-	if err != nil {
+	if err := acceptWorker(ctx, p.r, p.scope, *p.last, p.workerResults, prepared, ref); err != nil {
 		return contract.Ref{}, err
+	}
+	p.workerResults, p.stopped = append(slices.Clone(p.workerResults), ref), false
+	return ref, nil
+}
+
+type preparedWorker struct {
+	request workerRequest
+	inputs  []contract.Ref
+	key     string
+}
+
+func prepareWorker(ctx context.Context, r *engine.Run, scope Scope, contextRef, proposal contract.Ref, accepted []contract.Ref, taskID string) (preparedWorker, error) {
+	var prepared preparedWorker
+	a := newAcceptance(ctx, r)
+	records, err := a.loadWorkerResults(scope, accepted)
+	if err != nil {
+		return prepared, err
+	}
+	request, inputs, _, err := a.workerDispatch(scope, proposal, taskID, records)
+	if err != nil {
+		return prepared, err
+	}
+	if request.Context != contextRef {
+		return prepared, fmt.Errorf("worker proposal differs from current context")
+	}
+	state, err := readAccepted[PlannerState](a, proposal, PlannerSchema)
+	if err != nil {
+		return prepared, err
 	}
 	index := slices.IndexFunc(state.Data.WorkerTasks, func(task WorkerTask) bool { return task.ID == taskID })
-	key := fmt.Sprintf("worker-%s-%d", p.last.AttemptID, index)
-	if err := p.r.Root().Decision(ctx, key+"-dispatch", "Dispatch one explicit worker task: "+taskID, inputs); err != nil {
+	key := fmt.Sprintf("worker-%s-%d", proposal.AttemptID, index)
+	return preparedWorker{request: request, inputs: inputs, key: key}, nil
+}
+
+func runWorker(ctx context.Context, r *engine.Run, s *engine.Scope, models sliceModels, prepared preparedWorker) (contract.Ref, error) {
+	request, inputs, key := prepared.request, prepared.inputs, prepared.key
+	if err := s.Decision(ctx, key+"-dispatch", "Dispatch one explicit worker task: "+request.Task.ID, inputs); err != nil {
 		return contract.Ref{}, err
 	}
 	model := models.Analysis
 	if request.Task.Responsibility == "evidence-only" {
 		model = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: models.FetchThinking}
 	}
-	ref, err := taskStep(ctx, p.r, p.r.Root(), model, request.Stage, key, request, WorkerSchema, inputs)
+	return taskStep(ctx, r, s, model, request.Stage, key, request, WorkerSchema, inputs)
+}
+
+func acceptWorker(ctx context.Context, r *engine.Run, scope Scope, proposal contract.Ref, accepted []contract.Ref, prepared preparedWorker, ref contract.Ref) error {
+	after := newAcceptance(ctx, r)
+	records, err := after.loadWorkerResults(scope, accepted)
 	if err != nil {
-		return contract.Ref{}, err
+		return err
 	}
-	after := newAcceptance(ctx, p.r)
-	records, err = after.loadWorkerResults(p.scope, p.workerResults)
+	expected, expectedInputs, sources, err := after.workerDispatch(scope, proposal, prepared.request.Task.ID, records)
 	if err != nil {
-		return contract.Ref{}, err
-	}
-	expected, expectedInputs, sources, err := after.workerDispatch(p.scope, *p.last, taskID, records)
-	if err != nil {
-		return contract.Ref{}, err
+		return err
 	}
 	result, err := readAccepted[WorkerResult](after, ref, WorkerSchema)
 	if err != nil {
-		return contract.Ref{}, err
+		return err
 	}
 	if err := checkWorkerResult(result, expected, expectedInputs, sources); err != nil {
-		return contract.Ref{}, fmt.Errorf("worker result acceptance: %w", err)
+		return fmt.Errorf("worker result acceptance: %w", err)
 	}
-	accepted := append(slices.Clone(p.workerResults), ref)
-	if err := p.r.Root().Decision(ctx, key+"-recorded", "Worker delivery accepted for Planner interpretation, not a verified conclusion", append(slices.Clone(inputs), ref)); err != nil {
-		return contract.Ref{}, err
-	}
-	p.workerResults, p.stopped = accepted, false
-	return ref, nil
+	return r.Root().Decision(ctx, prepared.key+"-recorded", "Worker delivery accepted for Planner interpretation, not a verified conclusion", append(slices.Clone(prepared.inputs), ref))
 }

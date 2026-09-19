@@ -1,6 +1,6 @@
 # Jira triage：workflow 與執行期適配
 
-移植已有 deadline、context usage、cleanup report、匿名 handoff／timeout recovery 適配，以及 `internal/workflows/triage` 的匿名 acquisition → intake → wiki → triage context／局部補缺、Planner 狀態交接與一般調查 worker 切片。**尚未註冊 `jira-triage` CLI workflow**，不是完整調查或真 Pi／provider／production 驗收。
+移植已有 deadline、context usage、cleanup report、匿名 handoff／timeout recovery 適配，以及 `internal/workflows/triage` 的匿名 acquisition → intake → wiki → triage context／局部補缺、Planner 狀態交接與一般調查 worker／adaptive loop 切片。**尚未註冊 `jira-triage` CLI workflow**，不是完整調查或真 Pi／provider／production 驗收。
 
 ## 責任邊界
 
@@ -131,7 +131,7 @@ Private `startPlanner` 從 exact committed supporting context（ready 或 needs-
 - Fresh session 明列上一份完整 Planner state、supporting context 及所有歷史 evidence owners，不靠舊對話、目錄掃描或複製 raw files。成功驗收及 Decision 持久化後才替換 caller 的 last state。無效 contract 或執行失敗使該 caller 停止，不交出失敗 candidate，也不自動 recovery；原始 fatal／取消／限額／cleanup 錯誤仍返回。
 - 匿名 RPC fixtures 覆蓋同 session 多 Step、fresh handoff、revised intake 歷史 owner、supporting query inputs、ready／incomplete、非法 Ref／schema／scope、失敗與會計。這不是正常 Pi 技能操作或指定 GLM live 驗證。
 
-`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；一般 worker 的單項接線見下節；自動批次、容量訊號觸發／timeout recovery、兩輪無進展 reframe、每三 dispatch cycles checkpoint、同版三方驗證與報告仍未實作。
+`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；一般 worker 與自動批次／reframe 接線見下節；容量訊號觸發／timeout recovery、每三 dispatch cycles 完整 checkpoint、同版三方驗證與報告仍未實作。
 
 ### Planner proposal → 既有 supporting 任務 → 新 Planner state
 
@@ -147,7 +147,7 @@ Private `plannerCaller.support` 只消費最後已驗收 Planner snapshot 的 pr
 
 失敗使 caller 停止並保留 last accepted Planner Ref；中途已提交的 intake/wiki/context 留在 run history，不自動作為 recovery checkpoint。沒有重試或重置同 run 額度，不吞 execution、cancel、fatal、限額與 cleanup failure。`support` 返回 fresh caller 尚不表示已有新 Planner snapshot，仍須成功執行其 `step`。
 
-匿名 localhost HTTP／既有 RPC subprocess 測試涵蓋三種派送、完整與不完整結果、多次 context 改版及 fresh handoff、proposal／selector／Refs 拒絕、歷史 owner、失敗停止與同 run 會計。它們使用真 engine/Store/validators，不是真 Agent skills、指定模型或 live 操作證明。這不是完整 adaptive loop；一般 worker 的獨立接線見下節。
+匿名 localhost HTTP／既有 RPC subprocess 測試涵蓋三種派送、完整與不完整結果、多次 context 改版及 fresh handoff、proposal／selector／Refs 拒絕、歷史 owner、失敗停止與同 run 會計。它們使用真 engine/Store/validators，不是真 Agent skills、指定模型或 live 操作證明。本 supporting caller 不是完整 adaptive loop；後者接線見下節。
 
 ### 一般調查 worker 與 Planner 結果交接
 
@@ -161,7 +161,21 @@ Worker 與既有 slice 共用 scope-aware `taskStep` 的 OpenSession／Step／30
 
 下一 Planner Step 明交 `worker_results`、原 proposal/context 及所有真正 owners，snapshot 必須保留 caller 已接受的完整結果清單。Fresh handoff 亦交付已接受但尚未納入下一 snapshot 的結果，不靠 session 記憶。Supporting context 改版及其各中間 Steps 保留必要 worker inputs，舊結果仍綁原 context；這不擴張 Context 本身的 evidence eligibility 或舊 supporting proposal basis 規則。結果保留不等於 Controller 認定仍適用。
 
-匿名測試沿原 Store/publication 與真 engine/Store/RPC drivers，驗單項／依賴交付、Planner 引用、fresh handoff、support 改版、錯綁定／ownership／UTC／schema 與 execution/cleanup failure；不替代 live 技能或模型驗收。M2 才接自動最多三個 ready workers、ledger 及 reframe；M3/M4 的容量／recovery、M5 驗證、M6 報告仍獨立。
+匿名測試沿原 Store/publication 與真 engine/Store/RPC drivers，驗單項／依賴交付、Planner 引用、fresh handoff、support 改版、錯綁定／ownership／UTC／schema 與 execution/cleanup failure；不替代 live 技能或模型驗收。M2 的自動批次／ledger／reframe 見下節；M3/M4 的容量／recovery、M5 驗證、M6 報告仍獨立。
+
+### Adaptive 調查循環與獨立 wiki 重查
+
+Private `executeInvestigation` 明示獨立 Planner model 與 worker models，接既有 committed context 後由 persistent Planner 的 `adapt` 循環接續。Agent 明列 `workers/support/wiki/reframe/plan/yield` action 與理由；Go 驗收契約後呼叫既有原語，不從問題或 assessment 文字猜下一步。`yield` 僅交 accepted investigation state，不是 verified claim、FinalSelection 或最終報告。第一次缺資料不自動結案，無可行授權路徑的原因與 gaps 由 Agent 交代。
+
+`workReady` 在呼叫 `Parallel` 前依已接受結果解析依賴，按宣告序最多挑三項；live Planner 另占 slot。批次內尚未完成的工作不解除同批依賴；無 ready task 時明交 Planner feedback，不把 hard cap 當 queue，也不自行推論應 blocked。Branches 不並行修改 Planner caller，全部 join 後依宣告序驗收並交付結果。Failure/cancel/cleanup 與原會計保留；半批 committed outputs 不當新 Planner checkpoint。
+
+可選 `ledger` 擴充既有完整 hypotheses/pending/worker tasks/results，adaptive caller 必須交它。`consumed_batch` 精確對照新交付結果；一輪只在一批 worker 結果交回後的 Planner 更新增加。`changes` 是 Agent 明報的 hypothesis ID、狀態變更說明、理由與 basis，沒有固定 hypothesis status taxonomy；Go 只驗 ID／Refs／echo 與計數，不比較 assessment、結果大小、查詢成功或真假。普通 plan/support/wiki Step、換 session 不增加 worker round，不當作假說進展。
+
+連兩輪無明報進展要求 `reframe`（無可行路徑的明列 yield 仍保留 gaps），方向及新搜尋詞由 Agent 決定。`no_progress` 不因 wiki 完成或換 session 歸零；獨立 `reframe_round/reframe_streak` 只記已交付 reframe wiki 的機械邊界，供下一段兩輪檢查，不把重查本身當進展。
+
+調查期 wiki task 綁定 proposal/context/task ID/inputs，沿原 WikiSearch/completeness，保存 terms、previous_terms、理由及真正 evidence owners。新搜尋以獨立 `wiki_results` Ref 明交 Planner／worker／support／fresh handoff，不塞進 ready context 的舊 resolve、不重抓 intake、不改寫舊 `Context.Wiki`。歷史搜尋按自己的 intake/binding 重驗；新 partial/unavailable/not-run gaps 不得用旧 context 的 complete 遮蔽，runtime worker 仍受必要 wiki 完整性前提限制。Terms echo／明列變更是任務驗收，不證明搜尋詞語義不同或 wiki pattern 能支持本次根因。
+
+匿名同一 RPC driver 覆蓋三 worker 加 Planner、逆序完成／有序交付、依賴批次、no-ready feedback、明報進展／兩輪 reframe、wiki partial 與歷史 owners、獨立模型、support/handoff、branch 失敗／取消／cleanup／半提交與會計。沒有新 driver、scheduler、任意總輪數／查詢次數 cap 或 crash resume；M3+ 與真模型／技能／產品入口驗收仍未完成。歷史 validation 的 raw evidence 重讀成本尚未完成容量量測，不能把匿名情境通過當作高負載保證。
 
 ### 同一次驗收內的讀取重用
 
@@ -190,6 +204,6 @@ go test -p 1 -count=1 ./internal/workflows/triage ./internal/runtime ./internal/
 
 完整回歸與發布方法見 [VERIFICATION](VERIFICATION.md)。既有 shared-discovery 的 parent pid／`.recovering`／ownership gate 保留，屬於 runtime 對自有 process 的安全責任，不因 Agent 操作規則採軟性提示而取消。
 
-局部補取、完整任務內 inventory 更新，以及 identity/time supporting-source／query 工作紀錄已有上述 private 匿名切片；Planner 已能以受驗收 proposal 派送上述既有 supporting 任務並接回新版規劃狀態。後續主線依 [Workflow 重用與 refactor 計畫](WORKFLOW-REUSE.md) 的 R1–R4 前置 gate 收斂共用機制，再按 M2–M7 接 adaptive loop、checkpoint/recovery、三方驗證與報告；M1 一般 worker 的單項接線如上，不為每個 milestone 新建 session、Store、reader、scheduler 或 test host。已完成的 supporting/state/handoff/讀取去重/測試分層不重做。真 Agent 技能操作與模型 live 驗收保持獨立未驗 gate，不是目前可自行啟動的下一步。不以新增 executable 代替，也不將第一次缺欄位當作結案。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
+局部補取、完整任務內 inventory 更新，以及 identity/time supporting-source／query 工作紀錄已有上述 private 匿名切片；Planner 已能以受驗收 proposal 派送上述既有 supporting 任務並接回新版規劃狀態。後續主線依 [Workflow 重用與 refactor 計畫](WORKFLOW-REUSE.md) 的 R1–R4 前置 gate 收斂共用機制，再按 M3–M7 接 checkpoint/recovery、三方驗證與報告；M1 worker 與 M2 adaptive loop 的 private 匿名接線如上，不為每個 milestone 新建 session、Store、reader、scheduler 或 test host。已完成的 supporting/state/handoff/讀取去重/測試分層不重做。真 Agent 技能操作與模型 live 驗收保持獨立未驗 gate，不是目前可自行啟動的下一步。不以新增 executable 代替，也不將第一次缺欄位當作結案。真 ticket／環境／可查範圍須由使用者指定，不能以匿名 fixtures 代替真 Pi、指定模型或外部系統驗收。
 
 不提供 OS sandbox、任意 detached 子孫清理、crash resume、exactly-once 或外部副作用 rollback；保留 [DESIGN](../DESIGN.md) 的既有非保證範圍。

@@ -76,13 +76,14 @@ type Evidence struct {
 }
 
 type WikiSearch struct {
-	Intake  contract.Ref `json:"intake"`
-	Queries []string     `json:"queries"`
-	Scope   string       `json:"scope"`
-	Status  string       `json:"status"`
-	Pages   []Source     `json:"pages"`
-	Search  Source       `json:"search"`
-	Gaps    []string     `json:"gaps"`
+	Task    *WikiTaskBinding `json:"task,omitempty"`
+	Intake  contract.Ref     `json:"intake"`
+	Queries []string         `json:"queries"`
+	Scope   string           `json:"scope"`
+	Status  string           `json:"status"`
+	Pages   []Source         `json:"pages"`
+	Search  Source           `json:"search"`
+	Gaps    []string         `json:"gaps"`
 }
 
 type Fact struct {

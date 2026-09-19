@@ -132,16 +132,20 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 	if work == nil {
 		return nil, fmt.Errorf("supporting dispatch requires structured supporting_work, not pending text")
 	}
+	sources := map[contract.Ref][]file{}
+	for _, record := range records {
+		maps.Copy(sources, record.sources)
+	}
+	sources, err = beforeAcceptance.wikiSources(p.scope, sources, p.wikiResults, records)
+	if err != nil {
+		return nil, err
+	}
 	if err := p.close(ctx); err != nil {
 		return nil, err
 	}
 	key := "supporting-" + p.last.AttemptID
 	if err := p.r.Root().Decision(ctx, key+"-dispatch", "Accepted structured supporting task: "+work.Kind, []contract.Ref{*p.last, h.ref}); err != nil {
 		return nil, err
-	}
-	sources := map[contract.Ref][]file{}
-	for _, record := range records {
-		maps.Copy(sources, record.sources)
 	}
 	before := ContextResult{Intake: h.value.Intake, Wiki: h.value.Wiki, Context: h.ref, Ready: h.value.Readiness == "ready"}
 	var after ContextResult
@@ -165,5 +169,5 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 	if err := p.r.Root().Decision(ctx, key+"-recorded", "Supporting result accepted for Planner reassessment, not a verified claim or final report", []contract.Ref{*p.last, before.Context, after.Context}); err != nil {
 		return nil, err
 	}
-	return openPlannerWithResults(ctx, p.r, p.scope, p.model, after.Context, p.last, p.workerResults)
+	return openPlannerWithEvidence(ctx, p.r, p.scope, p.model, after.Context, p.last, p.workerResults, p.wikiResults)
 }

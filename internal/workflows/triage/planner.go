@@ -19,15 +19,18 @@ const PlannerSchema = "triage.planner.v1"
 // dispatch authorization, verified claim, report or crash-resume checkpoint.
 // Assessments and requirements are agent reasoning, never Go verdicts.
 type PlannerState struct {
-	Context        contract.Ref        `json:"context"`
-	Previous       *contract.Ref       `json:"previous"`
-	Hypotheses     []PlannerHypothesis `json:"hypotheses"`
-	Pending        []PlannerQuestion   `json:"pending"`
-	Gaps           []string            `json:"gaps"`
-	Rationale      string              `json:"rationale"`
-	SupportingWork *SupportingWork     `json:"supporting_work,omitempty"`
-	WorkerTasks    []WorkerTask        `json:"worker_tasks,omitempty"`
-	WorkerResults  []contract.Ref      `json:"worker_results,omitempty"`
+	Context        contract.Ref           `json:"context"`
+	Previous       *contract.Ref          `json:"previous"`
+	Hypotheses     []PlannerHypothesis    `json:"hypotheses"`
+	Pending        []PlannerQuestion      `json:"pending"`
+	Gaps           []string               `json:"gaps"`
+	Rationale      string                 `json:"rationale"`
+	SupportingWork *SupportingWork        `json:"supporting_work,omitempty"`
+	WorkerTasks    []WorkerTask           `json:"worker_tasks,omitempty"`
+	WorkerResults  []contract.Ref         `json:"worker_results,omitempty"`
+	WikiTask       *InvestigationWikiTask `json:"wiki_task,omitempty"`
+	WikiResults    []contract.Ref         `json:"wiki_results,omitempty"`
+	Ledger         *InvestigationLedger   `json:"ledger,omitempty"`
 }
 
 type PlannerHypothesis struct {
@@ -59,6 +62,9 @@ type plannerCaller struct {
 	session       string
 	stopped       bool
 	workerResults []contract.Ref
+	wikiResults   []contract.Ref
+	adaptive      bool
+	adaptiveNote  string
 }
 
 func startPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime.ModelSpec, contextRef contract.Ref) (*plannerCaller, error) {
@@ -70,6 +76,10 @@ func openPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime.
 }
 
 func openPlannerWithResults(ctx context.Context, r *engine.Run, scope Scope, model runtime.ModelSpec, contextRef contract.Ref, previous *contract.Ref, accepted []contract.Ref) (*plannerCaller, error) {
+	return openPlannerWithEvidence(ctx, r, scope, model, contextRef, previous, accepted, nil)
+}
+
+func openPlannerWithEvidence(ctx context.Context, r *engine.Run, scope Scope, model runtime.ModelSpec, contextRef contract.Ref, previous *contract.Ref, accepted, wikiResults []contract.Ref) (*plannerCaller, error) {
 	a := newAcceptance(ctx, r)
 	records, err := a.loadWorkerResults(scope, accepted)
 	if err != nil {
@@ -77,6 +87,9 @@ func openPlannerWithResults(ctx context.Context, r *engine.Run, scope Scope, mod
 	}
 	h, err := a.loadContextHistory(scope, contextRef)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := a.wikiSources(scope, h.sources, wikiResults, records); err != nil {
 		return nil, err
 	}
 	// Revalidate the supplied chain rather than trusting an in-memory summary.
@@ -95,6 +108,7 @@ func openPlannerWithResults(ctx context.Context, r *engine.Run, scope Scope, mod
 		ref = p.Data.Previous
 	}
 	var prior *contract.Ref
+	adaptive := false
 	for i := len(chain) - 1; i >= 0; i-- {
 		state, err := readAccepted[PlannerState](a, chain[i], PlannerSchema)
 		if err != nil {
@@ -110,6 +124,10 @@ func openPlannerWithResults(ctx context.Context, r *engine.Run, scope Scope, mod
 		if err := a.checkPlannerWithWorkers(chain[i], owner, prior, records); err != nil {
 			return nil, err
 		}
+		if len(state.Data.WikiResults) > len(wikiResults) || !slices.Equal(state.Data.WikiResults, wikiResults[:len(state.Data.WikiResults)]) {
+			return nil, fmt.Errorf("planner wiki results differ from accepted history")
+		}
+		adaptive = state.Data.Ledger != nil
 		prior = &chain[i]
 	}
 	if err := a.checkPlannerContextChange(h, prior); err != nil {
@@ -119,7 +137,7 @@ func openPlannerWithResults(ctx context.Context, r *engine.Run, scope Scope, mod
 	if err != nil {
 		return nil, err
 	}
-	return &plannerCaller{r: r, scope: scope, model: model, history: h, handle: handle, last: prior, workerResults: slices.Clone(accepted)}, nil
+	return &plannerCaller{r: r, scope: scope, model: model, history: h, handle: handle, last: prior, workerResults: slices.Clone(accepted), wikiResults: slices.Clone(wikiResults), adaptive: adaptive}, nil
 }
 
 func checkPlanner(ctx context.Context, r *engine.Run, ref contract.Ref, h contextHistory, previous *contract.Ref) error {
@@ -146,6 +164,10 @@ func (a *acceptance) checkPlannerWithWorkers(ref contract.Ref, h contextHistory,
 	if err != nil {
 		return err
 	}
+	sources, err = a.wikiSources(h.value.Scope, sources, v.WikiResults, records)
+	if err != nil {
+		return err
+	}
 	planning := h
 	planning.sources = sources
 	if err := checkPlannerSnapshot(v, planning); err != nil {
@@ -164,7 +186,10 @@ func (a *acceptance) checkPlannerWithWorkers(ref contract.Ref, h contextHistory,
 			return fmt.Errorf("planner cannot drop or reorder prior worker results")
 		}
 	}
-	return checkWorkerTasks(v, h, sources, records)
+	if err := checkWorkerTasks(v, h, sources, records); err != nil {
+		return err
+	}
+	return a.checkInvestigation(v, h, sources)
 }
 
 func checkPlannerSnapshot(v PlannerState, h contextHistory) error {
@@ -226,11 +251,26 @@ func (p *plannerCaller) step(ctx context.Context) (contract.Ref, error) {
 		p.stopped = true
 		return contract.Ref{}, err
 	}
+	sources, err = a.wikiSources(p.scope, sources, p.wikiResults, records)
+	if err != nil {
+		p.stopped = true
+		return contract.Ref{}, err
+	}
 	inputs = appendSourceInputs(inputs, sources)
+	requirements := plannerRequirements
+	if p.adaptive {
+		requirements += "\n\n" + adaptiveRequirements
+	}
 	task := struct {
 		stageTask
-		WorkerResults []contract.Ref `json:"worker_results"`
-	}{stageTask{Stage: "planner", Scope: p.scope, Previous: p.last, Gaps: p.history.value.Gaps, Requirements: plannerRequirements}, slices.Clone(p.workerResults)}
+		WorkerResults []contract.Ref  `json:"worker_results"`
+		WikiResults   *[]contract.Ref `json:"wiki_results,omitempty"`
+		AdaptiveNote  string          `json:"adaptive_note,omitempty"`
+	}{stageTask{Stage: "planner", Scope: p.scope, Previous: p.last, Gaps: p.history.value.Gaps, Requirements: requirements}, slices.Clone(p.workerResults), nil, p.adaptiveNote}
+	if p.adaptive {
+		wikiResults := append([]contract.Ref{}, p.wikiResults...)
+		task.WikiResults = &wikiResults
+	}
 	if task.WorkerResults == nil {
 		task.WorkerResults = []contract.Ref{}
 	}
@@ -238,6 +278,7 @@ func (p *plannerCaller) step(ctx context.Context) (contract.Ref, error) {
 	if err != nil {
 		return contract.Ref{}, err
 	}
+	adaptive := p.adaptive
 	out, err := p.r.Root().Step(ctx, engine.StepSpec{Key: key, Session: p.handle, Prompt: string(prompt), Inputs: inputs, Output: contract.Spec{SchemaID: PlannerSchema}, Timeout: 30 * time.Minute})
 	if err == nil {
 		a = newAcceptance(ctx, p.r)
@@ -251,6 +292,12 @@ func (p *plannerCaller) step(ctx context.Context) (contract.Ref, error) {
 			if err == nil && !slices.Equal(state.Data.WorkerResults, p.workerResults) {
 				err = fmt.Errorf("planner worker_results differ from accepted deliveries")
 			}
+			if err == nil && (!slices.Equal(state.Data.WikiResults, p.wikiResults) || (p.adaptive && state.Data.Ledger == nil)) {
+				err = fmt.Errorf("planner requires exact wiki deliveries and adaptive ledger")
+			}
+			if err == nil && state.Data.Ledger != nil {
+				adaptive = true
+			}
 		}
 	}
 	if err == nil {
@@ -261,6 +308,7 @@ func (p *plannerCaller) step(ctx context.Context) (contract.Ref, error) {
 		return contract.Ref{}, err
 	}
 	p.last, p.session = &out.Output, out.Execution.SessionID
+	p.adaptive = adaptive
 	return out.Output, nil
 }
 
@@ -283,5 +331,5 @@ func (p *plannerCaller) handoff(ctx context.Context) (*plannerCaller, error) {
 	if err := p.close(ctx); err != nil {
 		return nil, err
 	}
-	return openPlannerWithResults(ctx, p.r, p.scope, p.model, p.history.ref, p.last, p.workerResults)
+	return openPlannerWithEvidence(ctx, p.r, p.scope, p.model, p.history.ref, p.last, p.workerResults, p.wikiResults)
 }
