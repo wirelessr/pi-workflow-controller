@@ -2,9 +2,7 @@ package review
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -472,19 +470,33 @@ func TestCheckProtocolSubprocess(t *testing.T) {
 func TestCheckCommittedResolverIntegration(t *testing.T) {
 	c, prepared, _, _, _, _ := checkFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 	dir := t.TempDir()
 	bridge := filepath.Join(dir, "bridge")
 	if err := os.Mkdir(bridge, 0700); err != nil {
 		t.Fatal(err)
 	}
-	listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	host, err := protocol.NewHost(ctx, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func(listener *net.TCPListener) { _ = listener.Close() }(listener)
-	deadline, _ := ctx.Deadline()
-	_ = listener.SetDeadline(deadline)
+	var run *engine.Run
+	var joined chan struct{}
+	t.Cleanup(func() {
+		if run != nil {
+			run.Cancel(engine.OriginControllerUser)
+		}
+		if err := host.Close(); err != nil {
+			t.Error(err)
+		}
+		if joined != nil {
+			select {
+			case <-joined:
+			case <-time.After(10 * time.Second):
+				t.Error("engine cleanup did not join")
+			}
+		}
+	})
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -493,8 +505,7 @@ func TestCheckCommittedResolverIntegration(t *testing.T) {
 	policy.RunTimeout = 25 * time.Second
 	policy.AttemptTimeout = 10 * time.Second
 	policy.Runtime.HealthInterval = time.Hour
-	var run *engine.Run
-	pi, err := runtime.New(runtime.Options{Executable: executable, Args: []string{"-test.run=^TestCheckProtocolSubprocess$", "--"}, Env: []string{"PWC_CHECK_PROTOCOL=1", "PWC_ENGINE_CONTROL=" + listener.Addr().String(), "GORACE=atexit_sleep_ms=0", "PI_CODING_AGENT_DIR=" + filepath.Join(dir, "agent")}, BridgeDir: bridge, Policy: policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return run.Observe(ctx, o) }})
+	pi, err := runtime.New(runtime.Options{Executable: executable, Args: []string{"-test.run=^TestCheckProtocolSubprocess$", "--"}, Env: []string{"PWC_CHECK_PROTOCOL=1", "PWC_ENGINE_CONTROL=" + host.Addr().String(), "GORACE=atexit_sleep_ms=0", "PI_CODING_AGENT_DIR=" + filepath.Join(dir, "agent")}, BridgeDir: bridge, Policy: policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return run.Observe(ctx, o) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -607,40 +618,33 @@ func TestCheckCommittedResolverIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan engine.Report, 1)
-	joined := make(chan struct{})
+	joined = make(chan struct{})
 	go func() { defer close(joined); done <- run.Execute() }()
-	var conn net.Conn
-	t.Cleanup(func() {
-		run.Cancel(engine.OriginControllerUser)
-		if conn != nil {
-			_ = conn.Close()
-		}
+	next := func() protocol.Event {
+		t.Helper()
 		select {
-		case <-joined:
-		case <-time.After(10 * time.Second):
-			t.Error("engine cleanup did not join")
+		case event, ok := <-host.Events():
+			if !ok {
+				t.Fatal("control host closed")
+			}
+			if event.Err != nil {
+				t.Fatal(event.Err)
+			}
+			return event
+		case report := <-done:
+			t.Fatalf("engine ended before control: %+v", report)
+		case <-ctx.Done():
+			t.Fatalf("waiting for control: %v", context.Cause(ctx))
 		}
-	})
-	conn, err = listener.Accept()
-	if err != nil {
-		t.Fatal(err)
+		return protocol.Event{}
 	}
-	_ = conn.SetDeadline(deadline)
-	decoder, encoder := json.NewDecoder(conn), json.NewEncoder(conn)
-	var hello protocol.Control
-	if err := decoder.Decode(&hello); err != nil || hello.Type != "hello" {
-		t.Fatalf("hello: %+v %v", hello, err)
+	hello := next().Message
+	if hello.Type != "hello" {
+		t.Fatalf("hello: %+v", hello)
 	}
 	for n := 0; n < 8; n++ {
-		var message protocol.Control
-		if err := decoder.Decode(&message); err != nil {
-			select {
-			case report := <-done:
-				t.Fatalf("prompt: %v; report: %+v", err, report)
-			default:
-				t.Fatal(err)
-			}
-		}
+		event := next()
+		message := event.Message
 		if message.Type != "prompt" {
 			t.Fatalf("unexpected control %+v", message)
 		}
@@ -649,7 +653,7 @@ func TestCheckCommittedResolverIntegration(t *testing.T) {
 		if err := protocol.ReadJSON(message.RequestPath, &request); err != nil {
 			t.Fatal(err)
 		}
-		entries := []checkFile{}
+		entries := []contract.FileEntry{}
 		for id, raw := range payload.files {
 			kind := payload.kind[id]
 			prefix := "evidence"
@@ -658,15 +662,12 @@ func TestCheckCommittedResolverIntegration(t *testing.T) {
 			}
 			path := filepath.Join(prefix, id)
 			fixtureWrite(t, filepath.Join(filepath.Dir(message.CandidatePath), path), raw)
-			entries = append(entries, checkFile{ID: id, Kind: kind, Path: path})
+			entries = append(entries, contract.FileEntry{ID: id, Kind: kind, Path: path})
 		}
-		meta := struct {
-			contract.Identity
-			Version  int    `json:"version"`
-			SchemaID string `json:"schema_id"`
-		}{request.Identity, 1, request.Output.SchemaID}
-		fixtureWrite(t, message.CandidatePath, resourceTestJSON(t, map[string]any{"meta": meta, "data": payload.data, "files": entries}))
-		if err := encoder.Encode(protocol.Control{Type: "settle"}); err != nil {
+		if err := protocol.WriteEnvelope(message.CandidatePath, request, payload.data, entries); err != nil {
+			t.Fatal(err)
+		}
+		if err := event.Reply(protocol.Control{Type: "settle"}); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -1,4 +1,4 @@
-// Package protocol is a subprocess-only Pi RPC fixture shared by tests.
+// Package protocol provides subprocess and host Pi RPC fixtures shared by tests.
 // Production packages must not import it.
 package protocol
 
@@ -268,16 +268,22 @@ func WriteCandidate(message string) (string, string, error) {
 		}
 		data = Data{Value: previous.Data.Value + "/second", Source: ref.AttemptID}
 	}
+	return requestPath, candidatePath, WriteEnvelope(candidatePath, request, data, []contract.FileEntry{})
+}
+
+// WriteEnvelope writes exactly the declarations supplied by the fixture.
+// File contents, kinds, ordering and intentionally invalid cases stay with callers.
+func WriteEnvelope(path string, request contract.Request, data any, files []contract.FileEntry) error {
 	meta := struct {
 		contract.Identity
 		Version  int    `json:"version"`
 		SchemaID string `json:"schema_id"`
 	}{request.Identity, 1, request.Output.SchemaID}
-	raw, err := json.Marshal(map[string]any{"meta": meta, "data": data, "files": []any{}})
-	if err == nil {
-		err = os.WriteFile(candidatePath, raw, 0600)
+	raw, err := json.Marshal(map[string]any{"meta": meta, "data": data, "files": files})
+	if err != nil {
+		return err
 	}
-	return requestPath, candidatePath, err
+	return os.WriteFile(path, raw, 0600)
 }
 
 func ReadJSON(path string, value any) error {

@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -32,11 +30,9 @@ type workflowScenario struct {
 }
 
 type workflowControl struct {
-	conn    net.Conn
-	message protocol.Control
+	protocol.Event
 	request contract.Request
 	task    task
-	err     error
 }
 
 // Wrap only the runtime ownership boundary. All children still speak real RPC,
@@ -126,20 +122,15 @@ func (s *workflowSession) Close(ctx context.Context) (runtime.CleanupReport, err
 }
 
 type workflowFixture struct {
-	t            *testing.T
-	ctx          context.Context
-	run          *engine.Run
-	runtime      *workflowRuntime
-	events       chan workflowControl
-	done         chan engine.Report
-	joined       chan struct{}
-	acceptJoined chan struct{}
-	listener     *net.TCPListener
-	mu           sync.Mutex
-	conns        []net.Conn
-	readers      sync.WaitGroup
-	scenario     workflowScenario
-	hellos       map[string]protocol.Control
+	t        *testing.T
+	ctx      context.Context
+	run      *engine.Run
+	runtime  *workflowRuntime
+	host     *protocol.Host
+	done     chan engine.Report
+	joined   chan struct{}
+	scenario workflowScenario
+	hellos   map[string]protocol.Control
 }
 
 func newWorkflowFixture(t *testing.T, scenario workflowScenario) *workflowFixture {
@@ -156,29 +147,19 @@ func newWorkflowFixture(t *testing.T, scenario workflowScenario) *workflowFixtur
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	t.Cleanup(cancel)
-	listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	host, err := protocol.NewHost(ctx, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline, _ := ctx.Deadline()
-	if err := listener.SetDeadline(deadline); err != nil {
-		t.Fatal(err)
-	}
-	f := &workflowFixture{t: t, ctx: ctx, events: make(chan workflowControl, 32), done: make(chan engine.Report, 1), joined: make(chan struct{}), listener: listener, scenario: scenario, hellos: map[string]protocol.Control{}}
+	f := &workflowFixture{t: t, ctx: ctx, host: host, done: make(chan engine.Report, 1), joined: make(chan struct{}), scenario: scenario, hellos: map[string]protocol.Control{}}
 	// Install the lifeline before any Start, so even a failed assertion releases children.
 	t.Cleanup(func() {
 		if f.run != nil {
 			f.run.Cancel(engine.OriginControllerUser)
 		}
-		_ = listener.Close()
-		if f.acceptJoined != nil {
-			<-f.acceptJoined
+		if err := host.Close(); err != nil {
+			t.Error(err)
 		}
-		f.mu.Lock()
-		for _, conn := range f.conns {
-			_ = conn.Close()
-		}
-		f.mu.Unlock()
 		if f.run != nil {
 			select {
 			case <-f.joined:
@@ -186,7 +167,6 @@ func newWorkflowFixture(t *testing.T, scenario workflowScenario) *workflowFixtur
 				t.Error("workflow cleanup did not join")
 			}
 		}
-		f.readers.Wait()
 	})
 	definition := Definition()
 	definition.Policy.RunTimeout = 30 * time.Second
@@ -220,7 +200,7 @@ func newWorkflowFixture(t *testing.T, scenario workflowScenario) *workflowFixtur
 			t.Fatal(err)
 		}
 	}
-	pi, err := runtime.New(runtime.Options{Executable: executable, Args: []string{"-test.run=^TestCheckProtocolSubprocess$", "--"}, Env: []string{"PWC_CHECK_PROTOCOL=1", "PWC_ENGINE_MANUAL_CANDIDATE=1", "PWC_ENGINE_CONTROL=" + listener.Addr().String(), "PI_CODING_AGENT_DIR=" + filepath.Join(dir, "agent"), "GORACE=atexit_sleep_ms=0"}, BridgeDir: bridge, Policy: definition.Policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return f.run.Observe(ctx, o) }})
+	pi, err := runtime.New(runtime.Options{Executable: executable, Args: []string{"-test.run=^TestCheckProtocolSubprocess$", "--"}, Env: []string{"PWC_CHECK_PROTOCOL=1", "PWC_ENGINE_MANUAL_CANDIDATE=1", "PWC_ENGINE_CONTROL=" + host.Addr().String(), "PI_CODING_AGENT_DIR=" + filepath.Join(dir, "agent"), "GORACE=atexit_sleep_ms=0"}, BridgeDir: bridge, Policy: definition.Policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return f.run.Observe(ctx, o) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,47 +213,6 @@ func newWorkflowFixture(t *testing.T, scenario workflowScenario) *workflowFixtur
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.acceptJoined = make(chan struct{})
-	f.readers.Add(1)
-	go func() {
-		defer f.readers.Done()
-		defer close(f.acceptJoined)
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			f.mu.Lock()
-			f.conns = append(f.conns, conn)
-			f.mu.Unlock()
-			if err := conn.SetDeadline(deadline); err != nil {
-				f.events <- workflowControl{err: err}
-				return
-			}
-			f.readers.Add(1)
-			go func() {
-				defer f.readers.Done()
-				decoder := json.NewDecoder(conn)
-				for {
-					var m protocol.Control
-					if err := decoder.Decode(&m); err != nil {
-						if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
-							select {
-							case f.events <- workflowControl{err: err}:
-							case <-ctx.Done():
-							}
-						}
-						return
-					}
-					select {
-					case f.events <- workflowControl{conn: conn, message: m}:
-					case <-ctx.Done():
-						return
-					}
-				}
-			}()
-		}
-	}()
 	go func() { defer close(f.joined); f.done <- f.run.Execute() }()
 	return f
 }
@@ -281,12 +220,16 @@ func (f *workflowFixture) next(kind string) workflowControl {
 	f.t.Helper()
 	for {
 		select {
-		case event := <-f.events:
-			if event.err != nil {
-				f.t.Fatal(event.err)
+		case received, ok := <-f.host.Events():
+			if !ok {
+				f.t.Fatal("control host closed")
 			}
-			if event.message.Type == "hello" {
-				hello := event.message
+			event := workflowControl{Event: received}
+			if event.Err != nil {
+				f.t.Fatal(event.Err)
+			}
+			if event.Message.Type == "hello" {
+				hello := event.Message
 				if f.hellos[hello.SessionID].SessionID != "" {
 					f.t.Fatal("session reused")
 				}
@@ -298,11 +241,11 @@ func (f *workflowFixture) next(kind string) workflowControl {
 				f.hellos[hello.SessionID] = hello
 				continue
 			}
-			if event.message.Type != kind {
-				f.t.Fatalf("expected %s barrier, got %+v", kind, event.message)
+			if event.Message.Type != kind {
+				f.t.Fatalf("expected %s barrier, got %+v", kind, event.Message)
 			}
 			if kind == "prompt" {
-				if err := protocol.ReadJSON(event.message.RequestPath, &event.request); err != nil {
+				if err := protocol.ReadJSON(event.Message.RequestPath, &event.request); err != nil {
 					f.t.Fatal(err)
 				}
 				prompt := event.request.Prompt
@@ -329,28 +272,25 @@ func (f *workflowFixture) next(kind string) workflowControl {
 }
 func (f *workflowFixture) ack(event workflowControl, kind string) {
 	f.t.Helper()
-	if err := json.NewEncoder(event.conn).Encode(protocol.Control{Type: kind}); err != nil {
+	if err := event.Reply(protocol.Control{Type: kind}); err != nil {
 		f.t.Fatal(err)
 	}
 }
 func (f *workflowFixture) candidate(event workflowControl, data any, files map[string][]byte) {
 	f.t.Helper()
-	entries := []checkFile{}
+	entries := []contract.FileEntry{}
 	for id, raw := range files {
 		kind, prefix := "evidence", "evidence"
 		if id == "context" || id == "report" {
 			kind, prefix = "artifact", "artifacts"
 		}
 		path := filepath.Join(prefix, id)
-		fixtureWrite(f.t, filepath.Join(filepath.Dir(event.message.CandidatePath), path), raw)
-		entries = append(entries, checkFile{ID: id, Kind: kind, Path: path})
+		fixtureWrite(f.t, filepath.Join(filepath.Dir(event.Message.CandidatePath), path), raw)
+		entries = append(entries, contract.FileEntry{ID: id, Kind: kind, Path: path})
 	}
-	meta := struct {
-		contract.Identity
-		Version  int    `json:"version"`
-		SchemaID string `json:"schema_id"`
-	}{event.request.Identity, 1, event.request.Output.SchemaID}
-	fixtureWrite(f.t, event.message.CandidatePath, resourceTestJSON(f.t, map[string]any{"meta": meta, "data": data, "files": entries}))
+	if err := protocol.WriteEnvelope(event.Message.CandidatePath, event.request, data, entries); err != nil {
+		f.t.Fatal(err)
+	}
 }
 func workflowReadData[T any](t *testing.T, ref contract.Ref) T {
 	t.Helper()
@@ -561,10 +501,10 @@ func (f *workflowFixture) validate(event workflowControl) Validated {
 	if f.scenario.renderer {
 		f.candidate(event, v, nil)
 		script := filepath.Join(filepath.Dir(event.task.Skill), "scripts", "render_report.py")
-		if output, err := runReport(f.t, script, event.message.RequestPath, event.message.CandidatePath); err != nil {
+		if output, err := runReport(f.t, script, event.Message.RequestPath, event.Message.CandidatePath); err != nil {
 			f.t.Fatalf("renderer at Pi candidate boundary: %v\n%s", err, output)
 		}
-		v = workflowReadData[Validated](f.t, contract.Ref{Path: event.message.CandidatePath})
+		v = workflowReadData[Validated](f.t, contract.Ref{Path: event.Message.CandidatePath})
 	} else {
 		f.candidate(event, v, map[string][]byte{"report": reportTestArtifact(f.t, p, v)})
 	}

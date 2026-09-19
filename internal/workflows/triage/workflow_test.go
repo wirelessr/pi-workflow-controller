@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,7 +16,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -443,12 +441,7 @@ func writeCandidate(t *testing.T, m protocol.Control, req contract.Request, data
 
 func writeEnvelope(t *testing.T, m protocol.Control, req contract.Request, data any, entries []file) {
 	t.Helper()
-	meta := struct {
-		contract.Identity
-		Version  int    `json:"version"`
-		SchemaID string `json:"schema_id"`
-	}{req.Identity, 1, req.Output.SchemaID}
-	if err := os.WriteFile(m.CandidatePath, testJSON(map[string]any{"meta": meta, "data": data, "files": entries}), 0600); err != nil {
+	if err := protocol.WriteEnvelope(m.CandidatePath, req, data, entries); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -2188,47 +2181,10 @@ func TestIntakeToContext(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			host, err := protocol.NewHost(ctx, 16)
 			if err != nil {
 				t.Fatal(err)
 			}
-			type event struct {
-				conn net.Conn
-				m    protocol.Control
-			}
-			events := make(chan event, 16)
-			var readers sync.WaitGroup
-			var mu sync.Mutex
-			var conns []net.Conn
-			acceptDone := make(chan struct{})
-			go func() {
-				defer close(acceptDone)
-				for {
-					c, err := listener.Accept()
-					if err != nil {
-						return
-					}
-					mu.Lock()
-					conns = append(conns, c)
-					mu.Unlock()
-					readers.Add(1)
-					go func() {
-						defer readers.Done()
-						dec := json.NewDecoder(c)
-						for {
-							var m protocol.Control
-							if err := dec.Decode(&m); err != nil {
-								return
-							}
-							select {
-							case events <- event{c, m}:
-							case <-ctx.Done():
-								return
-							}
-						}
-					}()
-				}
-			}()
 			var r *engine.Run
 			done := make(chan struct{})
 			var report engine.Report
@@ -2239,22 +2195,19 @@ func TestIntakeToContext(t *testing.T) {
 			var expectedPlanner PlannerState
 			t.Cleanup(func() {
 				cancel()
-				_ = listener.Close()
-				<-acceptDone
-				mu.Lock()
-				for _, c := range conns {
-					_ = c.Close()
-				}
-				mu.Unlock()
 				if r != nil {
 					r.Cancel(engine.OriginControllerUser)
+				}
+				if err := host.Close(); err != nil {
+					t.Errorf("fixture host close: %v", err)
+				}
+				if r != nil {
 					select {
 					case <-done:
 					case <-time.After(8 * time.Second):
 						t.Error("fixture run did not join")
 					}
 				}
-				readers.Wait()
 			})
 			policy := slicePolicy()
 			policy.RunTimeout = time.Nanosecond
@@ -2282,7 +2235,7 @@ func TestIntakeToContext(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pi, err := runtime.New(runtime.Options{Executable: exe, Args: []string{"-test.run=^TestTriageProtocolSubprocess$", "--"}, Env: []string{"PWC_TRIAGE_PROTOCOL=1", "PWC_ENGINE_MANUAL_CANDIDATE=1", "PWC_ENGINE_CONTROL=" + listener.Addr().String(), "GORACE=atexit_sleep_ms=0"}, BridgeDir: bridge, Policy: policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return r.Observe(ctx, o) }})
+			pi, err := runtime.New(runtime.Options{Executable: exe, Args: []string{"-test.run=^TestTriageProtocolSubprocess$", "--"}, Env: []string{"PWC_TRIAGE_PROTOCOL=1", "PWC_ENGINE_MANUAL_CANDIDATE=1", "PWC_ENGINE_CONTROL=" + host.Addr().String(), "GORACE=atexit_sleep_ms=0"}, BridgeDir: bridge, Policy: policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return r.Observe(ctx, o) }})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2582,28 +2535,34 @@ func TestIntakeToContext(t *testing.T) {
 					break loop
 				case <-ctx.Done():
 					t.Fatal("slice exceeded test deadline")
-				case e := <-events:
-					if e.m.Type == "hello" {
-						if _, ok := hellos[e.m.SessionID]; ok {
+				case e, ok := <-host.Events():
+					if !ok {
+						t.Fatal("fixture host events closed")
+					}
+					if e.Err != nil {
+						t.Fatalf("fixture host event: %v", e.Err)
+					}
+					if e.Message.Type == "hello" {
+						if _, ok := hellos[e.Message.SessionID]; ok {
 							t.Fatal("session reused")
 						}
 						for _, s := range r.Snapshot().Sessions {
-							if s.Identity.SessionID != "" && s.Identity.SessionID != e.m.SessionID && s.State != "Closed" {
+							if s.Identity.SessionID != "" && s.Identity.SessionID != e.Message.SessionID && s.State != "Closed" {
 								t.Fatalf("new stage before old cleanup: %+v", s)
 							}
 						}
-						hellos[e.m.SessionID] = e.m
+						hellos[e.Message.SessionID] = e.Message
 						continue
 					}
-					if (tc.name == "cancel" || tc.name == "attempt-timeout" || strings.HasSuffix(tc.name, "-cancel") || strings.HasSuffix(tc.name, "-timeout")) && e.m.Type == "held" {
+					if (tc.name == "cancel" || tc.name == "attempt-timeout" || strings.HasSuffix(tc.name, "-cancel") || strings.HasSuffix(tc.name, "-timeout")) && e.Message.Type == "held" {
 						continue
 					}
-					if e.m.Type != "prompt" {
-						t.Fatalf("unexpected control %s", e.m.Type)
+					if e.Message.Type != "prompt" {
+						t.Fatalf("unexpected control %s", e.Message.Type)
 					}
 					count++
 					var req contract.Request
-					if err := protocol.ReadJSON(e.m.RequestPath, &req); err != nil {
+					if err := protocol.ReadJSON(e.Message.RequestPath, &req); err != nil {
 						t.Fatal(err)
 					}
 					var task stageTask
@@ -2653,7 +2612,7 @@ func TestIntakeToContext(t *testing.T) {
 							t.Fatal("intake inputs")
 						}
 						if acquiring {
-							intake, acquiredFiles, err = acquireIntake(ctx, filepath.Dir(e.m.CandidatePath), scope, acquisition)
+							intake, acquiredFiles, err = acquireIntake(ctx, filepath.Dir(e.Message.CandidatePath), scope, acquisition)
 							if err != nil {
 								t.Fatal(err)
 							}
@@ -2891,9 +2850,9 @@ func TestIntakeToContext(t *testing.T) {
 						}
 					}
 					if acquiring && count == 1 {
-						writeEnvelope(t, e.m, req, data, acquiredFiles)
+						writeEnvelope(t, e.Message, req, data, acquiredFiles)
 					} else {
-						writeCandidate(t, e.m, req, data, files, tc.name == "file-escape")
+						writeCandidate(t, e.Message, req, data, files, tc.name == "file-escape")
 					}
 					ack := "settle"
 					if task.Stage == "planner" && plannerSteps == 2 {
@@ -2947,7 +2906,7 @@ func TestIntakeToContext(t *testing.T) {
 							}
 						}
 					}
-					if err := json.NewEncoder(e.conn).Encode(protocol.Control{Type: ack}); err != nil {
+					if err := e.Reply(protocol.Control{Type: ack}); err != nil {
 						t.Fatal(err)
 					}
 				}

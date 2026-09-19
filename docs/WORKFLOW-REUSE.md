@@ -2,7 +2,7 @@
 
 本文件落實 [專案憲法第七條](../AGENTS.md)，是開發、review 與接手的必要入口。規範共用機制的收斂順序，不新增 WorkflowBase、DSL、工具權限框架或外部 workflow config。
 
-**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，R2 已提供共用 report 判定，R3 已共用 publication 投影與 bounded-read loop，實際入口見下表；R4 的目標入口尚待實作／遷移，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
+**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，R2 已提供共用 report 判定，R3 已共用 publication 投影與 bounded-read loop，R4 已遷移指定 host transport consumers，實際入口見下表，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
 
 ## 1. 單一規範來源與接手 gate
 
@@ -28,7 +28,7 @@
 | 嚴格收尾確認 | `runtime.CleanupReport.ConfirmsLocalClose(expectedSessionID)` | R2 已接線：triage slice／Planner 共用；caller 先處理 CloseSessionReport error，普通 CloseSession 不改義 |
 | Envelope／file consumer | `contract.FileEntry`／`Publication[T]`／`DecodePublication[T]`；review `readReviewContract`、triage `readAccepted` 經 `engine.ReadContract` 後消費 | R3 已接線：只共用投影與 fresh decode，不新增授權；review ID 索引、triage lineage/cache 留 caller |
 | Published／checkout 二次讀檔 | `contract.ReadBounded`；review `readCheckFile`／`readPublishedFile`、triage `rawFile` | R3 已接線：共用 bounded loop，root/open/identity 與錯誤政策留 adapter；Store `copyStable` 的雙 digest 不合併 |
-| RPC 測試 transport | `testutil/protocol` 已有 child Serve／Control；host pumps 分散在 review／triage tests | R4：共用 host lifecycle 與 envelope writer |
+| RPC 測試 transport | `testutil/protocol.NewHost`／`Host.Events`／`Event.Reply`／`Host.Close` 及 `WriteEnvelope` | R4 已接線：review workflow/check integration、triage RPC driver 共用 host；原 domain scenarios 與 Store-only 分層不變 |
 | Skill extraction／report renderer | 目前只有 review 的 `ExtractSkills` 與 `render_report.py` | R5：第二個實際 consumer 出現時才抽機械部分 |
 
 上述相對路徑均位於 `internal/`。角色模型、PR Pin、code-location Evidence、investigation Ref/file Evidence、Source status 及 verdict 不屬於通用登記項，保留 workflow-specific 語義。
@@ -98,6 +98,10 @@ R3 是單一實作／review／commit 單元，以下兩組驗收要求須一起�
 **完成出口：** committed-file 消費保留明確授權入口，raw checkout reader 保留適用策略；只抽真正同質的底層讀取，保留需要不同的 adapter 並說明理由。驗 path／symlink／FIFO／identity change／size／取消／I/O failure，補 source/evidence 原有回歸與 I/O 成本比較。不得降低 Store 保證，也不得以增加不必要的整檔重讀換取表面 DRY。
 
 ### R4：共用 host RPC test transport
+
+**已實作接線：** Host 擷取原非同步 listener／per-peer decoder／fan-in 機械，保有 fixture deadline、原 peer 的序列化 Reply 與冪等 Close。Close 先解除 queue 發送、停止接受，再關自有 sockets 並 join pumps；不代替 caller Cancel／join 真 engine，也不代表 process Wait。非 EOF／net.ErrClosed 的 decode/accept errors 同時保留給 Events 與 Close，取消或 queue 滿不再靜默遺失。Triage control socket 新增 fixture deadline 是明列的測試邊界改變，不是產品 timeout 政策。
+
+三個指定 consumers 已移除私有 host pumps／connections／join 副本。WriteEnvelope 只寫 caller 明列的 meta/data/files，不猜檔案種類、不驗授權、不更改 nil entries，允許原故障 cases 宣告不合法內容。正常 child WriteCandidate 也使用它。Engine 的同步 handoff／worker-limiter socket tests 保留逐 socket Accept/Decode barriers，runtime fixtures 使用不同 control/HTTP 協定，兩者不強制改成 eager fan-in。
 
 **目標與責任層：** 擴充既有 `internal/testutil/protocol`，共用 listener、event pump、connection ownership、deadline、cancel/close/join 及明列 file entries 的 envelope writer。
 
