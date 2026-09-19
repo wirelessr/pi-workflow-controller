@@ -2,6 +2,27 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pi-workflow-controller.local/schemas/triage/common.v1.json",
   "$defs": {
+    "supporting_query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "filter", "from", "to", "basis", "status", "outcome", "evidence"],
+      "properties": {
+        "source": {"type": "string"},
+        "filter": {"type": "string"},
+        "from": {"type": "string"},
+        "to": {"type": "string"},
+        "basis": {
+          "type": "array",
+          "items": {"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"}
+        },
+        "status": {"enum": ["complete", "partial", "unavailable"]},
+        "outcome": {"type": "string"},
+        "evidence": {
+          "type": "array",
+          "items": {"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"}
+        }
+      }
+    },
     "source": {
       "type": "object",
       "additionalProperties": false,

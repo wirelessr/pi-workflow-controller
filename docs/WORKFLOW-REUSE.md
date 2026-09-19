@@ -132,6 +132,8 @@ R1–R4 的匿名驗收與 consumer 遷移完成後才啟動 M1，不因某個 h
 | M6 最終報告 | M5；本單元完成前必須閉合R5 | Result/FinalSelection/FinalDelivery、共用 renderer 機械部分 | 以實際triage report consumer啟動R5，完成deterministic report資料/模板/同版驗證binding；不加writer Agent、drafts/發布或final registry |
 | M7 產品入口／完整驗收 | M6、R1 | 既有 registry、Definition、RoleSpec、共用 startup | 明確模型/授權scope/live驗收；不再造launcher/權限框架，不猜GLM ID或默換模型 |
 
+M1 已接入 `plannerCaller.work` 的單項明列 worker 派工與 Planner 結果交接；`taskStep` 供既有 slice adapter 與 worker 共用，原 session/Step/strict-close 語義不另造。`worker_results` 明交 exact refs 及真正 owners，fresh handoff／support 改版不重綁歷史結果；原 query checker/schema 等義共用。這不是自動批次、產品入口或 live 驗收，具體 contracts 見 [Jira triage](JIRA-TRIAGE.md)。逐次 review/gates/commit 狀態仍在外部工程紀錄。
+
 M3 保存當時已有的工作結果／feedback；M5 新增 verifier 時，同步擴充可重建 state 與恢復驗收。不得把尚未存在的角色填成占位資料就宣稱完成，也不得要求 M4 先完成 M5 才能提供的 verifier，形成相依循環。
 
 依賴表示本輪預設施工順序，不是宣稱每項都是框架缺口。要拆分或調整順序，先說明具體獨立性、維持哪些保證並取得確認，再更新此表，不讓接手者自行解讀成跳過。

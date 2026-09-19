@@ -1,0 +1,364 @@
+package triage
+
+import (
+	"context"
+	"fmt"
+	"maps"
+	"slices"
+
+	"pi-workflow-controller/internal/contract"
+	"pi-workflow-controller/internal/runtime"
+)
+
+const WorkerSchema = "triage.worker.v1"
+
+// A task belongs to its committed Planner proposal and context. Dependencies
+// name stable task IDs; only the Controller resolves them to accepted results.
+type WorkerTask struct {
+	ID             string        `json:"id"`
+	SourceKind     string        `json:"source_kind"`
+	Responsibility string        `json:"responsibility"`
+	Question       string        `json:"question"`
+	Requirements   []string      `json:"requirements"`
+	Basis          []Evidence    `json:"basis"`
+	DependsOn      []string      `json:"depends_on"`
+	Search         *WorkerSearch `json:"search"`
+}
+
+type WorkerSearch struct {
+	Source string     `json:"source"`
+	Filter string     `json:"filter"`
+	From   string     `json:"from"`
+	To     string     `json:"to"`
+	Basis  []Evidence `json:"basis"`
+}
+
+// Status describes delivery, never whether a hypothesis is true. Local evidence
+// retains this result as its owner when a later Planner or worker cites it.
+type WorkerResult struct {
+	Proposal contract.Ref      `json:"proposal"`
+	Context  contract.Ref      `json:"context"`
+	TaskID   string            `json:"task_id"`
+	Work     string            `json:"work"`
+	Status   string            `json:"status"`
+	Inputs   []contract.Ref    `json:"inputs"`
+	Evidence []Evidence        `json:"evidence"`
+	Queries  []SupportingQuery `json:"queries"`
+	Analysis []Fact            `json:"analysis"`
+	Gaps     []string          `json:"gaps"`
+	Next     []PlannerQuestion `json:"next"`
+}
+
+type workerRequest struct {
+	Stage        string         `json:"stage"`
+	Scope        Scope          `json:"scope"`
+	Proposal     contract.Ref   `json:"proposal"`
+	Context      contract.Ref   `json:"context"`
+	Task         WorkerTask     `json:"task"`
+	Dependencies []contract.Ref `json:"dependencies"`
+	Requirements string         `json:"requirements"`
+}
+
+const workerRequirements = `Load the relevant existing skills and use their normal tools for this complete authorized task. Do not create agents, select models or dispatch other work. Respect source_kind, responsibility, scope and task completion requirements. Evidence-only work acquires/extracts evidence and diagnostics, with an empty analysis array; analysis work may interpret supplied and newly acquired evidence. Evidence truth, applicability, hypotheses and next questions are your reasoning, not Controller verdicts. Do not expand production scope from discovered sources. Read the exact proposal/context/dependencies and true evidence owners in request.inputs. Return proposal, context, task_id and inputs exactly as dispatched. Record work actually performed, evidence, all actual supporting queries, analysis, gaps and next questions. Complete/incomplete means delivery status only, never root cause confirmation. Incomplete requires concrete gaps; execution failure or timeout is not a successful incomplete result. Preserve raw requests, results, receipts and failure/partial diagnostics under this attempt's evidence. Null evidence ref means only this result's own declared file; retained evidence uses its exact input owner ref and file_id, without copying or rebinding old evidence to the current context. A later consumer qualifies your local evidence with your result ref. For logs/metrics, search supplies an evidence-backed initial finite UTC window and source/filter, not per-query approval. Autonomously narrow, shift, split, expand or aggregate within the authorized task and tool limits, retaining actual query conditions, UTC basis, complete/partial/unavailable status, outcomes, raw results and diagnostics even after later success. Do not guess timezones or overwrite observed incident anchors with query windows. Empty small windows, partial data and timeouts do not prove incident-wide absence. Preserve existing target/DB receipts and UTC calculations. Do not write back, publish drafts or produce a final report. Next questions are not dispatch authorization.`
+
+// These records exist only within one acceptance pass. The caller retains just
+// accepted Refs, not a second publication registry or cross-Step byte cache.
+type workerRecord struct {
+	value   WorkerResult
+	sources map[contract.Ref][]file
+}
+
+func workerSources(base map[contract.Ref][]file, refs []contract.Ref, records map[contract.Ref]workerRecord) (map[contract.Ref][]file, error) {
+	sources := maps.Clone(base)
+	seen := map[contract.Ref]bool{}
+	for _, ref := range refs {
+		record, ok := records[ref]
+		if !ok || seen[ref] {
+			return nil, fmt.Errorf("worker results require distinct workflow-accepted refs")
+		}
+		seen[ref] = true
+		maps.Copy(sources, record.sources)
+	}
+	return sources, nil
+}
+
+func checkWorkerTasks(v PlannerState, h contextHistory, sources map[contract.Ref][]file, records map[contract.Ref]workerRecord) error {
+	if len(v.WorkerTasks) > 0 && v.SupportingWork != nil {
+		return fmt.Errorf("worker_tasks and supporting_work are mutually exclusive")
+	}
+	completed := map[string]bool{}
+	for _, ref := range v.WorkerResults {
+		completed[records[ref].value.TaskID] = true
+	}
+	ids := map[string]bool{}
+	for _, task := range v.WorkerTasks {
+		if !nonblank(task.ID) || ids[task.ID] || completed[task.ID] {
+			return fmt.Errorf("worker tasks require unique, uncompleted IDs")
+		}
+		ids[task.ID] = true
+	}
+	evidence := func(e Evidence) error {
+		if e.Ref == nil || !hasFile(sources[*e.Ref], e.FileID) {
+			return fmt.Errorf("worker task basis must name an exact input owner/file")
+		}
+		return nil
+	}
+	for _, task := range v.WorkerTasks {
+		if !nonblank(task.Question) || len(task.Requirements) == 0 || !texts(task.Requirements) {
+			return fmt.Errorf("worker task requires question and completion requirements")
+		}
+		switch task.SourceKind {
+		case "code", "db", "logs", "metrics", "attachments", "vision":
+		default:
+			return fmt.Errorf("unsupported worker source_kind %q", task.SourceKind)
+		}
+		if task.Responsibility != "evidence-only" && task.Responsibility != "analysis" {
+			return fmt.Errorf("unsupported worker responsibility %q", task.Responsibility)
+		}
+		for _, e := range task.Basis {
+			if err := evidence(e); err != nil {
+				return err
+			}
+		}
+		deps := map[string]bool{}
+		for _, id := range task.DependsOn {
+			if !nonblank(id) || id == task.ID || deps[id] {
+				return fmt.Errorf("worker dependency must name a distinct task ID")
+			}
+			deps[id] = true
+		}
+		if (task.SourceKind == "logs" || task.SourceKind == "metrics") && task.Search == nil {
+			return fmt.Errorf("log/metric task requires initial search basis")
+		}
+		if task.Search != nil {
+			search := task.Search
+			from, e1 := utc(search.From)
+			to, e2 := utc(search.To)
+			if e1 != nil || e2 != nil || !from.Before(to) {
+				return fmt.Errorf("worker search requires a nonzero UTC window")
+			}
+			if !nonblank(search.Source) || !nonblank(search.Filter) || len(search.Basis) == 0 {
+				return fmt.Errorf("worker search requires source, filter and basis")
+			}
+			for _, e := range search.Basis {
+				if err := evidence(e); err != nil {
+					return err
+				}
+			}
+		}
+		if task.SourceKind == "db" || task.SourceKind == "logs" || task.SourceKind == "metrics" {
+			scope := h.value.Scope
+			if !nonblank(scope.Stack) || !nonblank(scope.Pop) || !nonblank(scope.Binding) || len(scope.TenantIDs) == 0 || !texts(scope.TenantIDs) {
+				return fmt.Errorf("runtime worker requires authorized target scope")
+			}
+		}
+	}
+	return nil
+}
+
+func (a *acceptance) workerDispatch(scope Scope, proposal contract.Ref, taskID string, records map[contract.Ref]workerRecord) (workerRequest, []contract.Ref, map[contract.Ref][]file, error) {
+	var request workerRequest
+	state, err := readAccepted[PlannerState](a, proposal, PlannerSchema)
+	if err != nil {
+		return request, nil, nil, err
+	}
+	h, err := a.loadContextHistory(scope, state.Data.Context)
+	if err != nil {
+		return request, nil, nil, err
+	}
+	if err := a.checkPlannerWithWorkers(proposal, h, state.Data.Previous, records); err != nil {
+		return request, nil, nil, err
+	}
+	index := slices.IndexFunc(state.Data.WorkerTasks, func(task WorkerTask) bool { return task.ID == taskID })
+	if index < 0 {
+		return request, nil, nil, fmt.Errorf("worker dispatch requires an explicit proposed task ID")
+	}
+	task := state.Data.WorkerTasks[index]
+	for _, record := range records {
+		if record.value.TaskID == taskID {
+			return request, nil, nil, fmt.Errorf("worker task ID already completed")
+		}
+	}
+	refs := slices.Clone(state.Data.WorkerResults)
+	dependencies := []contract.Ref{}
+	for _, id := range task.DependsOn {
+		var found *contract.Ref
+		for ref, record := range records {
+			if record.value.TaskID == id {
+				found = &ref
+				break
+			}
+		}
+		if found == nil {
+			return request, nil, nil, fmt.Errorf("worker dependency %q has no accepted result", id)
+		}
+		dependencies = append(dependencies, *found)
+		if !slices.Contains(refs, *found) {
+			refs = append(refs, *found)
+		}
+	}
+	sources, err := workerSources(h.sources, refs, records)
+	if err != nil {
+		return request, nil, nil, err
+	}
+	if task.SourceKind == "db" || task.SourceKind == "logs" || task.SourceKind == "metrics" {
+		intake, err := a.checkIntake(h.value.Intake, scope.Ticket)
+		if err != nil {
+			return request, nil, nil, err
+		}
+		wiki, err := a.checkWiki(h.value.Wiki, h.value.Intake)
+		if err != nil {
+			return request, nil, nil, err
+		}
+		if !intake.Complete || !wikiComplete(wiki) {
+			return request, nil, nil, fmt.Errorf("runtime worker requires completed intake/wiki prerequisites")
+		}
+	}
+	request = workerRequest{Stage: "worker-" + task.SourceKind + "-" + task.Responsibility, Scope: scope, Proposal: proposal, Context: h.ref, Task: task, Dependencies: dependencies, Requirements: workerRequirements}
+	inputs := append([]contract.Ref{proposal, h.ref}, dependencies...)
+	inputs = appendSourceInputs(inputs, sources)
+	return request, inputs, sources, nil
+}
+
+func checkWorkerResult(p publication[WorkerResult], request workerRequest, inputs []contract.Ref, sources map[contract.Ref][]file) error {
+	v := p.Data
+	if v.Proposal != request.Proposal || v.Context != request.Context || v.TaskID != request.Task.ID || !slices.Equal(v.Inputs, inputs) {
+		return fmt.Errorf("worker proposal/context/task/inputs mismatch")
+	}
+	if !nonblank(v.Work) || !texts(v.Gaps) || (v.Status != "complete" && v.Status != "incomplete") || (v.Status == "incomplete" && len(v.Gaps) == 0) {
+		return fmt.Errorf("worker requires actual work and complete/incomplete delivery with gaps")
+	}
+	if request.Task.Responsibility == "evidence-only" && len(v.Analysis) != 0 {
+		return fmt.Errorf("evidence-only worker cannot supply analysis")
+	}
+	evidence := func(e Evidence) error {
+		files := p.Files
+		if e.Ref != nil {
+			var ok bool
+			files, ok = sources[*e.Ref]
+			if !ok {
+				return fmt.Errorf("worker evidence is not an exact committed input")
+			}
+		}
+		if !hasFile(files, e.FileID) {
+			return fmt.Errorf("unknown worker evidence file %s", e.FileID)
+		}
+		return nil
+	}
+	for _, e := range v.Evidence {
+		if err := evidence(e); err != nil {
+			return err
+		}
+	}
+	for _, q := range v.Queries {
+		if err := checkSupportingQuery(q, evidence); err != nil {
+			return err
+		}
+	}
+	for _, fact := range v.Analysis {
+		if !nonblank(fact.Value) || len(fact.Evidence) == 0 {
+			return fmt.Errorf("worker analysis requires text and evidence")
+		}
+		for _, e := range fact.Evidence {
+			if err := evidence(e); err != nil {
+				return err
+			}
+		}
+	}
+	for _, next := range v.Next {
+		if !nonblank(next.Question) || len(next.Requirements) == 0 || !texts(next.Requirements) {
+			return fmt.Errorf("worker next question requires completion requirements")
+		}
+		for _, e := range next.Basis {
+			if err := evidence(e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (a *acceptance) loadWorkerResults(scope Scope, refs []contract.Ref) (map[contract.Ref]workerRecord, error) {
+	records := map[contract.Ref]workerRecord{}
+	for _, ref := range refs {
+		if _, ok := records[ref]; ok {
+			return nil, fmt.Errorf("duplicate worker result ref")
+		}
+		p, err := readAccepted[WorkerResult](a, ref, WorkerSchema)
+		if err != nil {
+			return nil, err
+		}
+		request, inputs, sources, err := a.workerDispatch(scope, p.Data.Proposal, p.Data.TaskID, records)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkWorkerResult(p, request, inputs, sources); err != nil {
+			return nil, err
+		}
+		// Keep the original proposal and every delivered owner explicit on a
+		// fresh handoff. A Planner publication is not a raw evidence owner.
+		sources[p.Data.Proposal] = nil
+		sources[ref] = p.Files
+		records[ref] = workerRecord{value: p.Data, sources: sources}
+	}
+	return records, nil
+}
+
+// work dispatches exactly one named task. It is not a ready queue or retry loop.
+func (p *plannerCaller) work(ctx context.Context, models sliceModels, taskID string) (contract.Ref, error) {
+	if p.stopped || p.last == nil {
+		return contract.Ref{}, fmt.Errorf("worker dispatch requires an accepted state and usable planner")
+	}
+	p.stopped = true
+	a := newAcceptance(ctx, p.r)
+	records, err := a.loadWorkerResults(p.scope, p.workerResults)
+	if err != nil {
+		return contract.Ref{}, err
+	}
+	request, inputs, _, err := a.workerDispatch(p.scope, *p.last, taskID, records)
+	if err != nil {
+		return contract.Ref{}, err
+	}
+	if request.Context != p.history.ref {
+		return contract.Ref{}, fmt.Errorf("worker proposal differs from current context")
+	}
+	state, err := readAccepted[PlannerState](a, *p.last, PlannerSchema)
+	if err != nil {
+		return contract.Ref{}, err
+	}
+	index := slices.IndexFunc(state.Data.WorkerTasks, func(task WorkerTask) bool { return task.ID == taskID })
+	key := fmt.Sprintf("worker-%s-%d", p.last.AttemptID, index)
+	if err := p.r.Root().Decision(ctx, key+"-dispatch", "Dispatch one explicit worker task: "+taskID, inputs); err != nil {
+		return contract.Ref{}, err
+	}
+	model := models.Analysis
+	if request.Task.Responsibility == "evidence-only" {
+		model = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: models.FetchThinking}
+	}
+	ref, err := taskStep(ctx, p.r, p.r.Root(), model, request.Stage, key, request, WorkerSchema, inputs)
+	if err != nil {
+		return contract.Ref{}, err
+	}
+	after := newAcceptance(ctx, p.r)
+	records, err = after.loadWorkerResults(p.scope, p.workerResults)
+	if err != nil {
+		return contract.Ref{}, err
+	}
+	expected, expectedInputs, sources, err := after.workerDispatch(p.scope, *p.last, taskID, records)
+	if err != nil {
+		return contract.Ref{}, err
+	}
+	result, err := readAccepted[WorkerResult](after, ref, WorkerSchema)
+	if err != nil {
+		return contract.Ref{}, err
+	}
+	if err := checkWorkerResult(result, expected, expectedInputs, sources); err != nil {
+		return contract.Ref{}, fmt.Errorf("worker result acceptance: %w", err)
+	}
+	accepted := append(slices.Clone(p.workerResults), ref)
+	if err := p.r.Root().Decision(ctx, key+"-recorded", "Worker delivery accepted for Planner interpretation, not a verified conclusion", append(slices.Clone(inputs), ref)); err != nil {
+		return contract.Ref{}, err
+	}
+	p.workerResults, p.stopped = accepted, false
+	return ref, nil
+}

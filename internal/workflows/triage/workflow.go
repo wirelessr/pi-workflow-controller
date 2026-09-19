@@ -48,10 +48,6 @@ func sliceStep(ctx context.Context, r *engine.Run, models sliceModels, key strin
 	if task.Stage == "intake" || task.Stage == "intake-revision" || task.Stage == "intake-update" {
 		model = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: models.FetchThinking}
 	}
-	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + task.Stage, CWD: filepath.Join(r.Dir(), "triage-work"), Model: model})
-	if err != nil {
-		return contract.Ref{}, err
-	}
 	if schema == ContextSchema {
 		task.Requirements += "\n\n" + supportingResolutionRequirements
 	}
@@ -59,11 +55,19 @@ func sliceStep(ctx context.Context, r *engine.Run, models sliceModels, key strin
 		inputs = append(inputs, *task.SupportingProposal)
 		task.Requirements += "\n\nRead the exact supporting_proposal Planner input for the accepted supporting_work reason and basis. Perform this stage of that task within the supplied scope and completion conditions. Other pending text and hypotheses are planning context, not additional dispatch authorization."
 	}
+	return taskStep(ctx, r, r.Root(), model, task.Stage, key, task, schema, inputs)
+}
+
+func taskStep(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref) (contract.Ref, error) {
+	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + stage, CWD: filepath.Join(r.Dir(), "triage-work"), Model: model})
+	if err != nil {
+		return contract.Ref{}, err
+	}
 	prompt, err := json.Marshal(task)
 	if err != nil {
 		return contract.Ref{}, err
 	}
-	out, err := r.Root().Step(ctx, engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: inputs, Output: contract.Spec{SchemaID: schema}, Timeout: 30 * time.Minute})
+	out, err := s.Step(ctx, engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: inputs, Output: contract.Spec{SchemaID: schema}, Timeout: 30 * time.Minute})
 	if err != nil {
 		return contract.Ref{}, err
 	}
@@ -72,7 +76,7 @@ func sliceStep(ctx context.Context, r *engine.Run, models sliceModels, key strin
 		return out.Output, err
 	}
 	if !closed.ConfirmsLocalClose(out.Execution.SessionID) {
-		return out.Output, fmt.Errorf("%s cleanup not confirmed", task.Stage)
+		return out.Output, fmt.Errorf("%s cleanup not confirmed", stage)
 	}
 	return out.Output, nil
 }

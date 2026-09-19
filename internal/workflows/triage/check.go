@@ -476,6 +476,23 @@ func checkTime(v TimeResolution, evidence func(Evidence) error) error {
 	return nil
 }
 
+func checkSupportingQuery(q SupportingQuery, evidence func(Evidence) error) error {
+	from, e1 := utc(q.From)
+	to, e2 := utc(q.To)
+	if e1 != nil || e2 != nil || !from.Before(to) {
+		return fmt.Errorf("supporting query requires a nonzero UTC window")
+	}
+	if !nonblank(q.Source) || !nonblank(q.Filter) || !nonblank(q.Outcome) || len(q.Basis) == 0 || len(q.Evidence) == 0 {
+		return fmt.Errorf("supporting query lacks conditions, basis or result evidence")
+	}
+	for _, e := range append(slices.Clone(q.Basis), q.Evidence...) {
+		if err := evidence(e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func checkContext(ctx context.Context, r *engine.Run, ref contract.Ref, scope Scope, intakeRef, wikiRef contract.Ref, intake Intake, wiki WikiSearch, history ...contextHistory) (Context, error) {
 	return newAcceptance(ctx, r).checkContext(ref, scope, intakeRef, wikiRef, intake, wiki, history...)
 }
@@ -599,18 +616,8 @@ func checkContextPublication(ctx context.Context, ref contract.Ref, p publicatio
 			}
 		}
 		for _, q := range a.Queries {
-			from, e1 := utc(q.From)
-			to, e2 := utc(q.To)
-			if e1 != nil || e2 != nil || !from.Before(to) {
-				return v, fmt.Errorf("supporting query requires a nonzero UTC window")
-			}
-			if !nonblank(q.Source) || !nonblank(q.Filter) || !nonblank(q.Outcome) || len(q.Basis) == 0 || len(q.Evidence) == 0 {
-				return v, fmt.Errorf("supporting query lacks conditions, basis or result evidence")
-			}
-			for _, e := range append(slices.Clone(q.Basis), q.Evidence...) {
-				if err := evidence(e); err != nil {
-					return v, err
-				}
+			if err := checkSupportingQuery(q, evidence); err != nil {
+				return v, err
 			}
 		}
 		kinds[a.Kind] = true

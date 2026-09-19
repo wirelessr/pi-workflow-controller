@@ -5,6 +5,8 @@
   "additionalProperties": false,
   "required": ["context", "previous", "hypotheses", "pending", "gaps", "rationale"],
   "properties": {
+    "worker_tasks": {"type": "array", "items": {"$ref": "worker.v1.json#/$defs/task"}},
+    "worker_results": {"type": "array", "uniqueItems": true, "items": {"$ref": "common.v1.json#/$defs/ref"}},
     "supporting_work": {
       "type": "object",
       "additionalProperties": false,

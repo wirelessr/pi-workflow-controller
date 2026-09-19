@@ -12,7 +12,7 @@ const schemaURI = "https://pi-workflow-controller.local/schemas/triage/"
 
 func Resources() []contract.Resource {
 	var out []contract.Resource
-	for _, name := range []string{"common", "intake", "wiki", "context", "planner"} {
+	for _, name := range []string{"common", "intake", "wiki", "context", "planner", "worker"} {
 		path := name + ".v1.json"
 		raw, err := resources.ReadFile("schemas/" + path)
 		if err != nil {
@@ -29,5 +29,6 @@ func Schemas() []contract.SchemaDefinition {
 		{ID: WikiSchema, URI: schemaURI + "wiki.v1.json"},
 		{ID: ContextSchema, URI: schemaURI + "context.v1.json"},
 		{ID: PlannerSchema, URI: schemaURI + "planner.v1.json"},
+		{ID: WorkerSchema, URI: schemaURI + "worker.v1.json"},
 	}
 }

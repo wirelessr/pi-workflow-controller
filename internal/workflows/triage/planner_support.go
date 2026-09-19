@@ -3,6 +3,7 @@ package triage
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 
 	"pi-workflow-controller/internal/contract"
@@ -120,7 +121,11 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 	if err != nil {
 		return nil, err
 	}
-	if err := beforeAcceptance.checkPlanner(*p.last, h, state.Data.Previous); err != nil {
+	records, err := beforeAcceptance.loadWorkerResults(p.scope, p.workerResults)
+	if err != nil {
+		return nil, err
+	}
+	if err := beforeAcceptance.checkPlannerWithWorkers(*p.last, h, state.Data.Previous, records); err != nil {
 		return nil, err
 	}
 	work := state.Data.SupportingWork
@@ -134,13 +139,17 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 	if err := p.r.Root().Decision(ctx, key+"-dispatch", "Accepted structured supporting task: "+work.Kind, []contract.Ref{*p.last, h.ref}); err != nil {
 		return nil, err
 	}
+	sources := map[contract.Ref][]file{}
+	for _, record := range records {
+		maps.Copy(sources, record.sources)
+	}
 	before := ContextResult{Intake: h.value.Intake, Wiki: h.value.Wiki, Context: h.ref, Ready: h.value.Readiness == "ready"}
 	var after ContextResult
 	switch work.Kind {
 	case "resolve":
-		after, err = resolveWithProposal(ctx, p.r, p.scope, models, before, p.last)
+		after, err = resolveWithProposal(ctx, p.r, p.scope, models, before, p.last, sources)
 	case "refresh", "update":
-		after, err = reviseSlice(ctx, p.r, p.scope, models, before, work.Sources, work.Kind == "update", p.last)
+		after, err = reviseSlice(ctx, p.r, p.scope, models, before, work.Sources, work.Kind == "update", p.last, sources)
 	}
 	if err != nil {
 		return nil, err
@@ -156,5 +165,5 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 	if err := p.r.Root().Decision(ctx, key+"-recorded", "Supporting result accepted for Planner reassessment, not a verified claim or final report", []contract.Ref{*p.last, before.Context, after.Context}); err != nil {
 		return nil, err
 	}
-	return openPlanner(ctx, p.r, p.scope, p.model, after.Context, p.last)
+	return openPlannerWithResults(ctx, p.r, p.scope, p.model, after.Context, p.last, p.workerResults)
 }

@@ -193,10 +193,10 @@ func checkRevision(v Context, h contextHistory, fact func(Fact) error, wikiRef c
 // returns supporting state even if gaps remain; it is not a finalization or a
 // full adaptive planner. Further calls consume the same run's budgets.
 func resolveSlice(ctx context.Context, r *engine.Run, scope Scope, models sliceModels, previous ContextResult) (ContextResult, error) {
-	return resolveWithProposal(ctx, r, scope, models, previous, nil)
+	return resolveWithProposal(ctx, r, scope, models, previous, nil, nil)
 }
 
-func resolveWithProposal(ctx context.Context, r *engine.Run, scope Scope, models sliceModels, previous ContextResult, proposal *contract.Ref) (ContextResult, error) {
+func resolveWithProposal(ctx context.Context, r *engine.Run, scope Scope, models sliceModels, previous ContextResult, proposal *contract.Ref, supportingSources map[contract.Ref][]file) (ContextResult, error) {
 	result := previous
 	h, err := loadContextHistory(ctx, r, scope, previous.Context)
 	if err != nil {
@@ -224,6 +224,7 @@ func resolveWithProposal(ctx context.Context, r *engine.Run, scope Scope, models
 	wikiRef := previous.Wiki
 	if !wikiComplete(wiki) {
 		wikiInputs := appendSourceInputs([]contract.Ref{previous.Intake, previous.Wiki, previous.Context}, h.sources)
+		wikiInputs = appendSourceInputs(wikiInputs, supportingSources)
 		wikiRef, err = sliceStep(ctx, r, models, key+"-wiki", stageTask{Stage: "wiki-resolution", SupportingProposal: proposal, Scope: scope, Gaps: wiki.Gaps, Previous: &previous.Context, Requirements: `Remedy the required wiki search using committed intake and previous wiki/context inputs. Perform a new read-only wiki-only search with existing tools; save raw search results and page evidence. Do not read other WIP/session history or write back. Preserve failed/partial status and diagnostics; unavailable/not-run/partial is never no matches. Bind intake to request.inputs[0]. Do not repeat Jira acquisition or expand production scope.`}, WikiSchema, wikiInputs)
 		if err != nil {
 			return result, err
@@ -237,6 +238,7 @@ func resolveWithProposal(ctx context.Context, r *engine.Run, scope Scope, models
 	// Include every retained evidence source explicitly; no implicit cross-Step
 	// file access or copied ownership of another attempt's evidence.
 	inputs = appendSourceInputs(inputs, h.sources)
+	inputs = appendSourceInputs(inputs, supportingSources)
 	kinds := []string{}
 	if h.value.Identity.Status != "resolved" {
 		kinds = append(kinds, "identity")

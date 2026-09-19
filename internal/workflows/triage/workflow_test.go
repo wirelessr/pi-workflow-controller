@@ -1179,6 +1179,122 @@ func plannerFixture(t *testing.T, mode string, req contract.Request, task stageT
 	return v
 }
 
+func workerPlannerFixture(t *testing.T, name string, req contract.Request, v PlannerState, step int) PlannerState {
+	t.Helper()
+	basis := v.Hypotheses[0].Evidence[0]
+	if step == 1 {
+		v.SupportingWork = nil
+		task := WorkerTask{ID: "w1", SourceKind: "code", Responsibility: "evidence-only", Question: "Inspect the supplied anonymous trace", Requirements: []string{"Deliver evidence and limitations"}, Basis: []Evidence{basis}, DependsOn: []string{}}
+		if name == "m1-analysis" {
+			task.Responsibility = "analysis"
+		}
+		v.WorkerTasks = []WorkerTask{task}
+		switch name {
+		case "m1-pending":
+			v.WorkerTasks = nil
+		case "m1-unsatisfied", "m1-dependencies", "m1-dependencies-incomplete":
+			task.ID, task.DependsOn = "w2", []string{"w1"}
+			v.WorkerTasks = append(v.WorkerTasks, task)
+		case "m1-task-duplicate":
+			v.WorkerTasks = append(v.WorkerTasks, task)
+		case "m1-task-owner":
+			v.WorkerTasks[0].Basis[0].Ref = nil
+		case "m1-logs", "m1-query-utc":
+			v.WorkerTasks[0].SourceKind = "logs"
+			v.WorkerTasks[0].Search = &WorkerSearch{Source: "anonymous", Filter: "trace=fixture", From: "2025-01-01T00:00:00Z", To: "2025-01-01T00:01:00Z", Basis: []Evidence{basis}}
+		case "m1-task-utc":
+			v.WorkerTasks[0].SourceKind = "logs"
+			v.WorkerTasks[0].Search = &WorkerSearch{Source: "anonymous", Filter: "trace=fixture", From: "2025-01-01T00:00:00Z", To: "2025-01-01T00:00:00Z", Basis: []Evidence{basis}}
+		}
+		return v
+	}
+	var task struct {
+		WorkerResults []contract.Ref `json:"worker_results"`
+	}
+	if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
+		t.Fatal(err)
+	}
+	if len(task.WorkerResults) == 0 {
+		t.Fatal("Planner not explicitly given worker results")
+	}
+	v.WorkerResults, v.WorkerTasks = task.WorkerResults, nil
+	for _, ref := range task.WorkerResults {
+		if !slices.Contains(req.Inputs, ref) {
+			t.Fatal("Planner worker result absent from Inputs")
+		}
+		var result publication[WorkerResult]
+		if err := protocol.ReadJSON(ref.Path, &result); err != nil {
+			t.Fatal(err)
+		}
+		for _, owner := range []contract.Ref{result.Data.Proposal, result.Data.Context} {
+			if !slices.Contains(req.Inputs, owner) {
+				t.Fatal("Planner lost true historical worker owner")
+			}
+		}
+		if name == "m1-support" && step == 3 && result.Data.Context == v.Context {
+			t.Fatal("support update rebound historical worker result to new context")
+		}
+		if name == "m1-support" {
+			v.Hypotheses[0].Evidence = append(v.Hypotheses[0].Evidence, Evidence{Ref: &ref, FileID: "worker-raw"})
+		} else {
+			v.Hypotheses[0].Evidence = []Evidence{{Ref: &ref, FileID: "worker-raw"}}
+		}
+	}
+	if name == "m1-support" && step == 2 {
+		v.SupportingWork = &SupportingWork{Kind: "update", Reason: "Reassess refreshed source inventory", Basis: []Evidence{basis}, Sources: []intakeWork{}}
+	}
+	switch name {
+	case "m1-planner-drop":
+		v.WorkerResults = nil
+		v.Hypotheses[0].Evidence = []Evidence{basis}
+	case "m1-planner-invent":
+		bad := task.WorkerResults[0]
+		bad.Path = filepath.Join(filepath.Dir(bad.Path), "candidate.json")
+		v.WorkerResults = []contract.Ref{bad}
+	case "m1-planner-invent-committed":
+		v.WorkerResults = []contract.Ref{req.Inputs[0]}
+	case "m1-reuse-id":
+		v.WorkerTasks = []WorkerTask{{ID: "w1", SourceKind: "code", Responsibility: "evidence-only", Question: "Repeat", Requirements: []string{"Deliver evidence"}, Basis: []Evidence{basis}, DependsOn: []string{}}}
+	}
+	return v
+}
+
+func workerFixture(name string, request workerRequest, inputs []contract.Ref) (WorkerResult, map[string][]byte) {
+	v := WorkerResult{Proposal: request.Proposal, Context: request.Context, TaskID: request.Task.ID, Work: "Inspected an anonymous fixture", Status: "complete", Inputs: slices.Clone(inputs), Evidence: []Evidence{{FileID: "worker-raw"}}, Queries: []SupportingQuery{}, Analysis: []Fact{}, Gaps: []string{}, Next: []PlannerQuestion{}}
+	files := map[string][]byte{"worker-raw": []byte("anonymous evidence\n")}
+	v.Evidence = append(v.Evidence, request.Task.Basis...)
+	switch name {
+	case "m1-incomplete", "m1-dependencies-incomplete":
+		v.Status, v.Gaps = "incomplete", []string{"Upstream source supplied only partial evidence"}
+	case "m1-incomplete-no-gap":
+		v.Status = "incomplete"
+	case "m1-logs", "m1-query-utc":
+		v.Queries = []SupportingQuery{{Source: "anonymous", Filter: "trace=fixture AND narrowed", From: "2025-01-01T00:00:10Z", To: "2025-01-01T00:00:20Z", Basis: slices.Clone(request.Task.Basis), Status: "complete", Outcome: "No records in this subwindow; not incident-wide disproof", Evidence: slices.Clone(v.Evidence)}}
+		if name == "m1-query-utc" {
+			v.Queries[0].To = v.Queries[0].From
+		}
+	case "m1-analysis", "m1-evidence-analysis":
+		v.Analysis = []Fact{{Value: "An unverified interpretation", Evidence: slices.Clone(v.Evidence)}}
+	case "m1-task-id":
+		v.TaskID = "unproposed"
+	case "m1-proposal":
+		v.Proposal = request.Context
+	case "m1-context":
+		v.Context = request.Proposal
+	case "m1-inputs":
+		v.Inputs = []contract.Ref{request.Context}
+	case "m1-owner":
+		bad := request.Context
+		bad.RunID = "foreign"
+		v.Evidence[0].Ref = &bad
+	case "m1-file":
+		v.Evidence[0].FileID = "undeclared"
+	case "m1-schema":
+		v.Status = "root-cause-confirmed"
+	}
+	return v, files
+}
+
 // Only the provider chooses the work kind; the Controller consumes the emitted
 // contract, including evidence retained across inventory changes.
 func plannerWorkFixture(t *testing.T, name, kind string, req contract.Request, task stageTask, step int, initial contract.Ref) PlannerState {
@@ -1333,6 +1449,19 @@ type triageCase struct {
 }
 
 var triageCases = []triageCase{
+	{"m1-dependencies-incomplete", 7, false, true},
+	{"m1-support", 10, false, true}, {"m1-logs", 6, false, true},
+	{"m1-worker-timeout", 5, true, false}, {"m1-worker-cancel", 5, true, false}, {"m1-planner-provider-failure", 6, true, false},
+	{"m1-planner-invent-committed", 6, true, false}, {"m1-incomplete-no-gap", 5, true, false}, {"m1-query-utc", 5, true, false},
+	{"m1-complete", 6, false, true}, {"m1-incomplete", 6, false, true}, {"m1-analysis", 6, false, true},
+	{"m1-handoff-before", 6, false, true}, {"m1-handoff-after", 7, false, true}, {"m1-dependencies", 7, false, true},
+	{"m1-pending", 4, true, false}, {"m1-unsatisfied", 4, true, false}, {"m1-redispatch", 5, true, false},
+	{"m1-reuse-id", 6, true, false}, {"m1-planner-drop", 6, true, false}, {"m1-planner-invent", 6, true, false},
+	{"m1-task-id", 5, true, false}, {"m1-proposal", 5, true, false}, {"m1-context", 5, true, false}, {"m1-inputs", 5, true, false},
+	{"m1-owner", 5, true, false}, {"m1-file", 5, true, false}, {"m1-schema", 5, true, false}, {"m1-evidence-analysis", 5, true, false},
+	{"m1-task-utc", 4, true, false}, {"m1-task-owner", 4, true, false}, {"m1-task-duplicate", 4, true, false},
+	{"m1-worker-provider-failure", 5, true, false}, {"m1-worker-cleanup-failure", 5, true, false},
+	{"m1-store-schema", 0, true, false}, {"m1-store-file", 0, true, false},
 	{"work-tamper-during-worker", 7, true, false},
 	{"work-tamper-evidence-before-support", 4, true, false}, {"work-tamper-evidence-after-support", 7, true, false}, {"work-tamper-evidence-handoff", 8, true, false},
 	{"work-read-isolation", 8, false, true}, {"work-read-cancellation", 8, false, true}, {"work-read-exact-ref", 8, false, true},
@@ -1408,6 +1537,9 @@ var triageCases = []triageCase{
 // Truncated intake, blank proposal reason and history-alias negatives also stay
 // there to detect a production loader accidentally bypassing its validator.
 func validationStage(name string) string {
+	if strings.HasPrefix(name, "m1-store-") {
+		return "worker"
+	}
 	switch name {
 	case "duplicate-attachment", "conflicting-attachment", "duplicate-empty-attachment", "missing-attachment-size", "null-comment",
 		"analysis-without-content", "missing-page", "changed-total", "missing-fields", "unsafe-attachment", "oversized-attachment", "vision-pending",
@@ -1563,6 +1695,12 @@ func testIntakePublicationRevision(t *testing.T, store *contract.Store, name str
 }
 
 func validationError(name string) string {
+	if name == "m1-store-file" {
+		return "unknown worker evidence file"
+	}
+	if name == "m1-store-schema" {
+		return "schema"
+	}
 	switch name {
 	case "duplicate-attachment", "conflicting-attachment", "duplicate-empty-attachment", "missing-attachment-size":
 		return "invalid raw attachment"
@@ -1682,7 +1820,7 @@ func validationRejection(name string, err error) error {
 	switch name {
 	case "file-escape":
 		phase = "files"
-	case "support-invalid-status", "planner-extra-control", "work-extra-control", "work-bad-kind":
+	case "support-invalid-status", "planner-extra-control", "work-extra-control", "work-bad-kind", "m1-store-schema":
 		phase = "schema"
 	}
 	var execution *engine.Failure
@@ -1881,6 +2019,15 @@ func TestTriageValidation(t *testing.T) {
 			var ready bool
 			sources := map[contract.Ref][]file{base.intakeRef: base.intake.Files, base.wikiRef: base.wiki.Files}
 			switch stage {
+			case "worker":
+				request := workerRequest{Proposal: base.wikiRef, Context: base.intakeRef, Task: WorkerTask{ID: "w1", Responsibility: "evidence-only"}}
+				refs := []contract.Ref{base.intakeRef, base.wikiRef}
+				v, files := workerFixture("m1-"+strings.TrimPrefix(tc.name, "m1-store-"), request, refs)
+				ref, e := storeFixture(t, store, WorkerSchema, v, files, false)
+				err = e
+				if err == nil {
+					err = checkWorkerResult(storedPublication[WorkerResult](t, store, ref, v), request, refs, sources)
+				}
 			case "intake":
 				v, files := intakeFixture(tc.name)
 				var ref contract.Ref
@@ -1993,7 +2140,8 @@ func TestIntakeToContext(t *testing.T) {
 			continue
 		}
 		t.Run(tc.name, func(t *testing.T) {
-			working := strings.HasPrefix(tc.name, "work-")
+			m1 := strings.HasPrefix(tc.name, "m1-")
+			working := strings.HasPrefix(tc.name, "work-") || tc.name == "m1-support"
 			transitionProbe := slices.Contains([]string{"work-unproposed-transition", "work-skipped-context", "work-wrong-task", "work-resolve-changed-intake", "work-refresh-work-mismatch"}, tc.name)
 			workKind, workFixture := "update", "update-replace"
 			switch tc.name {
@@ -2011,7 +2159,7 @@ func TestIntakeToContext(t *testing.T) {
 			supporting := strings.HasPrefix(tc.name, "support-")
 			resolving := strings.HasPrefix(tc.name, "resolve-") || strings.HasPrefix(tc.name, "support-resolve-") || (working && workKind == "resolve")
 			refreshing := strings.HasPrefix(tc.name, "refresh-") || (working && workKind == "refresh")
-			planning := strings.HasPrefix(tc.name, "planner-") || working
+			planning := strings.HasPrefix(tc.name, "planner-") || working || m1
 			updating := strings.HasPrefix(tc.name, "update-") || tc.name == "planner-history" || (working && workKind == "update") || tc.name == "work-wrong-task" || tc.name == "work-resolve-changed-intake"
 			revising := refreshing || updating
 			acquiring := (resolving && !supporting) || revising || strings.HasPrefix(tc.name, "http-")
@@ -2314,6 +2462,69 @@ func TestIntakeToContext(t *testing.T) {
 						plannerRef, err = planner.step(ctx)
 						firstPlannerRef = plannerRef
 					}
+					if err == nil && m1 {
+						proposal := plannerRef
+						id := "w1"
+						if tc.name == "m1-unsatisfied" {
+							id = "w2"
+						}
+						var delivered contract.Ref
+						delivered, err = planner.work(ctx, models, id)
+						if planner.last == nil || *planner.last != proposal {
+							t.Error("worker changed the last Planner snapshot")
+						}
+						if err != nil && len(planner.workerResults) != 0 {
+							t.Error("failed worker became workflow accepted")
+						}
+						if err == nil {
+							if !slices.Equal(planner.workerResults, []contract.Ref{delivered}) || planner.stopped {
+								t.Error("worker success lost accepted result or stopped Planner")
+							}
+							a := run.Snapshot().Attempts[delivered.AttemptID]
+							if run.Snapshot().Sessions[a.HandleID].State != "Closed" {
+								t.Error("worker accepted before its session closed")
+							}
+							if a.State != engine.Succeeded || a.Output == nil || *a.Output != delivered {
+								t.Error("worker delivery was not engine committed")
+							}
+							if tc.name == "m1-redispatch" {
+								_, err = planner.work(ctx, models, id)
+							}
+							if tc.name == "m1-dependencies" || tc.name == "m1-dependencies-incomplete" {
+								var second contract.Ref
+								second, err = planner.work(ctx, models, "w2")
+								if err == nil && !slices.Equal(planner.workerResults, []contract.Ref{delivered, second}) {
+									t.Error("dependency results lost delivery order")
+								}
+							}
+						}
+						if err == nil && tc.name == "m1-handoff-before" {
+							var next *plannerCaller
+							next, err = planner.handoff(ctx)
+							if err == nil {
+								planner = next
+							}
+						}
+						if err == nil {
+							var next contract.Ref
+							retained := slices.Clone(planner.workerResults)
+							next, err = planner.step(ctx)
+							if !slices.Equal(planner.workerResults, retained) {
+								t.Error("Planner rejection or snapshot changed accepted deliveries")
+							}
+							if err == nil {
+								plannerRef = next
+							}
+						}
+						if err == nil && tc.name == "m1-handoff-after" {
+							var next *plannerCaller
+							next, err = planner.handoff(ctx)
+							if err == nil {
+								planner = next
+								plannerRef, err = planner.step(ctx)
+							}
+						}
+					}
 					if err == nil && strings.HasPrefix(tc.name, "work-read-") {
 						readCtx, cancelRead := context.WithCancel(ctx)
 						a := newAcceptance(readCtx, run)
@@ -2456,7 +2667,7 @@ func TestIntakeToContext(t *testing.T) {
 					if err == nil && tc.name == "planner-reuse-handoff" {
 						plannerRef, err = planner.step(ctx)
 					}
-					if err == nil && (tc.name == "planner-reuse" || tc.name == "planner-reuse-handoff" || tc.name == "planner-handoff" || tc.name == "planner-history" || tc.name == "planner-support" || tc.name == "planner-wrong-previous" || strings.HasSuffix(tc.name, "-failure") || strings.HasSuffix(tc.name, "-cancel") || strings.HasSuffix(tc.name, "-timeout") || strings.HasSuffix(tc.name, "-cap") || tc.name == "planner-tampered-handoff") {
+					if err == nil && !m1 && (tc.name == "planner-reuse" || tc.name == "planner-reuse-handoff" || tc.name == "planner-handoff" || tc.name == "planner-history" || tc.name == "planner-support" || tc.name == "planner-wrong-previous" || strings.HasSuffix(tc.name, "-failure") || strings.HasSuffix(tc.name, "-cancel") || strings.HasSuffix(tc.name, "-timeout") || strings.HasSuffix(tc.name, "-cap") || tc.name == "planner-tampered-handoff") {
 						if tc.name != "planner-reuse" {
 							var next *plannerCaller
 							next, err = planner.handoff(ctx)
@@ -2476,6 +2687,11 @@ func TestIntakeToContext(t *testing.T) {
 						err = planner.close(ctx)
 					}
 					if err != nil && planner != nil {
+						if m1 {
+							if _, stopped := planner.work(ctx, models, "w1"); stopped == nil || !strings.Contains(stopped.Error(), "usable planner") {
+								t.Error("failed caller allowed another worker dispatch")
+							}
+						}
 						if (plannerRef.AttemptID == "" && planner.last != nil) || (plannerRef.AttemptID != "" && (planner.last == nil || *planner.last != plannerRef)) {
 							t.Error("failed Planner caller changed its last accepted Ref")
 						}
@@ -2509,7 +2725,7 @@ func TestIntakeToContext(t *testing.T) {
 				return engine.Result{Outputs: outputs}, err
 			}}
 			var transport runtime.Runtime = pi
-			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" || tc.name == "planner-timeout" || tc.name == "work-worker-timeout" || tc.name == "work-planner-timeout" {
+			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" || tc.name == "planner-timeout" || tc.name == "work-worker-timeout" || tc.name == "work-planner-timeout" || tc.name == "m1-worker-timeout" {
 				transport = deadlineRuntime{pi}
 			}
 			r, err = engine.New(ctx, def, engine.Input{Prompt: "CASE-17", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
@@ -2546,8 +2762,16 @@ func TestIntakeToContext(t *testing.T) {
 						if _, ok := hellos[e.Message.SessionID]; ok {
 							t.Fatal("session reused")
 						}
+						workerOpening := false
+						if m1 {
+							for _, session := range r.Snapshot().Sessions {
+								if session.State != "Closed" && (session.Identity.SessionID == e.Message.SessionID || session.Identity.SessionID == "") && strings.HasPrefix(session.Role.Name, "triage-worker-") {
+									workerOpening = true
+								}
+							}
+						}
 						for _, s := range r.Snapshot().Sessions {
-							if s.Identity.SessionID != "" && s.Identity.SessionID != e.Message.SessionID && s.State != "Closed" {
+							if s.Identity.SessionID != "" && s.Identity.SessionID != e.Message.SessionID && s.State != "Closed" && !(m1 && workerOpening && s.Role.Name == "triage-planner") {
 								t.Fatalf("new stage before old cleanup: %+v", s)
 							}
 						}
@@ -2575,7 +2799,7 @@ func TestIntakeToContext(t *testing.T) {
 					if !reflect.DeepEqual(task.Scope, scope) {
 						t.Fatal("scope not in prompt")
 					}
-					if working && !transitionProbe && count > 4 && task.Stage != "planner" {
+					if working && !transitionProbe && count > 4 && task.Stage != "planner" && req.Output.SchemaID != WorkerSchema {
 						if task.SupportingProposal == nil || !slices.Contains(req.Inputs, *task.SupportingProposal) {
 							t.Fatal("supporting task lost exact proposal input")
 						}
@@ -2606,220 +2830,254 @@ func TestIntakeToContext(t *testing.T) {
 					}
 					var data any
 					var files map[string][]byte
-					switch count {
-					case 1:
-						if task.Stage != "intake" || len(req.Inputs) != 0 {
-							t.Fatal("intake inputs")
+					if req.Output.SchemaID == WorkerSchema {
+						var request workerRequest
+						if err := json.Unmarshal([]byte(req.Prompt), &request); err != nil {
+							t.Fatal(err)
 						}
-						if acquiring {
-							intake, acquiredFiles, err = acquireIntake(ctx, filepath.Dir(e.Message.CandidatePath), scope, acquisition)
-							if err != nil {
-								t.Fatal(err)
+						if !slices.Contains(req.Inputs, request.Proposal) || !slices.Contains(req.Inputs, request.Context) {
+							t.Fatal("worker lost proposal/context Inputs")
+						}
+						if request.Task.ID == "w2" {
+							if len(request.Dependencies) != 1 || !slices.Contains(req.Inputs, request.Dependencies[0]) {
+								t.Fatal("task IDs not resolved to exact dependency Inputs")
 							}
-							acquiredRequests = requests.Load()
-						} else {
-							intake, files = intakeFixture(mode)
-						}
-						data = intake
-					case 2:
-						if task.Stage != "wiki" || len(req.Inputs) != 1 {
-							t.Fatal("wiki inputs")
-						}
-						initialIntake = req.Inputs[0]
-						wiki, files = wikiFixture(mode, req.Inputs[0])
-						data = wiki
-					case 3:
-						if task.Stage != "context" || len(req.Inputs) != 2 || req.Inputs[0] != wiki.Intake {
-							t.Fatal("context inputs")
-						}
-						if task.RuntimeResolutionAllowed != (intake.Complete && wikiComplete(wiki) && targetAuthorized) {
-							t.Fatal("prerequisite gate mismatch")
-						}
-						expectedContext, files = contextFixture(mode, scope, req.Inputs, intake, wiki)
-						if acquiring {
-							if !hasFile(acquiredFiles, "page-1") {
-								expectedContext.Observations[0].Evidence[0].FileID = "issue"
-							}
-							if !hasFile(acquiredFiles, "bundle") || len(intake.Attachments) == 0 || intake.Attachments[0].Content.Status != "available" || intake.Attachments[0].Analysis.Status != "available" {
-								expectedContext.Time = TimeResolution{Status: "unresolved", Anchors: []TimeAnchor{}}
-								expectedContext.Attempts[1].Evidence[0].FileID = "issue"
-								expectedContext.Attempts[1].Outcome = "attachment unavailable or incomplete; trustworthy incident anchor pending"
+							var dependency publication[WorkerResult]
+							if err := protocol.ReadJSON(request.Dependencies[0].Path, &dependency); err != nil || dependency.Data.TaskID != "w1" {
+								t.Fatal("wrong dependency result", err)
 							}
 						}
-						if supporting || tc.name == "planner-support" {
-							expectedContext, files = supportingContextFixture(t, ctx, supportingURL, tc.name, 0, task, req.Inputs, expectedContext, files)
+						model := r.Snapshot().Sessions[r.Snapshot().Attempts[req.Identity.AttemptID].HandleID].Role.Model
+						wantModel := runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: "high"}
+						if request.Task.Responsibility == "analysis" {
+							wantModel = runtime.ModelSpec{Provider: "fixture", ID: "analysis", Thinking: "high"}
 						}
-						data = expectedContext
-					default:
-						if task.Stage == "planner" {
-							plannerSteps++
-							if !planning || req.Output.SchemaID != PlannerSchema || task.Requirements != plannerRequirements || task.RuntimeResolutionAllowed {
-								t.Fatal("planner task/model contract mismatch")
+						if model != wantModel {
+							t.Fatal("worker responsibility/model binding changed")
+						}
+						if request.Requirements != workerRequirements {
+							t.Fatal("worker lost task requirements")
+						}
+						data, files = workerFixture(tc.name, request, req.Inputs)
+					} else {
+						switch count {
+						case 1:
+							if task.Stage != "intake" || len(req.Inputs) != 0 {
+								t.Fatal("intake inputs")
 							}
-							for ref := range observedSupportingRefs {
-								if !slices.Contains(req.Inputs, ref) {
-									t.Fatalf("planner did not receive historical supporting owner %s/%s", ref.SchemaID, ref.AttemptID)
-								}
-							}
-							if working {
-								expectedPlanner = plannerWorkFixture(t, tc.name, workKind, req, task, plannerSteps, initialIntake)
-							} else {
-								expectedPlanner = plannerFixture(t, tc.name, req, task, plannerSteps, initialIntake)
-							}
-							data = expectedPlanner
-							if tc.name == "planner-extra-control" || tc.name == "work-extra-control" {
-								var extra map[string]any
-								if err := json.Unmarshal(testJSON(data), &extra); err != nil {
+							if acquiring {
+								intake, acquiredFiles, err = acquireIntake(ctx, filepath.Dir(e.Message.CandidatePath), scope, acquisition)
+								if err != nil {
 									t.Fatal(err)
 								}
-								if working {
-									extra["supporting_work"].(map[string]any)["model"] = "agent-selected-model"
-								} else {
-									extra["model"] = "agent-selected-model"
-								}
-								data = extra
+								acquiredRequests = requests.Load()
+							} else {
+								intake, files = intakeFixture(mode)
 							}
-							break
-						}
-						if revising && task.Stage != "wiki-resolution" && task.Stage != "context-resolution" {
-							switch task.Stage {
-							case "intake-revision", "intake-update":
-								if task.Stage == "intake-update" && (len(task.SourceWork) != 0 || !updating) {
-									t.Fatal("update turned into per-source dispatch")
+							data = intake
+						case 2:
+							if task.Stage != "wiki" || len(req.Inputs) != 1 {
+								t.Fatal("wiki inputs")
+							}
+							initialIntake = req.Inputs[0]
+							wiki, files = wikiFixture(mode, req.Inputs[0])
+							data = wiki
+						case 3:
+							if task.Stage != "context" || len(req.Inputs) != 2 || req.Inputs[0] != wiki.Intake {
+								t.Fatal("context inputs")
+							}
+							if task.RuntimeResolutionAllowed != (intake.Complete && wikiComplete(wiki) && targetAuthorized) {
+								t.Fatal("prerequisite gate mismatch")
+							}
+							expectedContext, files = contextFixture(mode, scope, req.Inputs, intake, wiki)
+							if acquiring {
+								if !hasFile(acquiredFiles, "page-1") {
+									expectedContext.Observations[0].Evidence[0].FileID = "issue"
 								}
-								var fetched int32
-								name := tc.name
+								if !hasFile(acquiredFiles, "bundle") || len(intake.Attachments) == 0 || intake.Attachments[0].Content.Status != "available" || intake.Attachments[0].Analysis.Status != "available" {
+									expectedContext.Time = TimeResolution{Status: "unresolved", Anchors: []TimeAnchor{}}
+									expectedContext.Attempts[1].Evidence[0].FileID = "issue"
+									expectedContext.Attempts[1].Outcome = "attachment unavailable or incomplete; trustworthy incident anchor pending"
+								}
+							}
+							if supporting || tc.name == "planner-support" {
+								expectedContext, files = supportingContextFixture(t, ctx, supportingURL, tc.name, 0, task, req.Inputs, expectedContext, files)
+							}
+							data = expectedContext
+						default:
+							if task.Stage == "planner" {
+								plannerSteps++
+								if !planning || req.Output.SchemaID != PlannerSchema || task.Requirements != plannerRequirements || task.RuntimeResolutionAllowed {
+									t.Fatal("planner task/model contract mismatch")
+								}
+								for ref := range observedSupportingRefs {
+									if !slices.Contains(req.Inputs, ref) {
+										t.Fatalf("planner did not receive historical supporting owner %s/%s", ref.SchemaID, ref.AttemptID)
+									}
+								}
 								if working {
-									name = workFixture
+									expectedPlanner = plannerWorkFixture(t, tc.name, workKind, req, task, plannerSteps, initialIntake)
+								} else {
+									expectedPlanner = plannerFixture(t, tc.name, req, task, plannerSteps, initialIntake)
 								}
-								intake, files, fetched = refreshIntakeFixture(t, ctx, name, count, req.Inputs, task, revisionURL)
-								refreshRequests += fetched
-								if task.Stage == "intake-update" && count == 4 && (tc.name == "update-add" || tc.name == "update-replace") && fetched != 3 {
-									t.Fatal("new issue/link/attachment were not acquired in one Step")
+								if m1 {
+									expectedPlanner = workerPlannerFixture(t, tc.name, req, expectedPlanner, plannerSteps)
 								}
-								data = intake
-							case "wiki-revision":
-								revisionIntake = req.Inputs[0]
+								data = expectedPlanner
+								if tc.name == "planner-extra-control" || tc.name == "work-extra-control" {
+									var extra map[string]any
+									if err := json.Unmarshal(testJSON(data), &extra); err != nil {
+										t.Fatal(err)
+									}
+									if working {
+										extra["supporting_work"].(map[string]any)["model"] = "agent-selected-model"
+									} else {
+										extra["model"] = "agent-selected-model"
+									}
+									data = extra
+								}
+								break
+							}
+							if revising && task.Stage != "wiki-resolution" && task.Stage != "context-resolution" {
+								switch task.Stage {
+								case "intake-revision", "intake-update":
+									if task.Stage == "intake-update" && (len(task.SourceWork) != 0 || !updating) {
+										t.Fatal("update turned into per-source dispatch")
+									}
+									var fetched int32
+									name := tc.name
+									if working {
+										name = workFixture
+									}
+									intake, files, fetched = refreshIntakeFixture(t, ctx, name, count, req.Inputs, task, revisionURL)
+									refreshRequests += fetched
+									if task.Stage == "intake-update" && count == 4 && (tc.name == "update-add" || tc.name == "update-replace") && fetched != 3 {
+										t.Fatal("new issue/link/attachment were not acquired in one Step")
+									}
+									data = intake
+								case "wiki-revision":
+									revisionIntake = req.Inputs[0]
+									wikiMode := "wiki-matches"
+									if tc.name == "refresh-wiki-partial" || tc.name == "refresh-then-resolve" || tc.name == "update-then-resolve" {
+										wikiMode = "wiki-partial"
+									}
+									if tc.name == "refresh-false-no-matches" {
+										wikiMode = "wiki-false-empty"
+									}
+									wiki, files = wikiFixture(wikiMode, req.Inputs[0])
+									if tc.name == "refresh-old-wiki-binding" || tc.name == "update-old-wiki-binding" {
+										wiki.Intake = initialIntake
+									}
+									data = wiki
+								case "context-revision":
+									var prior publication[Context]
+									if err := protocol.ReadJSON(req.Inputs[2].Path, &prior); err != nil {
+										t.Fatal(err)
+									}
+									expectedContext, files = resolutionFixture("", mode, scope, req.Inputs, intake, wiki, prior.Data)
+									// Provider fixture qualifies retained source ownership independently.
+									for n := len(prior.Data.Attempts); n < len(expectedContext.Attempts); n++ {
+										if expectedContext.Attempts[n].Kind == "time" {
+											expectedContext.Attempts[n].Evidence = []Evidence{{FileID: "remediation"}}
+										}
+									}
+									if prior.Data.Time.Status != "resolved" {
+										for n := range expectedContext.Time.Anchors {
+											expectedContext.Time.Anchors[n].Evidence = Evidence{Ref: &req.Inputs[0], FileID: "new-bundle"}
+										}
+									}
+									if tc.name == "refresh-invalidated" {
+										expectedContext.Time.Anchors[0].Event = "reassessed event"
+										expectedContext.Time.Anchors[0].Evidence = Evidence{Ref: &req.Inputs[0], FileID: "new-bundle"}
+									}
+									if tc.name == "refresh-historical-wiki" {
+										expectedContext.Observations = append(expectedContext.Observations, Fact{Value: "Agent retained a prior wiki pattern", Evidence: []Evidence{{Ref: &prior.Data.Wiki, FileID: "wiki-page"}}})
+									}
+									if updating {
+										for n := range expectedContext.Time.Anchors {
+											if prior.Data.Time.Status != "resolved" {
+												expectedContext.Time.Anchors[n].Evidence = Evidence{FileID: "remediation"}
+											}
+										}
+										if tc.name == "update-retain-gap" {
+											expectedContext.Gaps = append(expectedContext.Gaps, prior.Data.Gaps...)
+											expectedContext.ResolvedGaps = nil
+											expectedContext.Readiness = "needs-resolution"
+										}
+									}
+									if tc.name == "refresh-drop-gap" || tc.name == "update-drop-gap" {
+										expectedContext.ResolvedGaps = nil
+									}
+									if tc.name == "refresh-dropped-history" {
+										expectedContext.Attempts = expectedContext.Attempts[len(prior.Data.Attempts):]
+									}
+									if tc.name == "refresh-context-foreign-ref" {
+										bad := prior.Data.Wiki
+										bad.RunID = "foreign"
+										expectedContext.Observations[0].Evidence[0].Ref = &bad
+									}
+									data = expectedContext
+								default:
+									t.Fatal("unexpected revision stage")
+								}
+								if requests.Load() != acquiredRequests || newRequests.Load() != refreshRequests {
+									t.Fatal("revision repeated original acquisition or missed designated work")
+								}
+								break
+							}
+							expectedIntake := initialIntake
+							if revising {
+								expectedIntake = revisionIntake
+							}
+							if (!resolving && !revising) || req.Inputs[0] != expectedIntake || task.Previous == nil || requests.Load() != acquiredRequests {
+								t.Fatal("resolution reacquired intake or lost committed input")
+							}
+							if task.Stage == "wiki-resolution" {
+								if len(req.Inputs) < 3 || *task.Previous != req.Inputs[2] || req.Inputs[1].SchemaID != WikiSchema {
+									t.Fatal("wiki remediation inputs")
+								}
 								wikiMode := "wiki-matches"
-								if tc.name == "refresh-wiki-partial" || tc.name == "refresh-then-resolve" || tc.name == "update-then-resolve" {
+								if tc.name == "resolve-wiki-partial-again" || (tc.name == "resolve-repeat" && count == 4) {
 									wikiMode = "wiki-partial"
 								}
-								if tc.name == "refresh-false-no-matches" {
-									wikiMode = "wiki-false-empty"
-								}
 								wiki, files = wikiFixture(wikiMode, req.Inputs[0])
-								if tc.name == "refresh-old-wiki-binding" || tc.name == "update-old-wiki-binding" {
-									wiki.Intake = initialIntake
-								}
 								data = wiki
-							case "context-revision":
+							} else if task.Stage == "context-resolution" {
+								if len(req.Inputs) < 3 || *task.Previous != req.Inputs[2] {
+									t.Fatal("context remediation inputs")
+								}
 								var prior publication[Context]
 								if err := protocol.ReadJSON(req.Inputs[2].Path, &prior); err != nil {
 									t.Fatal(err)
 								}
-								expectedContext, files = resolutionFixture("", mode, scope, req.Inputs, intake, wiki, prior.Data)
-								// Provider fixture qualifies retained source ownership independently.
-								for n := len(prior.Data.Attempts); n < len(expectedContext.Attempts); n++ {
-									if expectedContext.Attempts[n].Kind == "time" {
-										expectedContext.Attempts[n].Evidence = []Evidence{{FileID: "remediation"}}
-									}
+								kinds := []string{}
+								if prior.Data.Identity.Status != "resolved" {
+									kinds = append(kinds, "identity")
 								}
 								if prior.Data.Time.Status != "resolved" {
-									for n := range expectedContext.Time.Anchors {
-										expectedContext.Time.Anchors[n].Evidence = Evidence{Ref: &req.Inputs[0], FileID: "new-bundle"}
-									}
+									kinds = append(kinds, "time")
 								}
-								if tc.name == "refresh-invalidated" {
-									expectedContext.Time.Anchors[0].Event = "reassessed event"
-									expectedContext.Time.Anchors[0].Evidence = Evidence{Ref: &req.Inputs[0], FileID: "new-bundle"}
+								if strings.Join(task.ResolutionKinds, ",") != strings.Join(kinds, ",") || !reflect.DeepEqual(task.Gaps, prior.Data.Gaps) {
+									t.Fatal("Controller did not scope remediation to committed gaps")
 								}
-								if tc.name == "refresh-historical-wiki" {
-									expectedContext.Observations = append(expectedContext.Observations, Fact{Value: "Agent retained a prior wiki pattern", Evidence: []Evidence{{Ref: &prior.Data.Wiki, FileID: "wiki-page"}}})
+								if task.RuntimeResolutionAllowed != (intake.Complete && wikiComplete(wiki) && targetAuthorized) {
+									t.Fatal("resolution prerequisite gate mismatch")
 								}
-								if updating {
-									for n := range expectedContext.Time.Anchors {
-										if prior.Data.Time.Status != "resolved" {
-											expectedContext.Time.Anchors[n].Evidence = Evidence{FileID: "remediation"}
+								expectedContext, files = resolutionFixture(tc.name, mode, scope, req.Inputs, intake, wiki, prior.Data)
+								if supporting {
+									expectedContext, files = supportingContextFixture(t, ctx, supportingURL, tc.name, count-3, task, req.Inputs, expectedContext, files)
+								}
+								if revising {
+									for n := len(prior.Data.Attempts); n < len(expectedContext.Attempts); n++ {
+										if expectedContext.Attempts[n].Kind == "time" {
+											expectedContext.Attempts[n].Evidence = []Evidence{{FileID: "remediation"}}
 										}
 									}
-									if tc.name == "update-retain-gap" {
-										expectedContext.Gaps = append(expectedContext.Gaps, prior.Data.Gaps...)
-										expectedContext.ResolvedGaps = nil
-										expectedContext.Readiness = "needs-resolution"
-									}
-								}
-								if tc.name == "refresh-drop-gap" || tc.name == "update-drop-gap" {
-									expectedContext.ResolvedGaps = nil
-								}
-								if tc.name == "refresh-dropped-history" {
-									expectedContext.Attempts = expectedContext.Attempts[len(prior.Data.Attempts):]
-								}
-								if tc.name == "refresh-context-foreign-ref" {
-									bad := prior.Data.Wiki
-									bad.RunID = "foreign"
-									expectedContext.Observations[0].Evidence[0].Ref = &bad
 								}
 								data = expectedContext
-							default:
-								t.Fatal("unexpected revision stage")
+							} else {
+								t.Fatal("unexpected extra step")
 							}
-							if requests.Load() != acquiredRequests || newRequests.Load() != refreshRequests {
-								t.Fatal("revision repeated original acquisition or missed designated work")
-							}
-							break
-						}
-						expectedIntake := initialIntake
-						if revising {
-							expectedIntake = revisionIntake
-						}
-						if (!resolving && !revising) || req.Inputs[0] != expectedIntake || task.Previous == nil || requests.Load() != acquiredRequests {
-							t.Fatal("resolution reacquired intake or lost committed input")
-						}
-						if task.Stage == "wiki-resolution" {
-							if len(req.Inputs) < 3 || *task.Previous != req.Inputs[2] || req.Inputs[1].SchemaID != WikiSchema {
-								t.Fatal("wiki remediation inputs")
-							}
-							wikiMode := "wiki-matches"
-							if tc.name == "resolve-wiki-partial-again" || (tc.name == "resolve-repeat" && count == 4) {
-								wikiMode = "wiki-partial"
-							}
-							wiki, files = wikiFixture(wikiMode, req.Inputs[0])
-							data = wiki
-						} else if task.Stage == "context-resolution" {
-							if len(req.Inputs) < 3 || *task.Previous != req.Inputs[2] {
-								t.Fatal("context remediation inputs")
-							}
-							var prior publication[Context]
-							if err := protocol.ReadJSON(req.Inputs[2].Path, &prior); err != nil {
-								t.Fatal(err)
-							}
-							kinds := []string{}
-							if prior.Data.Identity.Status != "resolved" {
-								kinds = append(kinds, "identity")
-							}
-							if prior.Data.Time.Status != "resolved" {
-								kinds = append(kinds, "time")
-							}
-							if strings.Join(task.ResolutionKinds, ",") != strings.Join(kinds, ",") || !reflect.DeepEqual(task.Gaps, prior.Data.Gaps) {
-								t.Fatal("Controller did not scope remediation to committed gaps")
-							}
-							if task.RuntimeResolutionAllowed != (intake.Complete && wikiComplete(wiki) && targetAuthorized) {
-								t.Fatal("resolution prerequisite gate mismatch")
-							}
-							expectedContext, files = resolutionFixture(tc.name, mode, scope, req.Inputs, intake, wiki, prior.Data)
-							if supporting {
-								expectedContext, files = supportingContextFixture(t, ctx, supportingURL, tc.name, count-3, task, req.Inputs, expectedContext, files)
-							}
-							if revising {
-								for n := len(prior.Data.Attempts); n < len(expectedContext.Attempts); n++ {
-									if expectedContext.Attempts[n].Kind == "time" {
-										expectedContext.Attempts[n].Evidence = []Evidence{{FileID: "remediation"}}
-									}
-								}
-							}
-							data = expectedContext
-						} else {
-							t.Fatal("unexpected extra step")
 						}
 					}
 					if count > 3 {
@@ -2855,6 +3113,21 @@ func TestIntakeToContext(t *testing.T) {
 						writeCandidate(t, e.Message, req, data, files, tc.name == "file-escape")
 					}
 					ack := "settle"
+					if m1 && req.Output.SchemaID == WorkerSchema && tc.name == "m1-worker-provider-failure" {
+						ack = "provider-error"
+					}
+					if m1 && req.Output.SchemaID == WorkerSchema {
+						switch tc.name {
+						case "m1-worker-timeout":
+							ack = "hold"
+						case "m1-worker-cancel":
+							ack = "hold"
+							r.Cancel(engine.OriginControllerUser)
+						}
+					}
+					if m1 && task.Stage == "planner" && plannerSteps == 2 && tc.name == "m1-planner-provider-failure" {
+						ack = "provider-error"
+					}
 					if task.Stage == "planner" && plannerSteps == 2 {
 						switch tc.name {
 						case "planner-provider-failure":
@@ -2892,11 +3165,14 @@ func TestIntakeToContext(t *testing.T) {
 						}
 					}
 					cleanupAt := 4
-					if tc.name == "work-worker-cleanup-failure" {
+					if tc.name == "work-worker-cleanup-failure" || tc.name == "m1-worker-cleanup-failure" {
 						cleanupAt = 5
 					}
 					if tc.name == "cleanup-failure" || ((resolving || revising || planning) && strings.HasSuffix(tc.name, "-cleanup-failure") && count == cleanupAt) {
 						for sid := range hellos {
+							if m1 && sid != r.Snapshot().Sessions[r.Snapshot().Attempts[req.Identity.AttemptID].HandleID].Identity.SessionID {
+								continue
+							}
 							path := filepath.Join(bridge, sid+".json")
 							if _, err := os.Stat(path); os.IsNotExist(err) {
 								continue
@@ -3005,6 +3281,11 @@ func TestIntakeToContext(t *testing.T) {
 					if state.Data.Hypotheses[0].Evidence[0].Ref == nil || *state.Data.Hypotheses[0].Evidence[0].Ref != initialIntake || !slices.Contains(state.Data.Pending[0].Requirements, "Preserve the prior question when handing off") {
 						t.Fatal("supporting work lost historical owners or planning questions")
 					}
+					if tc.name == "m1-support" && !slices.ContainsFunc(state.Data.Hypotheses[0].Evidence, func(e Evidence) bool {
+						return e.Ref != nil && slices.Contains(state.Data.WorkerResults, *e.Ref) && e.FileID == "worker-raw"
+					}) {
+						t.Fatal("supporting handoff lost worker evidence alongside historical intake evidence")
+					}
 					for _, session := range report.Snapshot.Sessions {
 						if session.Role.Name == "triage-planner" && session.Role.Model != (runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}) {
 							t.Fatal("supporting handoff changed planner model")
@@ -3018,7 +3299,76 @@ func TestIntakeToContext(t *testing.T) {
 					}
 				}
 			}
-			if planning && !working {
+			if m1 {
+				wantSessions := tc.stages - (plannerSteps - 1)
+				if tc.name == "m1-handoff-before" || tc.name == "m1-handoff-after" || tc.name == "m1-support" {
+					wantSessions++
+				}
+				if len(report.Snapshot.Sessions) != wantSessions {
+					t.Fatal("M1 failed/successful session accounting changed")
+				}
+				if len(report.Snapshot.Attempts) != tc.stages {
+					t.Fatal("M1 attempt accounting changed")
+				}
+				if tc.failure {
+					var failure *engine.Failure
+					want := engine.WorkflowFailed
+					if tc.name == "m1-schema" {
+						want = engine.ContractInvalid
+					}
+					if tc.name == "m1-worker-provider-failure" || tc.name == "m1-planner-provider-failure" {
+						want = engine.ProviderFailed
+					}
+					if tc.name == "m1-worker-timeout" {
+						want = engine.TimedOut
+					}
+					if tc.name == "m1-worker-cancel" {
+						want = engine.Cancelled
+					}
+					if tc.name == "m1-worker-cleanup-failure" {
+						want = engine.CleanupFailed
+					}
+					if want == engine.WorkflowFailed {
+						wantText := map[string]string{
+							"m1-incomplete-no-gap": "complete/incomplete delivery with gaps", "m1-planner-invent-committed": "distinct workflow-accepted refs", "m1-query-utc": "UTC",
+							"m1-pending": "explicit proposed task ID", "m1-unsatisfied": "has no accepted result", "m1-redispatch": "task ID already completed",
+							"m1-reuse-id": "unique, uncompleted IDs", "m1-planner-drop": "worker_results differ from accepted deliveries", "m1-planner-invent": "distinct workflow-accepted refs",
+							"m1-task-id": "proposal/context/task/inputs mismatch", "m1-proposal": "proposal/context/task/inputs mismatch", "m1-context": "proposal/context/task/inputs mismatch", "m1-inputs": "proposal/context/task/inputs mismatch",
+							"m1-owner": "not an exact committed input", "m1-file": "unknown worker evidence file", "m1-evidence-analysis": "evidence-only worker cannot supply analysis",
+							"m1-task-utc": "nonzero UTC window", "m1-task-owner": "exact input owner/file", "m1-task-duplicate": "unique, uncompleted IDs",
+						}[tc.name]
+						var contractErr *contract.Error
+						if wantText == "" || !strings.Contains(report.Failure.Error(), wantText) || errors.As(report.Failure, &failure) || errors.As(report.Failure, &contractErr) {
+							t.Fatalf("M1 semantic rejection changed: %v", report.Failure)
+						}
+					} else if !errors.As(report.Failure, &failure) || failure.Code != want {
+						t.Fatalf("M1 failure classification: want %s got %v", want, report.Failure)
+					}
+					if tc.name == "m1-worker-timeout" && failure != nil && failure.Origin != engine.OriginAttemptDeadline {
+						t.Fatal("worker timeout lost deadline origin")
+					}
+					if tc.name == "m1-worker-provider-failure" || tc.name == "m1-worker-timeout" || tc.name == "m1-worker-cancel" || tc.name == "m1-schema" || tc.name == "m1-planner-provider-failure" {
+						failed := 0
+						for _, attempt := range report.Snapshot.Attempts {
+							if attempt.State != engine.Succeeded {
+								failed++
+								if attempt.Output != nil {
+									t.Fatal("failed Step candidate became committed")
+								}
+							}
+						}
+						if failed != 1 {
+							t.Fatal("execution failure was not retained as one failed attempt")
+						}
+					}
+				} else {
+					var accepted publication[PlannerState]
+					if err := protocol.ReadJSON(plannerRef.Path, &accepted); err != nil || !reflect.DeepEqual(accepted.Data, expectedPlanner) {
+						t.Fatal("M1 Planner did not retain result state", err)
+					}
+				}
+			}
+			if planning && !working && !m1 {
 				if err := assertPlannerOutcome(report, tc.name, tc.failure, plannerRef, firstPlannerRef, expectedPlanner); err != nil {
 					t.Fatal(err)
 				}
@@ -3028,6 +3378,9 @@ func TestIntakeToContext(t *testing.T) {
 			}
 			if !tc.failure {
 				sessions := tc.stages
+				if m1 && tc.name != "m1-handoff-before" {
+					sessions--
+				}
 				if tc.name == "planner-reuse" || tc.name == "planner-reuse-handoff" || tc.name == "work-reuse" {
 					sessions--
 				}
