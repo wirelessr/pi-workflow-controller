@@ -2,7 +2,7 @@
 
 本文件落實 [專案憲法第七條](../AGENTS.md)，是開發、review 與接手的必要入口。規範共用機制的收斂順序，不新增 WorkflowBase、DSL、工具權限框架或外部 workflow config。
 
-**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，R2 已提供共用 report 判定，實際入口見下表；R3–R4 的目標入口尚待實作／遷移，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
+**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，R2 已提供共用 report 判定，R3 已共用 publication 投影與 bounded-read loop，實際入口見下表；R4 的目標入口尚待實作／遷移，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
 
 ## 1. 單一規範來源與接手 gate
 
@@ -26,8 +26,8 @@
 | Context usage 與 cleanup report | `engine/session.go`、`runtime/types.go` | 已有 API；triage 的容量／續作策略尚需接線 |
 | Discovery 自動 preflight | `runtime.New` 固定有效 BridgeDir；`Pi.Start` → `runtime/preflight.go` 的 `preflightDiscovery` | R1 已接線：review 私有 guard 已移除；smoke/review/triage 共用 Start，仍須部署版本核對/live 驗收 |
 | 嚴格收尾確認 | `runtime.CleanupReport.ConfirmsLocalClose(expectedSessionID)` | R2 已接線：triage slice／Planner 共用；caller 先處理 CloseSessionReport error，普通 CloseSession 不改義 |
-| Envelope／file consumer | review `readReviewContract`、triage `readAccepted`／`publication`／`file` | R3：共用表示與 committed 消費入口 |
-| Published／checkout 二次讀檔 | review `readCheckFile`／`readPublishedFile`、triage `rawFile`、contract `copyStable` | R3：同單元內先區分讀檔保證，再收斂機械部分 |
+| Envelope／file consumer | `contract.FileEntry`／`Publication[T]`／`DecodePublication[T]`；review `readReviewContract`、triage `readAccepted` 經 `engine.ReadContract` 後消費 | R3 已接線：只共用投影與 fresh decode，不新增授權；review ID 索引、triage lineage/cache 留 caller |
+| Published／checkout 二次讀檔 | `contract.ReadBounded`；review `readCheckFile`／`readPublishedFile`、triage `rawFile` | R3 已接線：共用 bounded loop，root/open/identity 與錯誤政策留 adapter；Store `copyStable` 的雙 digest 不合併 |
 | RPC 測試 transport | `testutil/protocol` 已有 child Serve／Control；host pumps 分散在 review／triage tests | R4：共用 host lifecycle 與 envelope writer |
 | Skill extraction／report renderer | 目前只有 review 的 `ExtractSkills` 與 `render_report.py` | R5：第二個實際 consumer 出現時才抽機械部分 |
 
@@ -73,6 +73,8 @@ R3 是單一實作／review／commit 單元，以下兩組驗收要求須一起�
 
 #### 驗收一：typed publication／FileEntry 共用
 
+**已實作接線：** FileEntry 只在 contract 宣告；Store／workflow 的本地 type aliases 保留原拼字，無第二套欄位。DecodePublication 只解碼 Data/Files，不驗 schema 或授權；兩個 workflow 仍先經 engine.ReadContract，triage 僅在原同步 pass 重用 verified bytes，每次 fresh decode。Review 的 map/ID checks 留原 caller，engine.Decode 的 UseNumber 語義不變。
+
 **目標與責任層：** 共用 contract file 表示及經 engine committed resolver 的 typed publication 消費入口。依據 review／triage 的實際兩個 consumers 設計，不建立只有預想 callers 的泛型框架。
 
 - 遷移兩邊同形 file entry、envelope 解碼及必要索引接線；不能只新增 helper 但保留兩套各自演化。
@@ -83,6 +85,8 @@ R3 是單一實作／review／commit 單元，以下兩組驗收要求須一起�
 **完成出口：** review 與 triage 都使用真共用入口；原 consumer 的錯誤／ID／Ref／Files 行為有對照 regression，cache 不跨邊界，Store-only publication 不獲 engine 授權。記錄必要的 source/API 相容性差異與實際 callers。
 
 #### 驗收二：published-file 與 checkout reader 的安全邊界
+
+**已實作接線：** ReadBounded 重用 contract 的 contextReader，每次最多讀 32 KiB，總量最多 limit+1，保留 partial I/O bytes 與原 cause。Review 使用每塊取消並自行將錯誤轉成 nil bytes；triage 明確保留 read 前後取消與 I/O-error 優先序，因此共用 loop 不額外介入其取消時點。兩個 adapter 保留原 root/open/stat/identity、size 與錯誤文字；不增加 NOFOLLOW 或 SameFile 到 triage，不改 Store 的 streaming/double-digest 驗收。Root 內可解析 symlink 仍依原 reader 政策，不等於 Store 允許 symlink publication。
 
 **目標：** 減少 bounded/cancellable 讀取機械重複，但不將不同信任邊界混成一個含糊 helper。
 

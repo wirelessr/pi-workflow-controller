@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -27,6 +28,82 @@ import (
 	"pi-workflow-controller/internal/runtime"
 	"pi-workflow-controller/internal/testutil/protocol"
 )
+
+func TestRawFileReaderBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, want, message string
+		cancel                    bool
+		cause                     error
+	}{
+		{name: "regular", path: "data", want: "body"},
+		{name: "empty", path: "empty"},
+		{name: "in-root-symlink", path: "link", want: "body"},
+		{name: "outside-symlink", path: "escape", message: "escapes from parent"},
+		{name: "nonlocal", path: "../data", message: "unknown/local file required"},
+		{name: "unknown", message: "unknown/local file required"},
+		{name: "missing", path: "missing", cause: os.ErrNotExist},
+		{name: "directory", path: "dir", message: "invalid evidence file"},
+		{name: "fifo", path: "fifo", message: "invalid evidence file"},
+		{name: "oversized", path: "large", message: "invalid evidence file"},
+		{name: "cancelled", path: "data", cancel: true, cause: context.Canceled},
+		{name: "missing-before-cancel", path: "missing", cancel: true, cause: os.ErrNotExist},
+		{name: "stat-before-cancel", path: "dir", cancel: true, message: "invalid evidence file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "data"), []byte("body"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "empty"), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(dir, "dir"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("data", filepath.Join(dir, "link")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(t.TempDir(), "outside"), filepath.Join(dir, "escape")); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(filepath.Join(dir, "fifo"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.Create(filepath.Join(dir, "large"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = f.Truncate((64 << 20) + 1)
+			closeErr := f.Close()
+			if err != nil || closeErr != nil {
+				t.Fatal(errors.Join(err, closeErr))
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancel {
+				cancel()
+			}
+			raw, err := rawFile(ctx, contract.Ref{Path: filepath.Join(dir, "contract.json")}, []file{{ID: "f", Kind: "evidence", Path: tc.path}}, "f")
+			if tc.cause != nil {
+				if !errors.Is(err, tc.cause) {
+					t.Fatalf("error = %v, want %v", err, tc.cause)
+				}
+			} else if tc.message != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.message) {
+					t.Fatalf("error = %v, want %q", err, tc.message)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if err == nil && raw == nil {
+				t.Fatal("successful raw read must preserve non-nil empty bytes")
+			}
+			if string(raw) != tc.want {
+				t.Fatalf("body = %q, want %q", raw, tc.want)
+			}
+		})
+	}
+}
 
 func TestTriageProtocolSubprocess(t *testing.T) {
 	if os.Getenv("PWC_TRIAGE_PROTOCOL") != "1" {

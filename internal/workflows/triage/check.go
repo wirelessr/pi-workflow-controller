@@ -3,8 +3,8 @@ package triage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,16 +19,9 @@ import (
 	"pi-workflow-controller/internal/engine"
 )
 
-type file struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"`
-	Path string `json:"path"`
-}
+type file = contract.FileEntry
 
-type publication[T any] struct {
-	Data  T      `json:"data"`
-	Files []file `json:"files"`
-}
+type publication[T any] = contract.Publication[T]
 
 func nonblank(s string) bool { return strings.TrimSpace(s) != "" }
 func texts(values []string) bool {
@@ -99,9 +92,14 @@ func rawFile(ctx context.Context, ref contract.Ref, files []file, id string) ([]
 	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
-	raw, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if len(raw) > limit {
+	// Keep this adapter's before/after cancellation and I/O-error precedence.
+	raw, err := contract.ReadBounded(context.Background(), f, limit)
+	if errors.Is(err, contract.ErrReadLimit) {
 		return nil, fmt.Errorf("evidence exceeds read limit")
+	}
+	// Preserve io.ReadAll's non-nil empty result, including zero-byte I/O errors.
+	if raw == nil {
+		raw = []byte{}
 	}
 	if err == nil {
 		err = context.Cause(ctx)

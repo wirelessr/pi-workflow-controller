@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -1950,5 +1952,129 @@ func TestStoreDetectsSourceChangesDuringCopy(t *testing.T) {
 				storeTestReport(t, a, id, false)
 			})
 		}
+	}
+}
+
+type boundedTestReader func([]byte) (int, error)
+
+func (r boundedTestReader) Read(p []byte) (int, error) { return r(p) }
+
+func TestReadBoundedReaderBoundary(t *testing.T) {
+	sentinelIO := errors.New("reader failure")
+	for _, tc := range []struct {
+		name, source, want string
+		limit              int64
+		finalErr, wantErr  error
+		preCancel, cancel  bool
+		chunk, calls, read int
+		wantNil            bool
+	}{
+		{name: "empty", limit: 3, calls: 1},
+		{name: "zero limit empty", calls: 1},
+		{name: "exact", source: "abc", limit: 3, want: "abc", calls: 2, read: 3},
+		{name: "over limit", source: "abcdef", limit: 3, wantErr: ErrReadLimit, calls: 1, read: 4, wantNil: true},
+		{name: "zero limit nonempty", source: "abc", wantErr: ErrReadLimit, calls: 1, read: 1, wantNil: true},
+		{name: "EOF with final bytes", source: "abc", limit: 3, finalErr: io.EOF, want: "abc", calls: 1, read: 3},
+		{name: "partial with IO error", source: "abc", limit: 9, finalErr: sentinelIO, wantErr: sentinelIO, want: "abc", calls: 1, read: 3},
+		{name: "pre cancel", source: "abc", limit: 3, preCancel: true, wantErr: context.Canceled, wantNil: true},
+		{name: "cancel during read", source: "abcdef", limit: 9, chunk: 3, cancel: true, want: "abc", wantErr: context.Canceled, calls: 1, read: 3},
+		{name: "limit before IO error", source: "abcd", limit: 3, finalErr: sentinelIO, wantErr: ErrReadLimit, calls: 1, read: 4, wantNil: true},
+		{name: "limit before EOF", source: "abcd", limit: 3, finalErr: io.EOF, wantErr: ErrReadLimit, calls: 1, read: 4, wantNil: true},
+		{name: "multi block bounded", source: strings.Repeat("x", 1<<16), limit: 1 << 15, wantErr: ErrReadLimit, calls: 2, read: (1 << 15) + 1, wantNil: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.preCancel {
+				cancel()
+			}
+			source := strings.NewReader(tc.source)
+			calls, total := 0, 0
+			r := boundedTestReader(func(p []byte) (int, error) {
+				calls++
+				if int64(total+len(p)) > tc.limit+1 {
+					t.Fatalf("reader requested %d bytes after %d, limit=%d", len(p), total, tc.limit)
+				}
+				if tc.chunk > 0 && len(p) > tc.chunk {
+					p = p[:tc.chunk]
+				}
+				n, err := source.Read(p)
+				total += n
+				if tc.cancel {
+					cancel()
+				}
+				if source.Len() == 0 && tc.finalErr != nil {
+					err = tc.finalErr
+				}
+				return n, err
+			})
+			got, err := ReadBounded(ctx, r, tc.limit)
+			if !errors.Is(err, tc.wantErr) || string(got) != tc.want || (tc.wantNil && got != nil) {
+				t.Fatalf("got bytes=%q nil=%t err=%v; want bytes=%q nil=%t err=%v", got, got == nil, err, tc.want, tc.wantNil, tc.wantErr)
+			}
+			if calls != tc.calls || total != tc.read || int64(total) > tc.limit+1 {
+				t.Fatalf("reader calls=%d bytes=%d; want calls=%d bytes=%d, limit=%d", calls, total, tc.calls, tc.read, tc.limit)
+			}
+		})
+	}
+}
+
+func TestDecodePublicationFreshMutableData(t *testing.T) {
+	type data struct {
+		Nested map[string][]string   `json:"nested"`
+		Groups []map[string][]string `json:"groups"`
+	}
+	raw := json.RawMessage(`{"data":{"nested":{"key":["original"]},"groups":[{"key":["original"]}]},"files":[{"id":"evidence","kind":"artifact","path":"original.txt"}]}`)
+	original := bytes.Clone(raw)
+	first, err := DecodePublication[data](raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := DecodePublication[data](raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Data.Nested["key"][0] = "changed"
+	first.Data.Nested["added"] = []string{"changed"}
+	first.Data.Groups[0]["key"][0] = "changed"
+	first.Data.Groups[0]["added"] = []string{"changed"}
+	first.Files[0].ID = "changed"
+	first.Files[0].Path = "changed.txt"
+	third, err := DecodePublication[data](raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Publication[data]{
+		Data:  data{Nested: map[string][]string{"key": {"original"}}, Groups: []map[string][]string{{"key": {"original"}}}},
+		Files: []FileEntry{{ID: "evidence", Kind: "artifact", Path: "original.txt"}},
+	}
+	if !reflect.DeepEqual(second, want) || !reflect.DeepEqual(third, want) || !bytes.Equal(raw, original) {
+		t.Fatalf("decode shared mutable state: second=%+v third=%+v rawChanged=%t", second, third, !bytes.Equal(raw, original))
+	}
+}
+
+func TestDecodePublicationUnmarshalCompatibility(t *testing.T) {
+	type data struct {
+		Answer string `json:"answer"`
+	}
+	for _, tc := range []struct{ name, raw string }{
+		{"unknown fields", `{"data":{"answer":"yes","unknown":true},"unknown":true}`},
+		{"duplicate fields", `{"data":{"answer":"first","answer":"last"}}`},
+		{"case insensitive fields", `{"DATA":{"ANSWER":"yes"},"FILES":[]}`},
+		{"null", `null`},
+		{"missing fields", `{}`},
+		{"declarations without authorization", `{"files":[{"id":"","kind":"unknown","path":"../outside"},{"id":"","path":"/outside"}]}`},
+		{"trailing JSON", `{"data":{"answer":"yes"}} {}`},
+		{"type error preserves partial data", `{"data":{"answer":1},"files":[{"id":"retained"}]}`},
+		{"malformed JSON", `{"data":`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var want Publication[data]
+			wantErr := json.Unmarshal([]byte(tc.raw), &want)
+			got, err := DecodePublication[data](json.RawMessage(tc.raw))
+			if !reflect.DeepEqual(got, want) || reflect.TypeOf(err) != reflect.TypeOf(wantErr) || fmt.Sprint(err) != fmt.Sprint(wantErr) {
+				t.Fatalf("got=%+v err=%v; Unmarshal=%+v err=%v", got, err, want, wantErr)
+			}
+		})
 	}
 }

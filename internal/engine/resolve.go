@@ -89,7 +89,7 @@ func (r *Run) resolveFinal(ctx context.Context, result Result) (*FinalDelivery, 
 	final := &FinalDelivery{Output: selected.Output, Ref: ref}
 	if selected.FileID != "" {
 		var envelope struct {
-			Files []struct{ ID, Kind, Path string }
+			Files []contract.FileEntry
 		}
 		if err := json.Unmarshal(raw, &envelope); err != nil {
 			return nil, err

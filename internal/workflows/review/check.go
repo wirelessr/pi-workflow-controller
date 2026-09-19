@@ -5,8 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,17 +23,10 @@ func pin(c *Checkout) Pin {
 	return Pin{URL: c.URL, Repository: c.Repository, Number: c.Number, BaseSHA: c.BaseSHA, HeadSHA: c.HeadSHA, MergeBase: c.MergeBase, DiffRange: c.DiffRange, ContextID: c.ContextID}
 }
 
-type checkFile struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"`
-	Path string `json:"path"`
-}
+type checkFile = contract.FileEntry
 
 func readReviewContract[T any](ctx context.Context, r *engine.Run, ref contract.Ref, schema string) (T, map[string]checkFile, error) {
-	var envelope struct {
-		Data  T           `json:"data"`
-		Files []checkFile `json:"files"`
-	}
+	var envelope contract.Publication[T]
 	if ref.SchemaID != schema {
 		return envelope.Data, nil, fmt.Errorf("expected schema %s, got %s", schema, ref.SchemaID)
 	}
@@ -41,7 +34,7 @@ func readReviewContract[T any](ctx context.Context, r *engine.Run, ref contract.
 	if err != nil {
 		return envelope.Data, nil, err
 	}
-	if err = json.Unmarshal(raw, &envelope); err != nil {
+	if envelope, err = contract.DecodePublication[T](raw); err != nil {
 		return envelope.Data, nil, err
 	}
 	files := make(map[string]checkFile, len(envelope.Files))
@@ -84,25 +77,14 @@ func readCheckFile(ctx context.Context, root *os.Root, path string) ([]byte, err
 	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
 		return nil, fmt.Errorf("file changed while opening: %q", path)
 	}
-	var out bytes.Buffer
-	block := make([]byte, 32<<10)
-	for {
-		if err := context.Cause(ctx); err != nil {
-			return nil, err
-		}
-		n, err := f.Read(block)
-		if int64(out.Len()+n) > checkReadLimit {
-			return nil, fmt.Errorf("file exceeds review read limit: %q", path)
-		}
-		out.Write(block[:n])
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
+	raw, err := contract.ReadBounded(ctx, f, checkReadLimit)
+	if errors.Is(err, contract.ErrReadLimit) {
+		return nil, fmt.Errorf("file exceeds review read limit: %q", path)
 	}
-	return out.Bytes(), nil
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 func readPublishedFile(ctx context.Context, ref contract.Ref, f checkFile) ([]byte, error) {

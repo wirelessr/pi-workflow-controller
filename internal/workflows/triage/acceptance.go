@@ -41,6 +41,5 @@ func readAccepted[T any](a *acceptance, ref contract.Ref, schema string) (public
 		a.publications[ref] = raw
 	}
 	// Decode anew so callers cannot mutate another check's accepted inputs.
-	err := json.Unmarshal(raw, &p)
-	return p, err
+	return contract.DecodePublication[T](raw)
 }

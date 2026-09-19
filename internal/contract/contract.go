@@ -123,11 +123,7 @@ type Staged struct {
 	used         bool
 }
 
-type fileEntry struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"`
-	Path string `json:"path"`
-}
+type fileEntry = FileEntry
 
 type envelope struct {
 	Meta struct {
