@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/verification.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["claim", "role", "allowed_evidence", "assessment"],
+  "properties": {
+    "claim": {"$ref": "common.v1.json#/$defs/ref"},
+    "role": {"enum": ["pro", "con", "cross"]},
+    "allowed_evidence": {"$ref": "#/$defs/basis"},
+    "assessment": {"$ref": "#/$defs/assessment"}
+  },
+  "$defs": {
+    "basis": {"type": "array", "items": {"$ref": "common.v1.json#/$defs/evidence"}},
+    "issue": {
+      "type": "object", "additionalProperties": false,
+      "required": ["statement", "disposition", "reason", "basis"],
+      "properties": {
+        "statement": {"type": "string", "minLength": 1},
+        "disposition": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "basis": {"$ref": "#/$defs/basis"}
+      }
+    },
+    "assessment": {
+      "description": "Agent declarations with evidence and limitations. Strings are not Controller proof, taxonomy or voting. State missing measurement conditions explicitly, never invent them.",
+      "type": "object", "additionalProperties": false,
+      "required": ["support", "reason", "basis", "runtime_basis", "measurement", "window", "filter", "environment", "release", "counterexamples", "gaps"],
+      "properties": {
+        "support": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "basis": {"$ref": "#/$defs/basis"},
+        "runtime_basis": {"$ref": "#/$defs/basis"},
+        "measurement": {"type": "string", "minLength": 1},
+        "window": {"type": "string", "minLength": 1},
+        "filter": {"type": "string", "minLength": 1},
+        "environment": {"type": "string", "minLength": 1},
+        "release": {"type": "string", "minLength": 1},
+        "counterexamples": {"type": "array", "items": {"$ref": "#/$defs/issue"}},
+        "gaps": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "rolePolicy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model", "retries"],
+      "properties": {
+        "model": {
+          "type": "object", "additionalProperties": false,
+          "required": ["Provider", "ID", "Thinking"],
+          "properties": {
+            "Provider": {"type": "string", "minLength": 1},
+            "ID": {"type": "string", "minLength": 1},
+            "Thinking": {"type": "string"}
+          }
+        },
+        "retries": {"type": "integer", "minimum": 0}
+      }
+    },
+    "policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pro", "con", "cross"],
+      "properties": {
+        "pro": {"$ref": "#/$defs/rolePolicy"},
+        "con": {"$ref": "#/$defs/rolePolicy"},
+        "cross": {"$ref": "#/$defs/rolePolicy"}
+      }
+    },
+    "roleDelivery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "result", "unavailable", "failures", "exhausted"],
+      "properties": {
+        "role": {"enum": ["pro", "con", "cross"]},
+        "result": {"anyOf": [{"$ref": "common.v1.json#/$defs/ref"}, {"type": "null"}]},
+        "unavailable": {"type": "boolean"},
+        "failures": {"type": "array", "items": {"$ref": "planner.v1.json#/$defs/recoveryFailure"}},
+        "exhausted": {"enum": ["", "RetryExhausted"]}
+      }
+    },
+    "delivery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "proposal", "claim", "roles"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "proposal": {"$ref": "common.v1.json#/$defs/ref"},
+        "claim": {"$ref": "common.v1.json#/$defs/ref"},
+        "roles": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/roleDelivery"}}
+      }
+    },
+    "state": {
+      "description": "Echo Controller metadata exactly, retaining all claim and delivery history with actual owners. Pending committed refs become consumed state only in a successful Planner snapshot.",
+      "type": "object", "additionalProperties": false,
+      "required": ["policy", "claims", "deliveries"],
+      "properties": {
+        "policy": {"$ref": "#/$defs/policy"},
+        "claims": {"type": "array", "uniqueItems": true, "items": {"$ref": "common.v1.json#/$defs/ref"}},
+        "deliveries": {"type": "array", "items": {"$ref": "#/$defs/delivery"}}
+      }
+    },
+    "review": {
+      "type": "object", "additionalProperties": false,
+      "required": ["delivery_id", "claim", "assessment", "disputes", "next_action"],
+      "properties": {
+        "delivery_id": {"type": "string", "minLength": 1},
+        "claim": {"$ref": "common.v1.json#/$defs/ref"},
+        "assessment": {"$ref": "#/$defs/assessment"},
+        "disputes": {"type": "array", "items": {"$ref": "#/$defs/issue"}},
+        "next_action": {"enum": ["workers", "support", "wiki", "reframe", "verify", "plan", "yield"]}
+      }
+    }
+  }
+}

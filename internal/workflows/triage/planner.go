@@ -19,21 +19,24 @@ const PlannerSchema = "triage.planner.v1"
 // dispatch authorization, verified claim, report or crash-resume checkpoint.
 // Assessments and requirements are agent reasoning, never Go verdicts.
 type PlannerState struct {
-	Context         contract.Ref           `json:"context"`
-	Previous        *contract.Ref          `json:"previous"`
-	Hypotheses      []PlannerHypothesis    `json:"hypotheses"`
-	Pending         []PlannerQuestion      `json:"pending"`
-	Gaps            []string               `json:"gaps"`
-	Rationale       string                 `json:"rationale"`
-	SupportingWork  *SupportingWork        `json:"supporting_work,omitempty"`
-	WorkerTasks     []WorkerTask           `json:"worker_tasks,omitempty"`
-	WorkerResults   []contract.Ref         `json:"worker_results,omitempty"`
-	WikiTask        *InvestigationWikiTask `json:"wiki_task,omitempty"`
-	WikiResults     []contract.Ref         `json:"wiki_results,omitempty"`
-	Ledger          *InvestigationLedger   `json:"ledger,omitempty"`
-	Recovery        *PlannerRecovery       `json:"recovery,omitempty"`
-	RecoveryChoices []RecoveryChoice       `json:"recovery_choices,omitempty"`
-	Checkpoint      *PlannerCheckpoint     `json:"checkpoint,omitempty"`
+	Context             contract.Ref               `json:"context"`
+	Previous            *contract.Ref              `json:"previous"`
+	Hypotheses          []PlannerHypothesis        `json:"hypotheses"`
+	Pending             []PlannerQuestion          `json:"pending"`
+	Gaps                []string                   `json:"gaps"`
+	Rationale           string                     `json:"rationale"`
+	SupportingWork      *SupportingWork            `json:"supporting_work,omitempty"`
+	WorkerTasks         []WorkerTask               `json:"worker_tasks,omitempty"`
+	WorkerResults       []contract.Ref             `json:"worker_results,omitempty"`
+	WikiTask            *InvestigationWikiTask     `json:"wiki_task,omitempty"`
+	WikiResults         []contract.Ref             `json:"wiki_results,omitempty"`
+	Ledger              *InvestigationLedger       `json:"ledger,omitempty"`
+	Recovery            *PlannerRecovery           `json:"recovery,omitempty"`
+	RecoveryChoices     []RecoveryChoice           `json:"recovery_choices,omitempty"`
+	Checkpoint          *PlannerCheckpoint         `json:"checkpoint,omitempty"`
+	Verification        *PlannerVerification       `json:"verification,omitempty"`
+	VerificationRequest *VerificationRequest       `json:"verification_request,omitempty"`
+	VerificationReview  *PlannerVerificationReview `json:"verification_review,omitempty"`
 }
 
 type PlannerHypothesis struct {
@@ -73,6 +76,7 @@ type plannerCaller struct {
 	identity        runtime.Identity
 	recovery        *PlannerRecovery
 	recoveryErrors  []error
+	verification    *PlannerVerification
 }
 
 func startPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime.ModelSpec, contextRef contract.Ref) (*plannerCaller, error) {
@@ -119,6 +123,7 @@ func openPlannerWithEvidence(ctx context.Context, r *engine.Run, scope Scope, mo
 	adaptive := false
 	var checkpoint *PlannerCheckpoint
 	var recovery *PlannerRecovery
+	var verification *PlannerVerification
 	for i := len(chain) - 1; i >= 0; i-- {
 		state, err := readAccepted[PlannerState](a, chain[i], PlannerSchema)
 		if err != nil {
@@ -140,6 +145,7 @@ func openPlannerWithEvidence(ctx context.Context, r *engine.Run, scope Scope, mo
 		adaptive = state.Data.Ledger != nil
 		checkpoint = state.Data.Checkpoint
 		recovery = state.Data.Recovery
+		verification = state.Data.Verification
 		prior = &chain[i]
 	}
 	if err := a.checkPlannerContextChange(h, prior); err != nil {
@@ -156,7 +162,7 @@ func openPlannerWithEvidence(ctx context.Context, r *engine.Run, scope Scope, mo
 			return nil, err
 		}
 	}
-	p := &plannerCaller{r: r, scope: scope, model: model, history: h, handle: handle, last: prior, workerResults: slices.Clone(accepted), wikiResults: slices.Clone(wikiResults), adaptive: adaptive, identity: identity, recovery: recovery}
+	p := &plannerCaller{r: r, scope: scope, model: model, history: h, handle: handle, last: prior, workerResults: slices.Clone(accepted), wikiResults: slices.Clone(wikiResults), adaptive: adaptive, identity: identity, recovery: recovery, verification: verification}
 	if checkpoint != nil {
 		policy := checkpoint.Policy
 		p.capacity, p.adaptiveNote = &policy, checkpoint.AdaptiveNote
@@ -302,6 +308,15 @@ func (p *plannerCaller) stepInScope(ctx context.Context, executionScope *engine.
 			}
 		}
 	}
+	if err := p.checkPendingClaims(ctx); err != nil {
+		p.stopped = true
+		return contract.Ref{}, err
+	}
+	inputs, err = p.verificationInputs(a, inputs)
+	if err != nil {
+		p.stopped = true
+		return contract.Ref{}, err
+	}
 	requirements := plannerRequirements
 	if p.adaptive {
 		requirements += "\n\n" + adaptiveRequirements
@@ -317,14 +332,18 @@ func (p *plannerCaller) stepInScope(ctx context.Context, executionScope *engine.
 	if p.recovery != nil {
 		requirements += "\n\n" + recoveryRequirements
 	}
+	if p.verification != nil {
+		requirements += "\n\n" + verificationPlannerRequirements
+	}
 	task := struct {
 		stageTask
-		WorkerResults []contract.Ref     `json:"worker_results"`
-		WikiResults   *[]contract.Ref    `json:"wiki_results,omitempty"`
-		AdaptiveNote  string             `json:"adaptive_note,omitempty"`
-		Checkpoint    *PlannerCheckpoint `json:"checkpoint,omitempty"`
-		Recovery      *PlannerRecovery   `json:"recovery,omitempty"`
-	}{stageTask{Stage: "planner", Scope: p.scope, Previous: p.last, Gaps: p.history.value.Gaps, Requirements: requirements}, slices.Clone(p.workerResults), nil, p.adaptiveNote, checkpoint, p.recoveryTask()}
+		WorkerResults []contract.Ref       `json:"worker_results"`
+		WikiResults   *[]contract.Ref      `json:"wiki_results,omitempty"`
+		AdaptiveNote  string               `json:"adaptive_note,omitempty"`
+		Checkpoint    *PlannerCheckpoint   `json:"checkpoint,omitempty"`
+		Recovery      *PlannerRecovery     `json:"recovery,omitempty"`
+		Verification  *PlannerVerification `json:"verification,omitempty"`
+	}{stageTask{Stage: "planner", Scope: p.scope, Previous: p.last, Gaps: p.history.value.Gaps, Requirements: requirements}, slices.Clone(p.workerResults), nil, p.adaptiveNote, checkpoint, p.recoveryTask(), p.verificationTask()}
 	if p.adaptive {
 		wikiResults := append([]contract.Ref{}, p.wikiResults...)
 		task.WikiResults = &wikiResults
@@ -365,6 +384,9 @@ func (p *plannerCaller) stepInScope(ctx context.Context, executionScope *engine.
 			}
 			if err == nil && recoveryJSON(state.Data.Recovery) != recoveryJSON(task.Recovery) {
 				err = fmt.Errorf("planner recovery differs from supplied delivery metadata")
+			}
+			if err == nil && recoveryJSON(state.Data.Verification) != recoveryJSON(task.Verification) {
+				err = fmt.Errorf("planner verification differs from supplied claim/feedback metadata")
 			}
 			if err == nil && state.Data.Ledger != nil {
 				adaptive = true

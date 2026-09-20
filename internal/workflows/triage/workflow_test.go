@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1286,7 +1287,7 @@ func workerFixture(name string, request workerRequest, inputs []contract.Ref) (W
 	v := WorkerResult{Proposal: request.Proposal, Context: request.Context, TaskID: request.Task.ID, Work: "Inspected an anonymous fixture", Status: "complete", Inputs: slices.Clone(inputs), Evidence: []Evidence{{FileID: "worker-raw"}}, Queries: []SupportingQuery{}, Analysis: []Fact{}, Gaps: []string{}, Next: []PlannerQuestion{}}
 	files := map[string][]byte{"worker-raw": []byte("anonymous evidence\n")}
 	v.Evidence = append(v.Evidence, request.Task.Basis...)
-	if strings.HasPrefix(name, "m4-reframe-") && strings.HasPrefix(request.Task.ID, "inspection") {
+	if (strings.HasPrefix(name, "m4-reframe-") || name == "m5-supplement-reframe-inspection-resume") && strings.HasPrefix(request.Task.ID, "inspection") {
 		v.Work = "Read anonymous-wiki-job status without creating, restarting or resubmitting work"
 		files["worker-raw"] = []byte("job=anonymous-wiki-job status=completed; existing partial results available for read-only retrieval; no remote resubmission; hypothesis applicability unverified\n")
 	}
@@ -1470,6 +1471,200 @@ func corruptInputEvidence(ref contract.Ref) error {
 
 func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stageTask, step int) PlannerState {
 	t.Helper()
+	if strings.HasPrefix(name, "m5-supplement-reframe-") {
+		var v PlannerState
+		if step <= 3 {
+			v = m2PlannerFixture(t, "m5-new-claim-all-fresh", req, task, step)
+		} else {
+			v = plannerFixture(t, "complete", req, task, step, contract.Ref{})
+			var delivered struct {
+				Verification  *PlannerVerification `json:"verification"`
+				Recovery      *PlannerRecovery     `json:"recovery"`
+				WorkerResults []contract.Ref       `json:"worker_results"`
+				WikiResults   []contract.Ref       `json:"wiki_results"`
+			}
+			if err := json.Unmarshal([]byte(req.Prompt), &delivered); err != nil {
+				t.Fatal(err)
+			}
+			v.Verification, v.Recovery = delivered.Verification, delivered.Recovery
+			v.WorkerResults, v.WikiResults = append([]contract.Ref{}, delivered.WorkerResults...), append([]contract.Ref{}, delivered.WikiResults...)
+			v.WorkerTasks, v.WikiTask, v.VerificationRequest, v.VerificationReview = []WorkerTask{}, nil, nil, nil
+			v.RecoveryChoices = nil
+			v.Ledger = &InvestigationLedger{Action: "yield", Reason: "Hand off the remaining runtime gap", Round: 2, NoProgress: 2, ConsumedBatch: []contract.Ref{}, Changes: []HypothesisChange{}}
+			for _, ref := range v.WikiResults {
+				var wiki publication[WikiSearch]
+				if err := protocol.ReadJSON(ref.Path, &wiki); err != nil {
+					t.Fatal(err)
+				}
+				for _, gap := range wiki.Data.Gaps {
+					if !slices.Contains(v.Gaps, gap) {
+						v.Gaps = append(v.Gaps, gap)
+					}
+				}
+			}
+		}
+		basis := slices.Clone(v.Hypotheses[0].Evidence)
+		if step == 3 {
+			var context publication[Context]
+			if err := protocol.ReadJSON(v.Context.Path, &context); err != nil {
+				t.Fatal(err)
+			}
+			var wiki publication[WikiSearch]
+			if err := protocol.ReadJSON(context.Data.Wiki.Path, &wiki); err != nil {
+				t.Fatal(err)
+			}
+			v.Ledger.Action = "reframe"
+			v.Ledger.Reframe = &InvestigationReframe{Change: "Compare a healthy control", Reason: "Two verification deliveries without Agent-reported progress", Basis: basis}
+			v.WikiTask = &InvestigationWikiTask{ID: "verification-reframe", Terms: []string{"anonymous healthy control"}, PreviousTerms: slices.Clone(wiki.Data.Queries), Reason: "Test a different premise", Basis: basis}
+			v.VerificationReview.NextAction = "reframe"
+		}
+		if step >= 4 {
+			if name == "m5-supplement-reframe-wiki" {
+				v.Ledger.ReframeRound, v.Ledger.ReframeStreak = 2, 2
+			} else {
+				d := v.Recovery.Deliveries[0]
+				if d.Kind != "wiki" || len(d.Results) != 0 || len(d.Failures) != 1 || d.Failures[0].Code != engine.TimedOut || d.Failures[0].Cleanup == nil || !d.Failures[0].Cleanup.ConfirmsLocalClose(d.Failures[0].Identity.SessionID) {
+					t.Fatal("M5 reframe lost the real failed wiki and strict cleanup")
+				}
+				switch step {
+				case 4:
+					v.Ledger.Action = "workers"
+					v.WorkerTasks = []WorkerTask{{ID: "inspection", SourceKind: "code", Responsibility: "evidence-only", Question: "Read anonymous-wiki-job status without resubmitting work", Requirements: []string{"Retain remote-job status evidence"}, Basis: basis, DependsOn: []string{}}}
+					v.RecoveryChoices = []RecoveryChoice{{DeliveryID: d.ID, Action: "inspect", Reason: "Inspect the uncertain reframe job read-only", Basis: basis}}
+				case 5:
+					var proposal publication[PlannerState]
+					if err := protocol.ReadJSON(d.Proposal.Path, &proposal); err != nil {
+						t.Fatal(err)
+					}
+					v.Ledger.Action, v.Ledger.Reframe = "reframe", proposal.Data.Ledger.Reframe
+					v.WikiTask = proposal.Data.WikiTask
+					v.Ledger.ConsumedBatch = slices.Clone(v.WorkerResults)
+					v.RecoveryChoices = []RecoveryChoice{{DeliveryID: d.ID, Action: "resume", Reason: "Inspection confirms completion; read the existing job result without resubmission", Basis: []Evidence{{Ref: &v.WorkerResults[0], FileID: "worker-raw"}}}}
+				case 6:
+					v.Ledger.ReframeRound, v.Ledger.ReframeStreak = 3, 3
+				}
+				if step >= 5 {
+					v.Ledger.Round, v.Ledger.NoProgress = 3, 3
+				}
+			}
+		}
+		t.Logf("M5 reframe step=%d action=%s round=%d no_progress=%d boundary=%d/%d cycle=%d", step, v.Ledger.Action, v.Ledger.Round, v.Ledger.NoProgress, v.Ledger.ReframeRound, v.Ledger.ReframeStreak, v.Recovery.DispatchCycle)
+		return v
+	}
+	if strings.HasPrefix(name, "m5-") {
+		if name == "m5-planner-feedback-timeout" && step > 1 {
+			step = 2
+		}
+		v := plannerFixture(t, "complete", req, task, step, contract.Ref{})
+		var delivered struct {
+			Verification  *PlannerVerification `json:"verification"`
+			Recovery      *PlannerRecovery     `json:"recovery"`
+			WorkerResults []contract.Ref       `json:"worker_results"`
+		}
+		if err := json.Unmarshal([]byte(req.Prompt), &delivered); err != nil {
+			t.Fatal(err)
+		}
+		if delivered.Verification == nil || delivered.Recovery == nil || !strings.Contains(task.Requirements, verificationPlannerRequirements) {
+			t.Fatal("M5 missing explicit policy/requirements")
+		}
+		v.Verification, v.Recovery = delivered.Verification, delivered.Recovery
+		v.WorkerTasks, v.WorkerResults, v.WikiResults = []WorkerTask{}, append([]contract.Ref{}, delivered.WorkerResults...), []contract.Ref{}
+		v.Ledger = &InvestigationLedger{Action: "verify", Reason: "Test the supplied candidate independently", ConsumedBatch: []contract.Ref{}, Changes: []HypothesisChange{}}
+		basis := slices.Clone(v.Hypotheses[0].Evidence)
+		v.VerificationRequest = &VerificationRequest{Candidate: &ClaimCandidate{ID: "candidate-1", Statement: "The request may have stalled", Premises: []string{"The observation concerns the same request"}, AllowedEvidence: basis}, Reason: "Independent scrutiny before choosing further work"}
+		if name == "m5-feedback-worker-new-claim" && step == 3 {
+			if len(v.WorkerResults) != 1 || !slices.Contains(req.Inputs, v.WorkerResults[0]) {
+				t.Fatal("Planner did not receive exact worker evidence")
+			}
+			basis = []Evidence{{Ref: &v.WorkerResults[0], FileID: "worker-raw"}}
+			v.Ledger.Round, v.Ledger.NoProgress = 2, 0
+			v.Ledger.ConsumedBatch = slices.Clone(v.WorkerResults)
+			v.Ledger.Changes = []HypothesisChange{{HypothesisID: "h1", Change: "Agent refines the candidate after new evidence", Reason: "Worker supplied the counterexample inspection", Basis: basis}}
+			v.Hypotheses[0].Evidence = basis
+			v.VerificationRequest.Candidate = &ClaimCandidate{ID: "candidate-2", Statement: "A refined candidate after inspecting the counterexample", Premises: []string{"New evidence is applicable"}, AllowedEvidence: basis}
+			v.VerificationReview = nil
+			return v
+		}
+		if step > 1 {
+			index := step - 2
+			if name == "m5-feedback-worker-new-claim" && step == 4 {
+				index = 1
+			}
+			if len(v.Verification.Deliveries) != index+1 {
+				t.Fatal("M5 feedback was not delivered exactly once per Planner round")
+			}
+			d := v.Verification.Deliveries[index]
+			v.Ledger.Action, v.Ledger.Round, v.Ledger.NoProgress = "yield", step-1, step-1
+			v.VerificationRequest = nil
+			v.VerificationReview = &PlannerVerificationReview{DeliveryID: d.ID, Claim: d.Claim, NextAction: "yield", Disputes: []VerificationIssue{}, Assessment: VerificationAssessment{Support: "incomplete", Reason: "Agreement does not establish causation", Basis: basis, RuntimeBasis: []Evidence{}, Measurement: "unavailable", Window: "unavailable", Filter: "unavailable", Environment: "unavailable", Release: "unavailable", Counterexamples: []VerificationIssue{}, Gaps: []string{"Runtime observation remains missing"}}}
+			v.Gaps = append(v.Gaps, "Runtime observation remains missing; no further authorized path in this fixture")
+			if step == 2 {
+				switch name {
+				case "m5-same-version-missing-only", "m5-feedback-repeat-completed":
+					v.Ledger.Action = "verify"
+					v.VerificationRequest = &VerificationRequest{Claim: &d.Claim, Reason: "Complete unavailable roles without repeating accepted work"}
+				case "m5-new-claim-all-fresh", "m5-new-evidence-all-fresh", "m5-feedback-history-prefix", "m5-new-version-cross-reject":
+					v.Ledger.Action = "verify"
+					candidate := ClaimCandidate{ID: "candidate-2", Statement: "A revised candidate about the stalled request", Premises: []string{"A different interpretation requires independent verification"}, AllowedEvidence: basis}
+					if name == "m5-new-evidence-all-fresh" {
+						var previousClaim publication[PureClaim]
+						if err := protocol.ReadJSON(d.Claim.Path, &previousClaim); err != nil {
+							t.Fatal(err)
+						}
+						candidate = previousClaim.Data.Candidate
+						candidate.AllowedEvidence = slices.Clone(candidate.AllowedEvidence)
+						var owner publication[json.RawMessage]
+						if err := protocol.ReadJSON(basis[0].Ref.Path, &owner); err != nil {
+							t.Fatal(err)
+						}
+						for _, f := range owner.Files {
+							if f.ID != basis[0].FileID {
+								candidate.AllowedEvidence = append(candidate.AllowedEvidence, Evidence{Ref: basis[0].Ref, FileID: f.ID})
+								break
+							}
+						}
+						if len(candidate.AllowedEvidence) != 2 {
+							t.Fatal("fixture needs a second authorized evidence file")
+						}
+					}
+					v.VerificationRequest = &VerificationRequest{Candidate: &candidate, Reason: "New candidate/evidence version requires all three fresh roles"}
+				case "m5-feedback-worker-new-claim":
+					v.Ledger.Action = "workers"
+					v.WorkerTasks = []WorkerTask{{ID: "counterexample-inspection", SourceKind: "code", Responsibility: "evidence-only", Question: "Inspect the falsifiable alternative raised in verification", Requirements: []string{"Report actual supplied evidence and missing runtime observations"}, Basis: basis, DependsOn: []string{}}}
+					issue := VerificationIssue{Statement: "A healthy control may show the same observation without a stall", Disposition: "needs inspection", Reason: "Agreement has not ruled out this counterexample", Basis: basis}
+					v.VerificationReview.Disputes = []VerificationIssue{issue}
+					v.VerificationReview.Assessment.Counterexamples = []VerificationIssue{issue}
+				case "m5-agent-changes-reset":
+					v.Ledger.Changes = []HypothesisChange{{HypothesisID: "h1", Change: "Agent changed the interpretation", Reason: "Counterexample requires revising the premise", Basis: basis}}
+					v.Ledger.NoProgress = 0
+				case "m5-agent-inference":
+					v.VerificationReview.Assessment.Support = "inference"
+				case "m5-agent-runtime-declared":
+					v.VerificationReview.Assessment.Support = "runtime-supported under the Agent's declared assumptions"
+					v.VerificationReview.Assessment.RuntimeBasis = slices.Clone(basis)
+					v.VerificationReview.Assessment.Reason = "Agent assesses the supplied observation as applicable runtime evidence; Controller does not infer that from its source schema"
+				}
+			}
+			if name == "m5-feedback-worker-new-claim" && step == 4 {
+				v.Ledger.NoProgress = 1
+			}
+			if name == "m5-feedback-history-prefix" && step == 3 {
+				v.Verification.Deliveries[0].ID = "changed-history"
+			}
+			v.VerificationReview.NextAction = v.Ledger.Action
+			switch name {
+			case "m5-feedback-missing":
+				v.VerificationReview = nil
+			case "m5-feedback-wrong-claim":
+				v.VerificationReview.Claim = v.Context
+			case "m5-feedback-wrong-action":
+				v.VerificationReview.NextAction = "plan"
+			case "m5-feedback-model-echo":
+				v.Verification.Policy.Con.Model.ID = "analysis"
+			}
+		}
+		return v
+	}
 	fixtureStep := step
 	m4 := strings.HasPrefix(name, "m4-") && name != "m4-nil-recovery-timeout"
 	if m4 && task.Previous == nil {
@@ -2065,7 +2260,7 @@ func m2WikiFixture(t *testing.T, name string, req contract.Request) (WikiSearch,
 		t.Fatal(err)
 	}
 	requirements := investigationWikiRequirements
-	if strings.HasPrefix(name, "m4-") {
+	if strings.HasPrefix(name, "m4-") || strings.HasPrefix(name, "m5-supplement-reframe-") {
 		requirements += "\nRead the exact proposal recovery metadata and choices. Do not repeat a failed search or submit remote work unless the Agent has supplied an evidence-backed safe resume or nonoverlapping redirect. Preserve the original failed proposal/task and diagnostic binding in recovery metadata; this attempt has its own binding."
 	}
 	if !slices.Equal(task.Binding.Inputs, req.Inputs) || !slices.Contains(req.Inputs, task.Binding.Proposal) || !slices.Contains(req.Inputs, task.Binding.Context) || task.Requirements != requirements {
@@ -2109,6 +2304,118 @@ type m2Barrier struct {
 
 func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 	t.Helper()
+	if strings.HasPrefix(name, "m5-supplement-exhausted-") {
+		if len(b.held) != 1 || b.faulted {
+			return
+		}
+		exhausted, fatal := "pro", "cross"
+		if strings.HasSuffix(name, "fatal-pro") {
+			exhausted, fatal = "cross", "pro"
+		}
+		for _, retry := range r.Snapshot().Retries {
+			if strings.HasSuffix(retry.Scope, "-"+exhausted+"-recovery") && !retry.Active {
+				if retry.RetryCount != 1 || retry.MaxRetries != 1 {
+					t.Fatal("fatal permutation did not exhaust the real role retry")
+				}
+				b.proved, b.faulted = true, true
+				b.order = []string{exhausted, fatal}
+				if err := b.held[fatal].Reply(protocol.Control{Type: "provider-error"}); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+		}
+		return
+	}
+	if strings.HasPrefix(name, "m5-") {
+		if len(b.held) != 3 || b.faulted {
+			return
+		}
+		snapshot := r.Snapshot()
+		if !b.proved {
+			live, planners, verifiers := 0, 0, 0
+			for _, session := range snapshot.Sessions {
+				if session.State == "Closed" {
+					continue
+				}
+				live++
+				if session.Role.Name == "triage-planner" {
+					planners++
+				}
+				if strings.HasPrefix(session.Role.Name, "triage-verify-") {
+					verifiers++
+				}
+			}
+			if live != 4 || planners != 1 || verifiers != 3 {
+				t.Fatalf("M5 parallel barrier live=%d Planner=%d verifiers=%d", live, planners, verifiers)
+			}
+			for _, id := range []string{"pro", "con", "cross"} {
+				if snapshot.Attempts[b.attempts[id]].Output != nil {
+					t.Fatal("verifier completed before all three started")
+				}
+			}
+			b.proved = true
+		}
+		if b.waiting != "" {
+			a := snapshot.Attempts[b.attempts[b.waiting]]
+			if a.State != engine.Succeeded || a.Output == nil || snapshot.Sessions[a.HandleID].State != "Closed" {
+				return
+			}
+			finished := false
+			for _, retry := range snapshot.Retries {
+				if strings.HasSuffix(retry.Scope, "-"+b.waiting+"-recovery") && !retry.Active {
+					finished = true
+				}
+			}
+			if !finished {
+				return
+			}
+			b.waiting = ""
+		}
+		if len(b.order) == 3 {
+			return
+		}
+		order := []string{"cross", "con", "pro"}
+		if strings.HasPrefix(name, "m5-partial-") {
+			order = []string{"pro", "con", "cross"}
+		}
+		id, ack := order[len(b.order)], "settle"
+		if id == "cross" && strings.HasPrefix(name, "m5-partial-") {
+			switch name {
+			case "m5-partial-provider-fatal":
+				ack = "provider-error"
+			case "m5-partial-user-cancel":
+				ack = "hold"
+			case "m5-partial-cleanup-fatal":
+				sid := snapshot.Sessions[snapshot.Attempts[b.attempts[id]].HandleID].Identity.SessionID
+				path := filepath.Join(bridge, sid+".json")
+				if err := os.Rename(path, path+".recovering"); err != nil {
+					t.Fatal(err)
+				}
+			case "m5-partial-storage-fatal", "m5-partial-journal-fatal":
+				file := "run.json"
+				if name == "m5-partial-journal-fatal" {
+					file = "events.jsonl"
+				}
+				path := filepath.Join(r.Dir(), file)
+				if err := os.Rename(path, path+".recovering"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			b.faulted = true
+		}
+		if err := b.held[id].Reply(protocol.Control{Type: ack}); err != nil {
+			t.Fatal(err)
+		}
+		b.order, b.waiting = append(b.order, id), id
+		if name == "m5-partial-user-cancel" && id == "cross" {
+			r.Cancel(engine.OriginControllerUser)
+		}
+		return
+	}
 	if len(b.held) != 3 || b.faulted {
 		return
 	}
@@ -2176,8 +2483,11 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 				// A streaming sibling must leave the fixture's prompt-ack
 				// barrier so the real RPC abort can be acknowledged.
 				control := "hold"
-				if name == "m4-mixed-storage-fatal" || name == "m4-mixed-journal-fatal" || name == "m4-mixed-user-cancel" || name == "m4-mixed-wait-fatal" {
+				if name == "m4-mixed-storage-fatal" || name == "m4-mixed-journal-fatal" || name == "m4-mixed-user-cancel" {
 					control = "hold-abort"
+				}
+				if name == "m4-mixed-wait-fatal" {
+					control = "hold-abort-exit"
 				}
 				if err := b.held["w1"].Reply(protocol.Control{Type: control}); err != nil {
 					t.Fatal(err)
@@ -2212,6 +2522,192 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models sliceModels, input contract.Ref, name string) (contract.Ref, error) {
 	t.Helper()
 	plannerModel := runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}
+	if strings.HasPrefix(name, "m5-") {
+		verification := &VerificationPolicy{
+			Pro:   VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "pro", Thinking: "high"}, Retries: 1},
+			Con:   VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "con", Thinking: "medium"}, Retries: 1},
+			Cross: VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "cross", Thinking: "low"}, Retries: 1},
+		}
+		recovery := &RecoveryPolicy{PlannerRetries: 1}
+		for role, policy := range map[string]*VerifierPolicy{"pro": &verification.Pro, "con": &verification.Con, "cross": &verification.Cross} {
+			if name == "m5-policy-"+role+"-model" {
+				policy.Model = runtime.ModelSpec{}
+			}
+			if name == "m5-policy-"+role+"-retries" {
+				policy.Retries = -1
+			}
+		}
+		if name == "m5-policy-no-recovery" {
+			recovery = nil
+		}
+		if name == "m5-pending-claim-fresh-handoff" || name == "m5-delivery-fresh-handoff" || strings.Contains(name, "-owner-") || name == "m5-supplement-claim-parent-binding" {
+			p, err := startPlanner(ctx, r, scope, plannerModel, input)
+			if err != nil {
+				return contract.Ref{}, err
+			}
+			p.adaptive = true
+			p.recovery = &PlannerRecovery{Policy: *recovery, Deliveries: []RecoveryDelivery{}, PlannerFailures: []RecoveryFailure{}}
+			p.verification = &PlannerVerification{Policy: *verification, Claims: []contract.Ref{}, Deliveries: []VerificationDelivery{}}
+			p.identity, err = r.SessionIdentity(ctx, p.handle)
+			if err != nil {
+				return contract.Ref{}, err
+			}
+			if _, err = p.planningStep(ctx); err != nil {
+				return contract.Ref{}, err
+			}
+			if strings.HasPrefix(name, "m5-supplement-") {
+				validClaim, err := p.claimStep(ctx, r.Root())
+				if err != nil {
+					return contract.Ref{}, err
+				}
+				claim, err := newAcceptance(ctx, r).loadClaim(scope, validClaim)
+				if err != nil {
+					return contract.Ref{}, err
+				}
+				model, role, key := plannerModel, "triage-planner", "claim-"+p.last.AttemptID
+				schema, inputs, data := ClaimSchema, []contract.Ref{*p.last, input}, any(claim)
+				if strings.Contains(name, "verifier-owner") {
+					model, role, key = verification.Pro.Model, "triage-verify-pro", "verify-"+validClaim.AttemptID+"-pro"
+					inputs = claimInputs(validClaim, claim)
+					task := map[string]any{"stage": "verify-pro", "role": "pro", "claim": validClaim, "allowed_evidence": claim.Candidate.AllowedEvidence, "requirements": verifierRequirements}
+					valid, err := taskStepRecovery(ctx, r, r.Root(), model, "verify-pro", key, task, VerificationSchema, inputs, true)
+					if err != nil {
+						return contract.Ref{}, err
+					}
+					if err := newAcceptance(ctx, r).checkVerificationResult(valid, validClaim, claim, "pro", verification.Pro); err != nil {
+						return contract.Ref{}, err
+					}
+					publication, err := readAccepted[VerificationResult](newAcceptance(ctx, r), valid, VerificationSchema)
+					if err != nil {
+						return contract.Ref{}, err
+					}
+					schema, data = VerificationSchema, publication.Data
+				}
+				if name == "m5-supplement-claim-parent-binding" {
+					parent, err := readAccepted[PlannerState](newAcceptance(ctx, r), *p.last, PlannerSchema)
+					if err != nil {
+						return contract.Ref{}, err
+					}
+					parent.Data.VerificationRequest.Candidate.Statement = "A different unaccepted proposal"
+					prompt := string(testJSON(map[string]any{"stage": "m5-supplement-publication", "data": m2PlannerData(t, parent.Data)}))
+					out, err := r.Root().Step(ctx, engine.StepSpec{Key: "unaccepted-proposal", Session: p.handle, Prompt: prompt, Inputs: inputs, Output: contract.Spec{SchemaID: PlannerSchema}, Timeout: time.Minute})
+					if err != nil {
+						return contract.Ref{}, err
+					}
+					claim.ParentState, claim.Candidate = out.Output, *parent.Data.VerificationRequest.Candidate
+					key, data, inputs = "claim-"+out.AttemptID, claim, []contract.Ref{out.Output, input}
+				}
+				switch {
+				case strings.HasSuffix(name, "-role"):
+					role += "-unapproved"
+				case strings.HasSuffix(name, "-model"):
+					model.ID += "-unapproved"
+				case strings.HasSuffix(name, "-key"):
+					key += "-unapproved"
+				}
+				if err := r.CloseSession(ctx, p.handle); err != nil {
+					return contract.Ref{}, err
+				}
+				attackScope, err := r.Root().Child("producer-attack")
+				if err != nil {
+					return contract.Ref{}, err
+				}
+				handle, err := r.OpenSession(ctx, engine.RoleSpec{Name: role, Model: model})
+				if err != nil {
+					return contract.Ref{}, err
+				}
+				prompt := string(testJSON(map[string]any{"stage": "m5-supplement-publication", "data": data}))
+				out, err := attackScope.Step(ctx, engine.StepSpec{Key: key, Session: handle, Prompt: prompt, Inputs: inputs, Output: contract.Spec{SchemaID: schema}, Timeout: time.Minute})
+				if err != nil {
+					return contract.Ref{}, err
+				}
+				if err := r.CloseSession(ctx, handle); err != nil {
+					return contract.Ref{}, err
+				}
+				attempt := r.Snapshot().Attempts[out.AttemptID]
+				owner := r.Snapshot().Sessions[attempt.HandleID]
+				if attempt.State != engine.Succeeded || attempt.Output == nil || *attempt.Output != out.Output || attempt.Key != key || owner.Role.Name != role || owner.Role.Model != model || owner.State != "Closed" {
+					t.Fatal("producer attack did not reach genuine committed Step ownership")
+				}
+				if _, err := engine.ReadContract(ctx, r, out.Output); err != nil {
+					return contract.Ref{}, err
+				}
+				switch {
+				case name == "m5-supplement-claim-parent-binding":
+					p.verification.Claims = []contract.Ref{out.Output}
+					err = p.checkPendingClaims(ctx)
+				case schema == ClaimSchema:
+					_, err = newAcceptance(ctx, r).loadClaim(scope, out.Output)
+				default:
+					err = newAcceptance(ctx, r).checkVerificationResult(out.Output, validClaim, claim, "pro", verification.Pro)
+				}
+				if err == nil {
+					t.Error("committed producer/binding attack was accepted")
+				}
+				return contract.Ref{}, err
+			}
+			if name == "m5-pending-claim-fresh-handoff" {
+				_, err = p.claimStep(ctx, r.Root())
+			} else {
+				err = p.verify(ctx)
+			}
+			if err != nil {
+				return contract.Ref{}, err
+			}
+			old, attempts := p, len(r.Snapshot().Attempts)
+			p, err = p.handoff(ctx)
+			if err != nil {
+				return contract.Ref{}, err
+			}
+			if !old.stopped || p.identity.SessionID == old.identity.SessionID || p.last == nil || *p.last != *old.last || !reflect.DeepEqual(p.verification, old.verification) || attempts != len(r.Snapshot().Attempts) {
+				t.Error("fresh handoff lost reference-linked pending metadata or created a copying Step")
+			}
+			if name == "m5-pending-claim-fresh-handoff" {
+				if err = p.verify(ctx); err != nil {
+					return contract.Ref{}, err
+				}
+			}
+			return p.adapt(ctx, models)
+		}
+		ref, err := executeInvestigation(ctx, r, scope, plannerModel, models, input, nil, recovery, verification)
+		if strings.HasPrefix(name, "m5-supplement-exhausted-") {
+			var pending *PendingVerificationError
+			var failure *engine.Failure
+			if !errors.As(err, &pending) || !errors.As(err, &failure) || failure.Code != engine.ProviderFailed || pending.Claim == nil || pending.History == nil || len(pending.History.Deliveries) != 0 || len(pending.Roles) != 2 {
+				t.Errorf("unavailable masked fatal or lost pending feedback: %v", err)
+			} else {
+				unavailable, accepted := 0, 0
+				for _, role := range pending.Roles {
+					if role.Unavailable && role.Result == nil && role.Exhausted == string(engine.RetryExhausted) && len(role.Failures) == 2 {
+						unavailable++
+					}
+					if role.Result != nil && !role.Unavailable {
+						accepted++
+					}
+				}
+				if unavailable != 1 || accepted != 1 {
+					t.Error("fatal lost actual exhausted/successful siblings")
+				}
+			}
+		}
+		if strings.HasPrefix(name, "m5-partial-") || slices.Contains([]string{"m5-verifier-role", "m5-verifier-claim", "m5-verifier-evidence", "m5-verifier-unauthorized-basis", "m5-verifier-schema"}, name) {
+			var pending *PendingVerificationError
+			if !errors.As(err, &pending) || pending.Claim == nil || pending.History == nil || len(pending.History.Claims) != 1 || pending.History.Claims[0] != *pending.Claim || len(pending.History.Deliveries) != 0 || len(pending.Roles) != 2 || pending.Unwrap() == nil {
+				t.Errorf("lost accepted claim/partial feedback or manufactured checkpoint: pending=%+v error=%v", pending, err)
+			} else {
+				var claim publication[PureClaim]
+				if e := protocol.ReadJSON(pending.Claim.Path, &claim); e != nil || claim.Data.ParentState != pending.State {
+					t.Errorf("pending claim lost reference-linked state: %v", e)
+				}
+				for _, role := range pending.Roles {
+					if role.Result == nil || role.Unavailable || r.Snapshot().Attempts[role.Result.AttemptID].State != engine.Succeeded {
+						t.Error("pending role is not an accepted result")
+					}
+				}
+			}
+		}
+		return ref, err
+	}
 	if strings.HasPrefix(name, "m4-mixed-committed-close-") {
 		p, err := startPlanner(ctx, r, scope, plannerModel, input)
 		if err != nil {
@@ -2305,13 +2801,13 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 	}
 	if strings.HasPrefix(name, "m4-") {
 		if name == "m4-nil-recovery-timeout" {
-			return executeInvestigation(ctx, r, scope, plannerModel, models, input, nil, nil)
+			return executeInvestigation(ctx, r, scope, plannerModel, models, input, nil, nil, nil)
 		}
 		var capacity *PlannerCapacityPolicy
 		if name == "m4-capacity-fresh-worker-timeout" || name == "m4-allfail-reframe-checkpoint" || strings.HasPrefix(name, "m4-reframe-") {
 			capacity = &PlannerCapacityPolicy{HandoffPercent: 80}
 		}
-		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity, &RecoveryPolicy{PlannerRetries: 1})
+		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity, &RecoveryPolicy{PlannerRetries: 1}, nil)
 	}
 	m3 := strings.HasPrefix(name, "m3-")
 	capacity := &PlannerCapacityPolicy{HandoffPercent: 80}
@@ -2328,13 +2824,13 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 		case "infinite":
 			capacity.HandoffPercent = math.Inf(1)
 		}
-		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity, nil)
+		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity, nil, nil)
 	}
 	if slices.Contains([]string{"m3-cycle-six", "m3-capacity-below", "m3-capacity-zero", "m3-capacity-at", "m3-capacity-at-plan", "m3-capacity-above", "m3-unknown", "m3-unknown-null", "m3-unknown-missing", "m3-unknown-tokens", "m3-plan-zero", "m3-no-ready-zero", "m3-support-no-sample", "m3-yield-no-sample"}, name) {
-		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity, nil)
+		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity, nil, nil)
 	}
 	if name == "m2-parallel-batches-yield" || name == "m2-no-ready-feedback" || name == "m2-wiki-support" {
-		return executeInvestigation(ctx, r, scope, plannerModel, models, input, nil, nil)
+		return executeInvestigation(ctx, r, scope, plannerModel, models, input, nil, nil, nil)
 	}
 	p, err := startPlanner(ctx, r, scope, plannerModel, input)
 	if err != nil {
@@ -2523,7 +3019,7 @@ func m2AssertWikiOwners(t *testing.T, inputs []contract.Ref) {
 func m2AssertWorkerInputs(t *testing.T, r *engine.Run, req contract.Request, request workerRequest, original ContextResult, name string) {
 	t.Helper()
 	requirements := workerRequirements
-	if strings.HasPrefix(name, "m4-support-") || name == "m4-wiki-timeout-partial-resume" || strings.HasPrefix(name, "m4-reframe-") && strings.HasPrefix(request.Task.ID, "inspection") {
+	if strings.HasPrefix(name, "m4-support-") || name == "m4-wiki-timeout-partial-resume" || (strings.HasPrefix(name, "m4-reframe-") || name == "m5-supplement-reframe-inspection-resume") && strings.HasPrefix(request.Task.ID, "inspection") {
 		requirements += "\nRecovery inspection only: inspect authorized read-only status/evidence for the uncertain remote work in the exact proposal recovery metadata. Do not create, resubmit or restart that work. Record job identity, actual status, limitations and evidence-backed safety assessment."
 	}
 	if request.Requirements != requirements || (!strings.HasPrefix(name, "m3-") && request.Context != original.Context) || !slices.Contains(req.Inputs, request.Proposal) || !slices.Contains(req.Inputs, request.Context) {
@@ -2562,6 +3058,51 @@ func m2AssertWorkerInputs(t *testing.T, r *engine.Run, req contract.Request, req
 
 func m2StoreSchema(t *testing.T, store *contract.Store, base validationInputs, name string) {
 	t.Helper()
+	if strings.HasPrefix(name, "m5-store-") {
+		claim := PureClaim{ParentState: base.intakeRef, Context: base.intakeRef, Candidate: ClaimCandidate{ID: "candidate", Statement: "Anonymous candidate", Premises: []string{}, AllowedEvidence: []Evidence{{Ref: &base.intakeRef, FileID: "issue"}}}}
+		schema, field := ClaimSchema, "ledger"
+		var raw map[string]any
+		if err := json.Unmarshal(testJSON(claim), &raw); err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(name, "m5-store-verifier-") {
+			raw = nil
+			schema = VerificationSchema
+			v := VerificationResult{Claim: base.intakeRef, Role: "pro", AllowedEvidence: claim.Candidate.AllowedEvidence, Assessment: VerificationAssessment{Support: "incomplete", Reason: "Runtime missing", Basis: []Evidence{}, RuntimeBasis: []Evidence{}, Measurement: "unavailable", Window: "unavailable", Filter: "unavailable", Environment: "unavailable", Release: "unavailable", Counterexamples: []VerificationIssue{}, Gaps: []string{}}}
+			if err := json.Unmarshal(testJSON(v), &raw); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Establish the valid schema shape before injecting one agent-output fault.
+		if _, err := storeFixture(t, store, schema, raw, nil, false); err != nil {
+			t.Fatal("M5 schema prerequisite", err)
+		}
+		switch name {
+		case "m5-store-claim-ledger":
+			raw["ledger"] = map[string]any{}
+		case "m5-store-claim-verdict":
+			field = "verdict"
+			raw[field] = "confirmed"
+		case "m5-store-claim-missing-parent":
+			field = "parent_state"
+			delete(raw, field)
+		case "m5-store-verifier-model":
+			field = "model"
+			raw[field] = "agent-selected"
+		case "m5-store-verifier-role":
+			field = "role"
+			raw[field] = "planner"
+		case "m5-store-verifier-missing-assessment":
+			field = "assessment"
+			delete(raw, field)
+		}
+		_, err := storeFixture(t, store, schema, raw, nil, false)
+		var failure *contract.Error
+		if !errors.As(err, &failure) || failure.Code != contract.ContractInvalid || failure.Phase != "schema" || !strings.Contains(err.Error(), field) {
+			t.Fatalf("M5 schema rejection for %s: %v", field, err)
+		}
+		return
+	}
 	v := PlannerState{Context: base.intakeRef, Hypotheses: []PlannerHypothesis{}, Pending: []PlannerQuestion{}, Gaps: []string{}, Rationale: "Anonymous schema boundary", Ledger: &InvestigationLedger{Action: "yield", Reason: "Accepted investigation only", ConsumedBatch: []contract.Ref{}, Changes: []HypothesisChange{}}}
 	var data any = m2PlannerData(t, v)
 	if strings.HasPrefix(name, "m3-store-") {
@@ -2655,6 +3196,336 @@ func m2StoreSchema(t *testing.T, store *contract.Store, base validationInputs, n
 
 func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref contract.Ref, original ContextResult, expected PlannerState, barrier m2Barrier, prompts, hellos int) {
 	t.Helper()
+	if strings.HasPrefix(tc.name, "m5-") {
+		if tc.failure {
+			if report.Failure == nil || ref != (contract.Ref{}) || len(report.Result.Outputs) != 0 || report.Final != nil {
+				t.Fatal("M5 failure became accepted output")
+			}
+			want := ""
+			switch {
+			case strings.HasPrefix(tc.name, "m5-supplement-claim-owner-"):
+				want = "proposing Planner role/model"
+			case strings.HasPrefix(tc.name, "m5-supplement-verifier-owner-"):
+				want = "exact fresh role/model/version owner"
+			case tc.name == "m5-supplement-claim-parent-binding":
+				want = "exact parent continuation"
+			case strings.HasPrefix(tc.name, "m5-supplement-exhausted-"):
+				want = "ProviderFailed"
+				if !barrier.proved || !barrier.faulted || len(barrier.order) != 2 {
+					t.Fatal("fatal was not injected after sibling retry exhaustion")
+				}
+			case strings.HasPrefix(tc.name, "m5-policy-"):
+				want = "requires an explicit"
+			case tc.name == "m5-claim-projection", tc.name == "m5-claim-context":
+				want = "candidate projection"
+			case tc.name == "m5-claim-parent":
+				want = "claim"
+			case tc.name == "m5-claim-ledger", tc.name == "m5-verifier-schema":
+				want = "ContractInvalid"
+			case tc.name == "m5-verifier-role", tc.name == "m5-verifier-claim", tc.name == "m5-verifier-evidence", tc.name == "m5-new-version-cross-reject":
+				want = "version mismatch"
+			case tc.name == "m5-verifier-unauthorized-basis":
+				want = "exact allowed evidence"
+			case tc.name == "m5-feedback-missing", tc.name == "m5-feedback-wrong-claim", tc.name == "m5-feedback-wrong-action":
+				want = "Planner must assess"
+			case tc.name == "m5-feedback-model-echo", tc.name == "m5-feedback-history-prefix":
+				want = "history prefix changed"
+			case tc.name == "m5-feedback-repeat-completed":
+				want = "only complete unavailable roles"
+			case tc.name == "m5-claim-retry-exhausted":
+				want = "RetryExhausted"
+			case tc.name == "m5-verifier-attempt-limit", tc.name == "m5-verifier-live-limit":
+				want = "LimitExceeded"
+			case tc.name == "m5-partial-provider-fatal":
+				want = "ProviderFailed"
+			case tc.name == "m5-partial-cleanup-fatal":
+				want = "CleanupFailed"
+			case tc.name == "m5-partial-storage-fatal":
+				want = "StorageFailed"
+			case tc.name == "m5-partial-journal-fatal":
+				want = "JournalFailed"
+			case tc.name == "m5-partial-user-cancel":
+				want = "Cancel"
+			}
+			if want == "" || !strings.Contains(fmt.Sprint(report.Failure), want) {
+				t.Fatalf("M5 wrong failure, want %s: %v", want, report.Failure)
+			}
+			if tc.name == "m5-verifier-attempt-limit" || tc.name == "m5-verifier-live-limit" {
+				// Limits can lock the run before already allocated siblings reach
+				// the external provider; prompts are not attempt/session accounting.
+				if prompts < tc.stages || prompts > 7 || prompts > len(report.Snapshot.Attempts) || hellos > len(report.Snapshot.Sessions) || len(report.Cleanup) != len(report.Snapshot.Sessions) {
+					t.Fatal("M5 pre-dispatch limit lost allocated accounting or cleanup")
+				}
+				if tc.name == "m5-verifier-attempt-limit" && len(report.Snapshot.Attempts) != 7 {
+					t.Fatal("attempt cap did not retain all allocated attempts")
+				}
+				if tc.name == "m5-verifier-live-limit" && len(report.Snapshot.Sessions) != 6 {
+					t.Fatal("live cap ignored the persistent Planner slot")
+				}
+				claims := 0
+				for _, attempt := range report.Snapshot.Attempts {
+					if attempt.Output != nil && attempt.Output.SchemaID == ClaimSchema {
+						claims++
+					}
+					if attempt.Output != nil && attempt.Output.SchemaID == PlannerSchema {
+						var state publication[PlannerState]
+						if err := protocol.ReadJSON(attempt.Output.Path, &state); err != nil {
+							t.Fatal(err)
+						}
+						if len(state.Data.Verification.Deliveries) != 0 || state.Data.Ledger.Round != 0 {
+							t.Fatal("limit failure became verification-unavailable or a completed round")
+						}
+					}
+				}
+				if claims != 1 {
+					t.Fatal("limit failure discarded committed claim")
+				}
+				for _, session := range report.Snapshot.Sessions {
+					if session.State != "Closed" {
+						t.Fatal("limit failure left an owned session open")
+					}
+				}
+				return
+			}
+			if prompts != tc.stages || len(report.Snapshot.Attempts) != prompts || len(report.Snapshot.Sessions) != hellos || len(report.Cleanup) != hellos {
+				t.Fatalf("M5 failure accounting: prompts=%d attempts=%d sessions=%d hellos=%d cleanup=%d", prompts, len(report.Snapshot.Attempts), len(report.Snapshot.Sessions), hellos, len(report.Cleanup))
+			}
+			for _, attempt := range report.Snapshot.Attempts {
+				if attempt.Output == nil || attempt.Output.SchemaID != PlannerSchema {
+					continue
+				}
+				var state publication[PlannerState]
+				if err := protocol.ReadJSON(attempt.Output.Path, &state); err != nil {
+					t.Fatal(err)
+				}
+				if strings.HasPrefix(tc.name, "m5-partial-") && (len(state.Data.Verification.Claims) != 0 || len(state.Data.Verification.Deliveries) != 0 || state.Data.Ledger.Round != 0 || state.Data.Recovery.DispatchCycle != 0) {
+					t.Fatal("partial verification became a complete checkpoint/cycle")
+				}
+			}
+			if strings.HasPrefix(tc.name, "m5-partial-") && (!barrier.proved || !slices.Equal(barrier.order, []string{"pro", "con", "cross"})) {
+				t.Fatal("M5 partial fault did not inspect all three branches")
+			}
+			return
+		}
+		if strings.HasPrefix(tc.name, "m5-supplement-reframe-") {
+			if report.Failure != nil || report.Final != nil || prompts != tc.stages || len(report.Snapshot.Attempts) != prompts || len(report.Snapshot.Sessions) != hellos || len(report.Cleanup) != hellos {
+				t.Fatalf("M5 reframe accounting/failure: prompts=%d attempts=%d failure=%v", prompts, len(report.Snapshot.Attempts), report.Failure)
+			}
+			var final publication[PlannerState]
+			if err := protocol.ReadJSON(ref.Path, &final); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(final.Data, expected) {
+				got, want := reflect.ValueOf(final.Data), reflect.ValueOf(expected)
+				for i := 0; i < got.NumField(); i++ {
+					if !reflect.DeepEqual(got.Field(i).Interface(), want.Field(i).Interface()) {
+						t.Logf("M5 fixture field %s: got=%#v want=%#v", got.Type().Field(i).Name, got.Field(i).Interface(), want.Field(i).Interface())
+					}
+				}
+			}
+			if !reflect.DeepEqual(final.Data, expected) || len(final.Data.Verification.Claims) != 2 || len(final.Data.Verification.Deliveries) != 2 || len(final.Data.WikiResults) != 1 || len(final.Data.Ledger.ConsumedBatch) != 0 {
+				t.Fatal("reframe lost exact feedback, wiki, or Planner declaration")
+			}
+			actions, rounds, boundaries := []string{"verify", "verify", "reframe", "yield"}, []int{0, 1, 2, 2}, []int{0, 0, 0, 2}
+			if tc.name == "m5-supplement-reframe-inspection-resume" {
+				actions, rounds, boundaries = []string{"verify", "verify", "reframe", "workers", "reframe", "yield"}, []int{0, 1, 2, 2, 3, 3}, []int{0, 0, 0, 0, 0, 3}
+				if len(final.Data.WorkerResults) != 1 || len(final.Data.Recovery.Deliveries) != 3 {
+					t.Fatal("inspection/resume was not delivered")
+				}
+			}
+			cursor := &ref
+			for i := len(actions) - 1; i >= 0; i-- {
+				if cursor == nil {
+					t.Fatal("missing committed Planner continuation")
+				}
+				var state publication[PlannerState]
+				if err := protocol.ReadJSON(cursor.Path, &state); err != nil {
+					t.Fatal(err)
+				}
+				l := state.Data.Ledger
+				if l.Action != actions[i] || l.Round != rounds[i] || l.NoProgress != rounds[i] || l.ReframeRound != boundaries[i] || l.ReframeStreak != boundaries[i] || state.Data.Recovery.DispatchCycle != i {
+					t.Fatalf("M5 reframe transition %d: ledger=%+v cycle=%d", i, l, state.Data.Recovery.DispatchCycle)
+				}
+				cursor = state.Data.Previous
+			}
+			if cursor != nil {
+				t.Fatal("unexpected extra Planner round")
+			}
+			retries, verifierAttempts := 0, 0
+			seen := map[string]bool{}
+			for _, retry := range report.Snapshot.Retries {
+				retries += retry.RetryCount
+			}
+			for _, attempt := range report.Snapshot.Attempts {
+				if strings.HasPrefix(attempt.Key, "verify-") {
+					if seen[attempt.HandleID] || report.Snapshot.Sessions[attempt.HandleID].State != "Closed" {
+						t.Fatal("verifier was not fresh/closed")
+					}
+					seen[attempt.HandleID] = true
+					verifierAttempts++
+				}
+			}
+			if retries != 1 || verifierAttempts != 7 {
+				t.Fatal("fresh/role retry was lost or counted as another batch")
+			}
+			return
+		}
+		if report.Failure != nil {
+			t.Fatalf("M5 investigation failed: %v", report.Failure)
+		}
+		if prompts != tc.stages || len(report.Snapshot.Attempts) != prompts || len(report.Snapshot.Sessions) != hellos || len(report.Cleanup) != hellos || report.Final != nil {
+			t.Fatal("M5 accounting/final output mismatch")
+		}
+		var state publication[PlannerState]
+		if err := protocol.ReadJSON(ref.Path, &state); err != nil {
+			t.Fatal(err)
+		}
+		batches, claims, noProgress, retries := 1, 1, 1, 0
+		if tc.name == "m5-same-version-missing-only" {
+			batches, noProgress = 2, 2
+		}
+		if tc.name == "m5-new-claim-all-fresh" || tc.name == "m5-new-evidence-all-fresh" {
+			batches, claims, noProgress = 2, 2, 2
+		}
+		if tc.name == "m5-feedback-worker-new-claim" {
+			batches, claims, noProgress = 2, 2, 1
+		}
+		if tc.name == "m5-agent-changes-reset" {
+			noProgress = 0
+		}
+		if slices.Contains([]string{"m5-verifier-timeout-retry", "m5-verifier-compaction-retry", "m5-verifier-unavailable", "m5-same-version-missing-only", "m5-claim-timeout-retry", "m5-planner-feedback-timeout"}, tc.name) {
+			retries = 1
+		}
+		rounds := batches
+		if tc.name == "m5-feedback-worker-new-claim" {
+			rounds++
+		}
+		if !reflect.DeepEqual(state.Data, expected) || state.Data.Ledger.Round != rounds || state.Data.Ledger.NoProgress != noProgress || state.Data.Recovery.DispatchCycle != rounds || state.Data.Checkpoint != nil || len(state.Data.Verification.Claims) != claims || len(state.Data.Verification.Deliveries) != batches || len(state.Data.Ledger.ConsumedBatch) != 0 {
+			t.Fatal("M5 feedback/counters or Agent declaration changed")
+		}
+		wantSupport := "incomplete"
+		if tc.name == "m5-agent-inference" {
+			wantSupport = "inference"
+		}
+		if tc.name == "m5-agent-runtime-declared" {
+			wantSupport = "runtime-supported under the Agent's declared assumptions"
+		}
+		if state.Data.VerificationReview.Assessment.Support != wantSupport {
+			t.Fatal("Controller promoted the roster rather than retaining Agent support declaration")
+		}
+		for _, claimRef := range state.Data.Verification.Claims {
+			var claim publication[map[string]json.RawMessage]
+			if err := protocol.ReadJSON(claimRef.Path, &claim); err != nil {
+				t.Fatal(err)
+			}
+			if len(claim.Files) != 0 || len(claim.Data) != 3 || claim.Data["parent_state"] == nil || claim.Data["context"] == nil || claim.Data["candidate"] == nil {
+				t.Fatal("pure claim leaked ledger/verdict/narrative")
+			}
+		}
+		if tc.name == "m5-new-evidence-all-fresh" {
+			var before, after publication[PureClaim]
+			if err := protocol.ReadJSON(state.Data.Verification.Claims[0].Path, &before); err != nil {
+				t.Fatal(err)
+			}
+			if err := protocol.ReadJSON(state.Data.Verification.Claims[1].Path, &after); err != nil {
+				t.Fatal(err)
+			}
+			if before.Data.Candidate.ID != after.Data.Candidate.ID || before.Data.Candidate.Statement != after.Data.Candidate.Statement || !slices.Equal(before.Data.Candidate.Premises, after.Data.Candidate.Premises) || len(after.Data.Candidate.AllowedEvidence) != len(before.Data.Candidate.AllowedEvidence)+1 || !reflect.DeepEqual(before.Data.Candidate.AllowedEvidence, after.Data.Candidate.AllowedEvidence[:len(before.Data.Candidate.AllowedEvidence)]) {
+				t.Fatal("evidence-only version fixture also changed the candidate claim")
+			}
+		}
+		for batch, delivery := range state.Data.Verification.Deliveries {
+			if delivery.Claim != state.Data.Verification.Claims[min(batch, claims-1)] {
+				t.Fatal("verification rebound to a different claim version")
+			}
+			for i, role := range []string{"pro", "con", "cross"} {
+				got := delivery.Roles[i]
+				unavailable := role == "con" && batch == 0 && (tc.name == "m5-verifier-unavailable" || tc.name == "m5-same-version-missing-only")
+				failures := 0
+				if unavailable {
+					failures = 2
+				} else if role == "con" && (tc.name == "m5-verifier-timeout-retry" || tc.name == "m5-verifier-compaction-retry") {
+					failures = 1
+				}
+				if got.Role != role || got.Unavailable != unavailable || (got.Result == nil) != unavailable || len(got.Failures) != failures {
+					t.Fatalf("invalid ordered delivery: %+v", got)
+				}
+				for _, failed := range got.Failures {
+					attempt := report.Snapshot.Attempts[failed.AttemptID]
+					owner := report.Snapshot.Sessions[attempt.HandleID]
+					if failed.Stage != "verify-"+role || failed.RunID != attempt.Identity.RunID || failed.AttemptID != attempt.Identity.AttemptID || attempt.Failure == nil || failed.Code != attempt.Failure.Code || failed.Cleanup == nil || !failed.Cleanup.ConfirmsLocalClose(owner.Identity.SessionID) || !sameIdentity(failed.Identity, owner.Identity) || owner.Role.Name != "triage-verify-"+role || attempt.Output != nil || failed.Diagnostic == "" {
+						t.Fatal("verifier retry lost actual typed failure/owner/strict cleanup accounting")
+					}
+				}
+				if unavailable && got.Exhausted != string(engine.RetryExhausted) {
+					t.Fatal("unavailable omitted exhausted retry")
+				}
+				if got.Result == nil {
+					continue
+				}
+				if batch > 0 && role != "con" && tc.name == "m5-same-version-missing-only" && !reflect.DeepEqual(got, state.Data.Verification.Deliveries[0].Roles[i]) {
+					t.Fatal("same-version accepted role was rerun or rebound")
+				}
+				if batch > 0 && claims == 2 && *got.Result == *state.Data.Verification.Deliveries[0].Roles[i].Result {
+					t.Fatal("new version reused an old role result")
+				}
+				attempt := report.Snapshot.Attempts[got.Result.AttemptID]
+				owner := report.Snapshot.Sessions[attempt.HandleID]
+				thinking := map[string]string{"pro": "high", "con": "medium", "cross": "low"}[role]
+				if owner.Role.Name != "triage-verify-"+role || owner.Role.Model != (runtime.ModelSpec{Provider: "fixture", ID: role, Thinking: thinking}) || owner.State != "Closed" {
+					t.Fatal("verifier model/role/fresh cleanup mismatch")
+				}
+				for id, other := range report.Snapshot.Attempts {
+					if id != got.Result.AttemptID && other.HandleID == attempt.HandleID {
+						t.Fatal("verifier reused a session")
+					}
+				}
+			}
+		}
+		roleAttempts := map[string]int{}
+		for _, attempt := range report.Snapshot.Attempts {
+			owner := report.Snapshot.Sessions[attempt.HandleID]
+			if strings.HasPrefix(owner.Role.Name, "triage-verify-") {
+				roleAttempts[strings.TrimPrefix(owner.Role.Name, "triage-verify-")]++
+			}
+		}
+		for _, role := range []string{"pro", "con", "cross"} {
+			want := claims
+			if role == "con" && slices.Contains([]string{"m5-verifier-timeout-retry", "m5-verifier-compaction-retry", "m5-verifier-unavailable"}, tc.name) {
+				want = 2
+			}
+			if role == "con" && tc.name == "m5-same-version-missing-only" {
+				want = 3
+			}
+			if roleAttempts[role] != want {
+				t.Fatalf("M5 role %s attempts=%d want=%d", role, roleAttempts[role], want)
+			}
+		}
+		actualRetries := 0
+		for _, retry := range report.Snapshot.Retries {
+			if retry.Active || retry.MaxRetries != 1 {
+				t.Fatal("M5 retry exceeded caller policy or remained active")
+			}
+			actualRetries += retry.RetryCount
+		}
+		if actualRetries != retries {
+			t.Fatalf("M5 retries=%d want=%d", actualRetries, retries)
+		}
+		if tc.name == "m5-planner-feedback-timeout" {
+			if len(state.Data.Recovery.PlannerFailures) != 1 || len(state.Data.Verification.Claims) != 1 || len(state.Data.Verification.Deliveries) != 1 {
+				t.Fatal("post-claim Planner retry lost committed claim/delivery or duplicated the round")
+			}
+		}
+		if tc.name == "m5-reverse-completion" && (!barrier.proved || !slices.Equal(barrier.order, []string{"cross", "con", "pro"})) {
+			t.Fatal("M5 did not prove parallel three-angle execution with Planner slot")
+		}
+		for _, cleanup := range report.Cleanup {
+			if !cleanup.ConfirmsLocalClose(cleanup.Identity.SessionID) {
+				t.Fatal("M5 unconfirmed cleanup")
+			}
+		}
+		return
+	}
 	if strings.HasPrefix(tc.name, "m4-") {
 		if report.Final != nil || len(report.Snapshot.Attempts) != prompts || len(report.Snapshot.Sessions) != hellos || len(report.Cleanup) != hellos {
 			t.Fatal("M4 lost actual attempt/session accounting or invented a final report")
@@ -3562,6 +4433,70 @@ type triageCase struct {
 }
 
 var triageCases = []triageCase{
+	{"m5-three-fresh-yield", 9, false, true},
+	{"m5-reverse-completion", 9, false, true},
+	{"m5-pending-claim-fresh-handoff", 9, false, true},
+	{"m5-delivery-fresh-handoff", 9, false, true},
+	{"m5-feedback-worker-new-claim", 16, false, true},
+	{"m5-feedback-history-prefix", 14, true, false},
+	{"m5-new-version-cross-reject", 13, true, false},
+	{"m5-verifier-timeout-retry", 10, false, true},
+	{"m5-verifier-compaction-retry", 10, false, true},
+	{"m5-verifier-unavailable", 10, false, true},
+	{"m5-same-version-missing-only", 12, false, true},
+	{"m5-new-claim-all-fresh", 14, false, true},
+	{"m5-new-evidence-all-fresh", 14, false, true},
+	{"m5-agent-changes-reset", 9, false, true},
+	{"m5-agent-inference", 9, false, true},
+	{"m5-agent-runtime-declared", 9, false, true},
+	{"m5-claim-timeout-retry", 10, false, true},
+	{"m5-planner-feedback-timeout", 10, false, true},
+	{"m5-claim-retry-exhausted", 6, true, false},
+	{"m5-verifier-attempt-limit", 5, true, false},
+	{"m5-verifier-live-limit", 5, true, false},
+	{"m5-policy-pro-model", 3, true, false},
+	{"m5-policy-con-model", 3, true, false},
+	{"m5-policy-cross-model", 3, true, false},
+	{"m5-policy-pro-retries", 3, true, false},
+	{"m5-policy-con-retries", 3, true, false},
+	{"m5-policy-cross-retries", 3, true, false},
+	{"m5-policy-no-recovery", 3, true, false},
+	{"m5-claim-projection", 5, true, false},
+	{"m5-claim-parent", 5, true, false},
+	{"m5-claim-context", 5, true, false},
+	{"m5-claim-ledger", 5, true, false},
+	{"m5-verifier-role", 8, true, false},
+	{"m5-verifier-claim", 8, true, false},
+	{"m5-verifier-evidence", 8, true, false},
+	{"m5-verifier-unauthorized-basis", 8, true, false},
+	{"m5-verifier-schema", 8, true, false},
+	{"m5-feedback-missing", 9, true, false},
+	{"m5-feedback-wrong-claim", 9, true, false},
+	{"m5-feedback-wrong-action", 9, true, false},
+	{"m5-feedback-model-echo", 9, true, false},
+	{"m5-feedback-repeat-completed", 9, true, false},
+	{"m5-partial-provider-fatal", 8, true, false},
+	{"m5-partial-cleanup-fatal", 8, true, false},
+	{"m5-partial-storage-fatal", 8, true, false},
+	{"m5-partial-journal-fatal", 8, true, false},
+	{"m5-partial-user-cancel", 8, true, false},
+	{"m5-supplement-claim-owner-role", 6, true, false},
+	{"m5-supplement-claim-owner-model", 6, true, false},
+	{"m5-supplement-claim-owner-key", 6, true, false},
+	{"m5-supplement-verifier-owner-role", 7, true, false},
+	{"m5-supplement-verifier-owner-model", 7, true, false},
+	{"m5-supplement-verifier-owner-key", 7, true, false},
+	{"m5-supplement-claim-parent-binding", 7, true, false},
+	{"m5-supplement-reframe-wiki", 17, false, true},
+	{"m5-supplement-reframe-inspection-resume", 21, false, true},
+	{"m5-supplement-exhausted-pro-fatal-cross", 9, true, false},
+	{"m5-supplement-exhausted-cross-fatal-pro", 9, true, false},
+	{"m5-store-claim-ledger", 0, true, false},
+	{"m5-store-claim-verdict", 0, true, false},
+	{"m5-store-claim-missing-parent", 0, true, false},
+	{"m5-store-verifier-model", 0, true, false},
+	{"m5-store-verifier-role", 0, true, false},
+	{"m5-store-verifier-missing-assessment", 0, true, false},
 	{"m4-delivery-id", 6, true, false},
 	{"m4-delivery-proposal", 6, true, false},
 	{"m4-delivery-context", 6, true, false},
@@ -3577,6 +4512,7 @@ var triageCases = []triageCase{
 	{"m4-mixed-cleanup-fatal", 7, true, false},
 	{"m4-mixed-storage-fatal", 7, true, false},
 	{"m4-mixed-journal-fatal", 7, true, false},
+	{"m4-mixed-journal-fatal-late-abort", 7, true, false},
 	{"m4-mixed-user-cancel", 7, true, false},
 	{"m4-mixed-wait-fatal", 7, true, false},
 	{"m4-mixed-three-failed", 8, false, true},
@@ -3739,6 +4675,9 @@ var triageCases = []triageCase{
 // Truncated intake, blank proposal reason and history-alias negatives also stay
 // there to detect a production loader accidentally bypassing its validator.
 func validationStage(name string) string {
+	if strings.HasPrefix(name, "m5-store-") {
+		return "m2-schema"
+	}
 	if strings.HasPrefix(name, "m3-store-") {
 		return "m2-schema"
 	}
@@ -4352,10 +5291,16 @@ func TestIntakeToContext(t *testing.T) {
 			continue
 		}
 		t.Run(tc.name, func(t *testing.T) {
+			lateAbort := tc.name == "m4-mixed-journal-fatal-late-abort"
+			if lateAbort {
+				// Keep the original fault path and all of its outcome assertions.
+				tc.name = "m4-mixed-journal-fatal"
+			}
 			m1 := strings.HasPrefix(tc.name, "m1-")
 			m3 := strings.HasPrefix(tc.name, "m3-")
 			m4 := strings.HasPrefix(tc.name, "m4-")
-			m2 := strings.HasPrefix(tc.name, "m2-") || m3 || m4
+			m5 := strings.HasPrefix(tc.name, "m5-")
+			m2 := strings.HasPrefix(tc.name, "m2-") || m3 || m4 || m5
 			working := strings.HasPrefix(tc.name, "work-") || tc.name == "m1-support"
 			transitionProbe := slices.Contains([]string{"work-unproposed-transition", "work-skipped-context", "work-wrong-task", "work-resolve-changed-intake", "work-refresh-work-mismatch"}, tc.name)
 			workKind, workFixture := "update", "update-replace"
@@ -4599,6 +5544,12 @@ func TestIntakeToContext(t *testing.T) {
 				if tc.name == "m2-attempt-cap" {
 					policy.MaxTotalAttempts = 5
 				}
+			}
+			if tc.name == "m5-verifier-attempt-limit" {
+				policy.MaxTotalAttempts = 7
+			}
+			if tc.name == "m5-verifier-live-limit" {
+				policy.MaxLiveSessions = 3
 			}
 			if tc.name == "m4-planner-run-limit" {
 				policy.MaxTotalAttempts = 4
@@ -4978,11 +5929,14 @@ func TestIntakeToContext(t *testing.T) {
 			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" || tc.name == "planner-timeout" || tc.name == "work-worker-timeout" || tc.name == "work-planner-timeout" || tc.name == "m1-worker-timeout" {
 				transport = deadlineRuntime{Runtime: pi}
 			}
-			if tc.name == "m2-branch-timeout" || m4 {
+			if tc.name == "m2-branch-timeout" || m4 || m5 {
 				transport = deadlineRuntime{Runtime: pi}
 				if tc.name == "m4-mixed-timeout" || tc.name == "m4-mixed-storage-fatal" || tc.name == "m4-mixed-journal-fatal" || tc.name == "m4-mixed-user-cancel" || tc.name == "m4-mixed-wait-fatal" || tc.name == "m4-mixed-three-failed" {
 					transport = deadlineRuntime{Runtime: pi, taskTimeouts: map[string]time.Duration{"w1": time.Minute}}
 				}
+			}
+			if strings.HasPrefix(tc.name, "m5-supplement-exhausted-") {
+				transport = deadlineRuntime{Runtime: pi, taskTimeouts: map[string]time.Duration{"": time.Minute}}
 			}
 			runCtx := ctx
 			var cancelParent context.CancelCauseFunc
@@ -5008,6 +5962,41 @@ func TestIntakeToContext(t *testing.T) {
 			var revisionIntake contract.Ref
 			observedSupportingRefs := map[contract.Ref]bool{}
 			barrier := m2Barrier{held: map[string]protocol.Event{}, attempts: map[string]string{}}
+			var abortEvent protocol.Event
+			var pendingLateAborts []struct {
+				event protocol.Event
+				err   error
+			}
+			acceptLateAbort := func(e protocol.Event, err error) bool {
+				if tc.name != "m4-mixed-journal-fatal" || e.Message.Type != "abort" || !errors.Is(err, net.ErrClosed) {
+					return false
+				}
+				// EOF can close this control peer before its queued abort is handled.
+				// A socket error alone is not proof that the owned run closed cleanly.
+				select {
+				case <-done:
+				default:
+					return false
+				}
+				if ctx.Err() != nil {
+					return false
+				}
+				var failure *engine.Failure
+				if !errors.As(report.Failure, &failure) || failure.Code != engine.JournalFailed {
+					return false
+				}
+				owner := report.Snapshot.Sessions[report.Snapshot.Attempts[barrier.attempts["w1"]].HandleID]
+				if owner.Identity.SessionID == "" || owner.Identity.SessionID != e.Message.SessionID {
+					return false
+				}
+				for _, c := range report.Cleanup {
+					if sameIdentity(c.Identity, owner.Identity) && c.ConfirmsLocalClose(owner.Identity.SessionID) {
+						t.Logf("late abort reply after JournalFailed run and owned peer cleanup: %v", err)
+						return true
+					}
+				}
+				return false
+			}
 			var barrierTick <-chan time.Time
 			if m2 {
 				ticker := time.NewTicker(5 * time.Millisecond)
@@ -5177,11 +6166,19 @@ func TestIntakeToContext(t *testing.T) {
 						if tc.name == "m4-mixed-user-cancel" {
 							r.Cancel(engine.OriginControllerUser)
 						}
+						abortEvent = e
 						if tc.name == "m4-mixed-wait-fatal" {
-							ack = "exit"
+							continue
 						}
 						if err := e.Reply(protocol.Control{Type: ack}); err != nil {
-							t.Fatal(err)
+							if tc.name != "m4-mixed-journal-fatal" || !errors.Is(err, net.ErrClosed) {
+								t.Fatal(err)
+							}
+							// Other peers may still need replies before Execute can finish.
+							pendingLateAborts = append(pendingLateAborts, struct {
+								event protocol.Event
+								err   error
+							}{e, err})
 						}
 						continue
 					}
@@ -5189,6 +6186,9 @@ func TestIntakeToContext(t *testing.T) {
 						continue
 					}
 					if (tc.name == "cancel" || tc.name == "attempt-timeout" || strings.HasSuffix(tc.name, "-cancel") || strings.HasSuffix(tc.name, "-timeout")) && e.Message.Type == "held" {
+						continue
+					}
+					if m5 && e.Message.Type == "held" {
 						continue
 					}
 					if e.Message.Type != "prompt" {
@@ -5235,7 +6235,11 @@ func TestIntakeToContext(t *testing.T) {
 					if req.Output.SchemaID == ContextSchema && !strings.Contains(task.Requirements, supportingResolutionRequirements) {
 						t.Fatalf("supporting requirements missing from %s task", task.Stage)
 					}
-					if !reflect.DeepEqual(task.Scope, scope) {
+					if m5 {
+						m4Phases[task.Stage]++
+					}
+					pureVerification := m5 && (req.Output.SchemaID == ClaimSchema || req.Output.SchemaID == VerificationSchema || task.Stage == "m5-supplement-publication")
+					if !pureVerification && !reflect.DeepEqual(task.Scope, scope) {
 						t.Fatal("scope not in prompt")
 					}
 					if working && !transitionProbe && count > 4 && task.Stage != "planner" && req.Output.SchemaID != WorkerSchema {
@@ -5270,92 +6274,205 @@ func TestIntakeToContext(t *testing.T) {
 					var data any
 					var files map[string][]byte
 					if m2 && count > 3 {
-						switch req.Output.SchemaID {
-						case IntakeSchema:
-							if !strings.HasPrefix(tc.name, "m4-support-update-") || task.Stage != "intake-update" || m4Phases[task.Stage] != 1 {
-								t.Fatal("unexpected or replayed M4 intake update")
+						if task.Stage == "m5-supplement-publication" {
+							var payload struct {
+								Data json.RawMessage `json:"data"`
 							}
-							var fetched int32
-							intake, files, fetched = refreshIntakeFixture(t, ctx, "update-replace", count, req.Inputs, task, revisionURL)
-							if fetched != 3 || newRequests.Load() != fetched {
-								t.Fatal("update did not fetch issue/link/attachment exactly once")
-							}
-							data = intake
-						case PlannerSchema:
-							plannerSteps++
-							expectedPlanner = m2PlannerFixture(t, tc.name, req, task, plannerSteps)
-							data = m2PlannerData(t, expectedPlanner)
-							if tc.name == "m4-allfail-caller-bool" && plannerSteps == 2 {
-								data.(map[string]any)["remote_job_safe"] = true
-							}
-						case WikiSchema:
-							if (m3 || m4) && task.SupportingProposal != nil {
-								wiki, files = wikiFixture("complete", req.Inputs[0])
-								data = wiki
-							} else {
-								data, files = m2WikiFixture(t, tc.name, req)
-							}
-						case WorkerSchema:
-							var request workerRequest
-							if err := json.Unmarshal([]byte(req.Prompt), &request); err != nil {
+							if err := json.Unmarshal([]byte(req.Prompt), &payload); err != nil {
 								t.Fatal(err)
 							}
-							m2AssertWorkerInputs(t, r, req, request, result, tc.name)
-							fixtureName := tc.name
-							if request.Task.SourceKind == "logs" {
-								fixtureName = "m1-logs"
-							}
-							if tc.name == "m2-query-utc" {
-								fixtureName = "m1-query-utc"
-							}
-							if tc.name == "m2-incomplete-no-gap" {
-								fixtureName = "m1-incomplete-no-gap"
-							}
-							v, raw := workerFixture(fixtureName, request, req.Inputs)
-							if m4 && request.Task.ID == "inspection" {
-								raw["worker-raw"] = testJSON(map[string]any{"job_id": "anonymous-read", "status": "completed", "resubmitted": false, "safe_next_phase": "read the already available result"})
-							}
-							if tc.name == "m4-mixed-binding-fatal" && request.Task.ID == "w3" {
-								v.TaskID = "not-dispatched"
-							}
-							if tc.name == "m2-files-not-progress" {
-								raw["additional-raw"] = []byte("another anonymous document")
-								v.Evidence = append(v.Evidence, Evidence{FileID: "additional-raw"})
-							}
-							if request.Task.ID == "w2" {
-								if tc.name == "m2-branch-binding" {
-									v.TaskID = "not-dispatched"
+							data = payload.Data
+						} else {
+							switch req.Output.SchemaID {
+							case ClaimSchema:
+								var claimTask struct {
+									Projection PureClaim `json:"projection"`
 								}
-								if tc.name == "m2-branch-schema" {
-									v.Status = "invented-status"
+								if err := json.Unmarshal([]byte(req.Prompt), &claimTask); err != nil {
+									t.Fatal(err)
 								}
-							}
-							data, files = v, raw
-							if (slices.Contains([]string{"m2-parallel-batches-yield", "m2-batch-consumed-order", "m2-batch-results-order", "m2-batch-foreign-ref"}, tc.name) || strings.HasPrefix(tc.name, "m2-branch-") || strings.HasPrefix(tc.name, "m4-mixed-")) && slices.Contains([]string{"w1", "w2", "w3"}, request.Task.ID) {
-								barrier.held[request.Task.ID], barrier.attempts[request.Task.ID] = e, req.Identity.AttemptID
-							}
-						case ContextSchema:
-							if (!m3 && !m4 && tc.name != "m2-wiki-support") || task.SupportingProposal == nil {
-								t.Fatal("unexpected M2 supporting task")
-							}
-							if !m3 && !m4 {
-								m2AssertWikiOwners(t, req.Inputs)
-							}
-							var prior publication[Context]
-							if err := protocol.ReadJSON(req.Inputs[2].Path, &prior); err != nil {
-								t.Fatal(err)
-							}
-							resolved, raw := resolutionFixture("resolve-time", "time-unresolved", scope, req.Inputs, intake, wiki, prior.Data)
-							if strings.HasPrefix(tc.name, "m4-support-update-") {
-								for n := len(prior.Data.Attempts); n < len(resolved.Attempts); n++ {
-									if resolved.Attempts[n].Kind == "time" {
-										resolved.Attempts[n].Evidence = []Evidence{{FileID: "remediation"}}
+								projection := claimTask.Projection
+								snapshot := r.Snapshot()
+								owner := snapshot.Sessions[snapshot.Attempts[req.Identity.AttemptID].HandleID]
+								parent := snapshot.Sessions[snapshot.Attempts[projection.ParentState.AttemptID].HandleID]
+								if owner.Identity != parent.Identity && tc.name != "m5-claim-timeout-retry" && tc.name != "m5-claim-retry-exhausted" || owner.Role.Model != (runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}) || owner.Role.Name != "triage-planner" || !slices.Contains(req.Inputs, projection.ParentState) || !slices.Contains(req.Inputs, projection.Context) {
+									t.Fatal("claim lost proposing Planner/session/exact inputs")
+								}
+								switch tc.name {
+								case "m5-claim-projection":
+									projection.Candidate.Statement = "A different candidate"
+								case "m5-claim-parent":
+									projection.ParentState = projection.Context
+								case "m5-claim-context":
+									projection.Context = projection.ParentState
+								}
+								data = projection
+								if tc.name == "m5-claim-ledger" {
+									var raw map[string]any
+									if err := json.Unmarshal(testJSON(data), &raw); err != nil {
+										t.Fatal(err)
+									}
+									raw["ledger"] = map[string]any{}
+									data = raw
+								}
+							case VerificationSchema:
+								var verificationTask struct {
+									Role            string       `json:"role"`
+									Claim           contract.Ref `json:"claim"`
+									AllowedEvidence []Evidence   `json:"allowed_evidence"`
+								}
+								if err := json.Unmarshal([]byte(req.Prompt), &verificationTask); err != nil {
+									t.Fatal(err)
+								}
+								var claim publication[PureClaim]
+								if err := protocol.ReadJSON(verificationTask.Claim.Path, &claim); err != nil {
+									t.Fatal(err)
+								}
+								wantInputs := []contract.Ref{verificationTask.Claim}
+								for _, evidence := range claim.Data.Candidate.AllowedEvidence {
+									if !slices.Contains(wantInputs, *evidence.Ref) {
+										wantInputs = append(wantInputs, *evidence.Ref)
 									}
 								}
+								if !slices.Equal(req.Inputs, wantInputs) || !reflect.DeepEqual(verificationTask.AllowedEvidence, claim.Data.Candidate.AllowedEvidence) {
+									t.Fatal("fresh verifier received other Planner inputs or wrong evidence version")
+								}
+								var prompt map[string]json.RawMessage
+								if err := json.Unmarshal([]byte(req.Prompt), &prompt); err != nil {
+									t.Fatal(err)
+								}
+								if len(prompt) != 5 || req.Feedback != nil {
+									t.Fatal("verifier prompt contains extra Planner state or retry feedback")
+								}
+								for _, key := range []string{"stage", "role", "claim", "allowed_evidence", "requirements"} {
+									if _, ok := prompt[key]; !ok {
+										t.Fatalf("missing verifier input %s", key)
+									}
+								}
+								data = VerificationResult{Claim: verificationTask.Claim, Role: verificationTask.Role, AllowedEvidence: verificationTask.AllowedEvidence, Assessment: VerificationAssessment{Support: map[string]string{"pro": "supports inference", "con": "counterexample unresolved", "cross": "measurement incomplete"}[verificationTask.Role], Reason: "Candidate fits supplied observation but runtime is missing", Basis: verificationTask.AllowedEvidence, RuntimeBasis: []Evidence{}, Measurement: "unavailable", Window: "unavailable", Filter: "unavailable", Environment: "unavailable", Release: "unavailable", Counterexamples: []VerificationIssue{}, Gaps: []string{"Runtime observation remains missing"}}}
+								if verificationTask.Role == "con" {
+									v := data.(VerificationResult)
+									switch tc.name {
+									case "m5-verifier-role":
+										v.Role = "pro"
+									case "m5-verifier-claim":
+										v.Claim = claim.Data.ParentState
+									case "m5-verifier-evidence":
+										v.AllowedEvidence = []Evidence{}
+									case "m5-verifier-unauthorized-basis":
+										v.Assessment.Basis = []Evidence{{Ref: &claim.Data.ParentState, FileID: "issue"}}
+									case "m5-verifier-schema":
+										v.Role = "planner"
+									}
+									data = v
+								}
+								if tc.name == "m5-new-version-cross-reject" && verificationTask.Role == "cross" && m4Phases[task.Stage] == 2 {
+									var parent publication[PlannerState]
+									if err := protocol.ReadJSON(claim.Data.ParentState.Path, &parent); err != nil {
+										t.Fatal(err)
+									}
+									v := data.(VerificationResult)
+									v.Claim = parent.Data.Verification.Claims[0]
+									data = v
+								}
+								if strings.HasPrefix(tc.name, "m5-supplement-exhausted-") {
+									fatal := "cross"
+									if strings.HasSuffix(tc.name, "fatal-pro") {
+										fatal = "pro"
+									}
+									if verificationTask.Role == fatal {
+										barrier.held[fatal], barrier.attempts[fatal] = e, req.Identity.AttemptID
+									}
+								}
+								if tc.name == "m5-reverse-completion" || strings.HasPrefix(tc.name, "m5-partial-") {
+									barrier.held[verificationTask.Role], barrier.attempts[verificationTask.Role] = e, req.Identity.AttemptID
+								}
+							case IntakeSchema:
+								if !strings.HasPrefix(tc.name, "m4-support-update-") || task.Stage != "intake-update" || m4Phases[task.Stage] != 1 {
+									t.Fatal("unexpected or replayed M4 intake update")
+								}
+								var fetched int32
+								intake, files, fetched = refreshIntakeFixture(t, ctx, "update-replace", count, req.Inputs, task, revisionURL)
+								if fetched != 3 || newRequests.Load() != fetched {
+									t.Fatal("update did not fetch issue/link/attachment exactly once")
+								}
+								data = intake
+							case PlannerSchema:
+								plannerSteps++
+								expectedPlanner = m2PlannerFixture(t, tc.name, req, task, plannerSteps)
+								data = m2PlannerData(t, expectedPlanner)
+								if tc.name == "m4-allfail-caller-bool" && plannerSteps == 2 {
+									data.(map[string]any)["remote_job_safe"] = true
+								}
+							case WikiSchema:
+								if (m3 || m4) && task.SupportingProposal != nil {
+									wiki, files = wikiFixture("complete", req.Inputs[0])
+									data = wiki
+								} else {
+									data, files = m2WikiFixture(t, tc.name, req)
+								}
+							case WorkerSchema:
+								var request workerRequest
+								if err := json.Unmarshal([]byte(req.Prompt), &request); err != nil {
+									t.Fatal(err)
+								}
+								m2AssertWorkerInputs(t, r, req, request, result, tc.name)
+								fixtureName := tc.name
+								if request.Task.SourceKind == "logs" {
+									fixtureName = "m1-logs"
+								}
+								if tc.name == "m2-query-utc" {
+									fixtureName = "m1-query-utc"
+								}
+								if tc.name == "m2-incomplete-no-gap" {
+									fixtureName = "m1-incomplete-no-gap"
+								}
+								v, raw := workerFixture(fixtureName, request, req.Inputs)
+								if m4 && request.Task.ID == "inspection" {
+									raw["worker-raw"] = testJSON(map[string]any{"job_id": "anonymous-read", "status": "completed", "resubmitted": false, "safe_next_phase": "read the already available result"})
+								}
+								if tc.name == "m4-mixed-binding-fatal" && request.Task.ID == "w3" {
+									v.TaskID = "not-dispatched"
+								}
+								if tc.name == "m2-files-not-progress" {
+									raw["additional-raw"] = []byte("another anonymous document")
+									v.Evidence = append(v.Evidence, Evidence{FileID: "additional-raw"})
+								}
+								if request.Task.ID == "w2" {
+									if tc.name == "m2-branch-binding" {
+										v.TaskID = "not-dispatched"
+									}
+									if tc.name == "m2-branch-schema" {
+										v.Status = "invented-status"
+									}
+								}
+								data, files = v, raw
+								if (slices.Contains([]string{"m2-parallel-batches-yield", "m2-batch-consumed-order", "m2-batch-results-order", "m2-batch-foreign-ref"}, tc.name) || strings.HasPrefix(tc.name, "m2-branch-") || strings.HasPrefix(tc.name, "m4-mixed-")) && slices.Contains([]string{"w1", "w2", "w3"}, request.Task.ID) {
+									barrier.held[request.Task.ID], barrier.attempts[request.Task.ID] = e, req.Identity.AttemptID
+								}
+							case ContextSchema:
+								if (!m3 && !m4 && tc.name != "m2-wiki-support") || task.SupportingProposal == nil {
+									t.Fatal("unexpected M2 supporting task")
+								}
+								if !m3 && !m4 {
+									m2AssertWikiOwners(t, req.Inputs)
+								}
+								var prior publication[Context]
+								if err := protocol.ReadJSON(req.Inputs[2].Path, &prior); err != nil {
+									t.Fatal(err)
+								}
+								resolved, raw := resolutionFixture("resolve-time", "time-unresolved", scope, req.Inputs, intake, wiki, prior.Data)
+								if strings.HasPrefix(tc.name, "m4-support-update-") {
+									for n := len(prior.Data.Attempts); n < len(resolved.Attempts); n++ {
+										if resolved.Attempts[n].Kind == "time" {
+											resolved.Attempts[n].Evidence = []Evidence{{FileID: "remediation"}}
+										}
+									}
+								}
+								data, files = resolved, raw
+							default:
+								t.Fatal("unexpected M2 schema")
 							}
-							data, files = resolved, raw
-						default:
-							t.Fatal("unexpected M2 schema")
 						}
 					} else if req.Output.SchemaID == WorkerSchema {
 						var request workerRequest
@@ -5607,7 +6724,7 @@ func TestIntakeToContext(t *testing.T) {
 							}
 						}
 					}
-					if count > 3 {
+					if count > 3 && !pureVerification {
 						assertRetainedInputOwners(t, req.Inputs)
 					}
 					for _, ref := range req.Inputs {
@@ -5639,7 +6756,7 @@ func TestIntakeToContext(t *testing.T) {
 					} else {
 						writeCandidate(t, e.Message, req, data, files, tc.name == "file-escape")
 					}
-					if m2 && req.Output.SchemaID == WorkerSchema {
+					if m2 && (req.Output.SchemaID == WorkerSchema || m5 && req.Output.SchemaID == VerificationSchema) {
 						for _, attemptID := range barrier.attempts {
 							if attemptID == req.Identity.AttemptID {
 								barrier.release(t, r, tc.name, bridge)
@@ -5648,6 +6765,38 @@ func TestIntakeToContext(t *testing.T) {
 						}
 					}
 					ack := "settle"
+					if m5 {
+						if strings.HasPrefix(tc.name, "m5-supplement-exhausted-") {
+							exhausted := "pro"
+							if strings.HasSuffix(tc.name, "fatal-pro") {
+								exhausted = "cross"
+							}
+							if task.Stage == "verify-"+exhausted {
+								ack = "compaction-error"
+							}
+						}
+						if strings.HasPrefix(tc.name, "m5-supplement-reframe-") && task.Stage == "verify-con" && m4Phases[task.Stage] == 1 {
+							ack = "compaction-error"
+						}
+						if tc.name == "m5-supplement-reframe-inspection-resume" && task.Stage == "wiki-investigation" && m4Phases[task.Stage] == 1 {
+							ack = "hold"
+						}
+						if task.Stage == "verify-con" {
+							n := m4Phases[task.Stage]
+							if tc.name == "m5-verifier-timeout-retry" && n == 1 || (tc.name == "m5-verifier-unavailable" || tc.name == "m5-same-version-missing-only") && n <= 2 {
+								ack = "hold"
+							}
+							if tc.name == "m5-verifier-compaction-retry" && n == 1 {
+								ack = "compaction-error"
+							}
+						}
+						if (tc.name == "m5-claim-timeout-retry" && m4Phases[task.Stage] == 1 || tc.name == "m5-claim-retry-exhausted") && task.Stage == "planner-claim" {
+							ack = "hold"
+						}
+						if tc.name == "m5-planner-feedback-timeout" && task.Stage == "planner" && m4Phases[task.Stage] == 2 {
+							ack = "hold"
+						}
+					}
 					if m4 {
 						if strings.HasPrefix(tc.name, "m4-meta-") && task.Stage == "planner" && plannerSteps == 1 || strings.HasPrefix(tc.name, "m4-allfail-") && req.Output.SchemaID == WorkerSchema || (strings.HasPrefix(tc.name, "m4-support-unsafe-") && task.Stage == "wiki-resolution" || tc.name == "m4-wiki-timeout-partial-resume" && task.Stage == "wiki-investigation") && m4Phases[task.Stage] == 1 {
 							ack = "hold"
@@ -5801,12 +6950,35 @@ func TestIntakeToContext(t *testing.T) {
 					}
 				}
 			}
+			if lateAbort {
+				if abortEvent.Message.Type != "abort" {
+					t.Fatal("journal fault did not reach the original abort barrier")
+				}
+				// Join the real Host after Execute so the late write is deterministic.
+				if err := host.Close(); err != nil {
+					t.Fatal(err)
+				}
+				err := abortEvent.Reply(protocol.Control{Type: "release-abort"})
+				if !errors.Is(err, net.ErrClosed) {
+					t.Fatalf("completed journal-fatal run did not accept its closed-peer late abort: %v", err)
+				}
+				pendingLateAborts = append(pendingLateAborts, struct {
+					event protocol.Event
+					err   error
+				}{abortEvent, err})
+			}
+			for _, pending := range pendingLateAborts {
+				if !acceptLateAbort(pending.event, pending.err) {
+					t.Fatalf("completed journal-fatal run did not accept its closed-peer late abort: %v", pending.err)
+				}
+			}
 			if tc.name == "m4-reframe-timeout-inspection-resume" && report.ExitCode == 0 {
 				if m4Phases["intake"] != 1 || m4Phases["wiki"] != 1 || m4Phases["context"] != 1 || m4Phases["wiki-investigation"] != 2 || plannerSteps != 6 {
 					t.Fatalf("reframe recovery repeated acquisition or skipped continuation: phases=%v", m4Phases)
 				}
 			}
-			if count != tc.stages || (report.ExitCode != 0) != tc.failure {
+			limitBeforePrompt := tc.name == "m5-verifier-attempt-limit" || tc.name == "m5-verifier-live-limit"
+			if count != tc.stages && !limitBeforePrompt || (report.ExitCode != 0) != tc.failure {
 				t.Fatalf("stages=%d outcome=%s failure=%v", count, report.Outcome, report.Failure)
 			}
 			if tc.name == "truncated-attachment" || tc.name == "update-history-alias" || tc.name == "work-blank-reason" {

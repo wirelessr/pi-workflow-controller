@@ -35,8 +35,8 @@ type InvestigationLedger struct {
 	Reframe       *InvestigationReframe `json:"reframe"`
 }
 
-const adaptiveRequirements = `This is the adaptive investigation Planner, not a verifier or report writer. Submit the full hypotheses/pending/gaps/worker_tasks/worker_results/wiki_results state and a ledger every time. Echo worker_results and wiki_results exactly as supplied. Choose an explicit ledger.action: workers, support, wiki, reframe, plan, or yield, and explain ledger.reason. Workers means dispatch only declared worker_tasks whose dependencies have accepted results; at most three are dispatched in declaration order. Adjust unfinished tasks freely in each new snapshot, but never reuse a completed ID. Support uses the existing supporting_work contract to remedy prerequisites, not first-missing-field closure. Its basis still names only supporting-context evidence; investigation wiki/worker delivery does not expand Context provenance or supporting_work eligibility. Wiki/reframe declares wiki_task with stable id, terms, previous_terms exactly from the latest delivered wiki (initially Context.Wiki), reason and evidence basis; reframe changes the terms. Wiki tasks do not replace intake or Context.Wiki. Preserve new incomplete wiki gaps even if the old Context.Wiki was complete. Interpret wiki applicability yourself; completed search is not runtime proof or hypothesis progress.
-One round is one delivered worker batch followed by this Planner update. Without recovery, increment round only for a nonempty new worker_results batch. With recovery, each new workers delivery increments round once, including an all-failed delivery with no worker_results. ledger.consumed_batch is exactly the new suffix of genuine successful worker_results since previous; never include failures or fabricate success Refs. For that worker round explicitly report changes with hypothesis_id, change description, reason and supplied basis, or an empty changes array for no hypothesis progress. Do not call repeated successful searches, additional files, ordinary planning/support or a fresh session hypothesis progress. Go does not compare assessments or determine truth. Increment no_progress for an empty-changes worker round; reset it only for an explicitly reported hypothesis change. Without a worker round preserve no_progress and report no changes. Preserve reframe_round/reframe_streak independently: on the update receiving the previous reframe action's wiki delivery, set them to that proposal's round/no_progress (even if the search is incomplete), not zero and not a success-derived progress event. Actual hypothesis progress resets reframe_streak to zero, retaining reframe_round. Otherwise echo these counters. Initially all counters are zero. Two no-progress worker rounds since the separate reframe boundary require action reframe, a concrete reframe change/reason/basis, a different source, counterexample, healthy control or problem premise, and new wiki terms. If no feasible authorized path exists, explicitly yield with reason and gaps instead of implying a conclusion. Reframe attempts do not erase incomplete search gaps. Extra planning, support, wiki tasks and session changes do not add rounds. plan has no dispatch. yield has no dispatch and hands only accepted investigation state to a later phase; explicitly explain needed next work or why no authorized path is feasible. It is never a verified claim, final report, root-cause confirmation or publication.`
+const adaptiveRequirements = `This is the adaptive investigation Planner, not a verifier or report writer. Submit the full hypotheses/pending/gaps/worker_tasks/worker_results/wiki_results state and a ledger every time. Echo worker_results and wiki_results exactly as supplied. Choose an explicit ledger.action: workers, support, wiki, reframe, plan, or yield; verify is available only when verification metadata is supplied. Explain ledger.reason. Workers means dispatch only declared worker_tasks whose dependencies have accepted results; at most three are dispatched in declaration order. Adjust unfinished tasks freely in each new snapshot, but never reuse a completed ID. Support uses the existing supporting_work contract to remedy prerequisites, not first-missing-field closure. Its basis still names only supporting-context evidence; investigation wiki/worker delivery does not expand Context provenance or supporting_work eligibility. Wiki/reframe declares wiki_task with stable id, terms, previous_terms exactly from the latest delivered wiki (initially Context.Wiki), reason and evidence basis; reframe changes the terms. Wiki tasks do not replace intake or Context.Wiki. Preserve new incomplete wiki gaps even if the old Context.Wiki was complete. Interpret wiki applicability yourself; completed search is not runtime proof or hypothesis progress.
+One round is one delivered worker batch followed by this Planner update; when M5 is enabled a complete verification feedback delivery also counts as one round, including explicit unavailable roles. Without recovery, increment round only for a nonempty new worker_results batch. With recovery, each new workers delivery increments round once, including an all-failed delivery with no worker_results. ledger.consumed_batch is exactly the new suffix of genuine successful worker_results since previous; never include failures or fabricate success Refs. For that worker or verification round explicitly report changes with hypothesis_id, change description, reason and supplied basis, or an empty changes array for no hypothesis progress. Do not call repeated successful searches, additional files, ordinary planning/support or a fresh session hypothesis progress. Go does not compare assessments or determine truth. Increment no_progress for an empty-changes worker or verification round; reset it only for an explicitly reported hypothesis change. Without a worker or verification round preserve no_progress and report no changes. Preserve reframe_round/reframe_streak independently: on the update receiving the previous reframe action's wiki delivery, set them to that proposal's round/no_progress (even if the search is incomplete), not zero and not a success-derived progress event. Actual hypothesis progress resets reframe_streak to zero, retaining reframe_round. Otherwise echo these counters. Initially all counters are zero. Two no-progress worker or verification rounds since the separate reframe boundary require action reframe, a concrete reframe change/reason/basis, a different source, counterexample, healthy control or problem premise, and new wiki terms. If no feasible authorized path exists, explicitly yield with reason and gaps instead of implying a conclusion. Reframe attempts do not erase incomplete search gaps. Extra planning, support, wiki tasks and session changes do not add rounds. plan has no dispatch. yield has no dispatch and hands only accepted investigation state to a later phase; explicitly explain needed next work or why no authorized path is feasible. It is never a verified claim, final report, root-cause confirmation or publication.`
 
 func (a *acceptance) checkInvestigation(v PlannerState, h contextHistory, sources map[contract.Ref][]file) error {
 	var prior PlannerState
@@ -48,6 +48,9 @@ func (a *acceptance) checkInvestigation(v PlannerState, h contextHistory, source
 		prior = p.Data
 	}
 	if err := a.checkRecovery(v, prior, sources); err != nil {
+		return err
+	}
+	if err := a.checkVerification(v, prior, h.value.Scope, sources); err != nil {
 		return err
 	}
 	l := v.Ledger
@@ -98,7 +101,11 @@ func (a *acceptance) checkInvestigation(v PlannerState, h contextHistory, source
 	if err != nil {
 		return err
 	}
-	workerRound := len(batch) > 0
+	verificationBatch, err := verificationSuffix(v, prior)
+	if err != nil {
+		return err
+	}
+	workerRound := len(batch) > 0 || len(verificationBatch) > 0
 	if len(deliveries) > 0 && deliveries[0].Kind == "workers" {
 		workerRound = true
 	}
@@ -175,6 +182,10 @@ func (a *acceptance) checkInvestigation(v PlannerState, h contextHistory, source
 	case "wiki", "reframe":
 		if v.WikiTask == nil {
 			return fmt.Errorf("wiki/reframe action requires investigation wiki_task")
+		}
+	case "verify":
+		if v.Verification == nil || v.VerificationRequest == nil {
+			return fmt.Errorf("verify action requires explicit policy and claim request")
 		}
 	case "plan", "yield":
 	default:
@@ -283,14 +294,22 @@ func (p *plannerCaller) workReady(ctx context.Context, models sliceModels) (int,
 }
 
 // The returned Ref is investigation state only. Capacity and recovery require
-// explicit caller policies; verification and final delivery remain separate.
-func executeInvestigation(ctx context.Context, r *engine.Run, scope Scope, plannerModel runtime.ModelSpec, models sliceModels, contextRef contract.Ref, capacity *PlannerCapacityPolicy, recovery *RecoveryPolicy) (contract.Ref, error) {
+// explicit caller policies; final delivery remains a separate milestone.
+func executeInvestigation(ctx context.Context, r *engine.Run, scope Scope, plannerModel runtime.ModelSpec, models sliceModels, contextRef contract.Ref, capacity *PlannerCapacityPolicy, recovery *RecoveryPolicy, verification *VerificationPolicy) (contract.Ref, error) {
 	if recovery != nil && recovery.PlannerRetries < 0 {
 		return contract.Ref{}, fmt.Errorf("explicit nonnegative planner retry budget required")
 	}
 	if capacity != nil {
 		if err := capacity.check(); err != nil {
 			return contract.Ref{}, err
+		}
+	}
+	if verification != nil {
+		if err := verification.check(); err != nil {
+			return contract.Ref{}, err
+		}
+		if recovery == nil {
+			return contract.Ref{}, fmt.Errorf("verification requires an explicit Planner recovery policy")
 		}
 	}
 	p, err := startPlanner(ctx, r, scope, plannerModel, contextRef)
@@ -308,6 +327,9 @@ func executeInvestigation(ctx context.Context, r *engine.Run, scope Scope, plann
 		if err != nil {
 			return contract.Ref{}, err
 		}
+	}
+	if verification != nil {
+		p.verification = &PlannerVerification{Policy: *verification, Claims: []contract.Ref{}, Deliveries: []VerificationDelivery{}}
 	}
 	return p.adapt(ctx, models)
 }
@@ -355,6 +377,8 @@ func (p *plannerCaller) adapt(ctx context.Context, models sliceModels) (result c
 			if next != nil {
 				p = next
 			}
+		case "verify":
+			err = p.verify(ctx)
 		case "wiki", "reframe":
 			_, err = p.searchWiki(ctx, models)
 		case "yield":

@@ -131,7 +131,7 @@ Private `startPlanner` 從 exact committed supporting context（ready 或 needs-
 - Fresh session 明列上一份完整 Planner state、supporting context 及所有歷史 evidence owners，不靠舊對話、目錄掃描或複製 raw files。成功驗收及 Decision 持久化後才替換 caller 的 last state。無效 contract 或執行失敗使該 caller 停止，不交出失敗 candidate，也不自動 recovery；原始 fatal／取消／限額／cleanup 錯誤仍返回。
 - 匿名 RPC fixtures 覆蓋同 session 多 Step、fresh handoff、revised intake 歷史 owner、supporting query inputs、ready／incomplete、非法 Ref／schema／scope、失敗與會計。這不是正常 Pi 技能操作或指定 GLM live 驗證。
 
-`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；一般 worker 與自動批次／reframe 接線見下節；容量訊號、週期 checkpoint 與明示政策的 recovery 接線見下節；同版三方驗證與報告仍未實作。
+`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；一般 worker 與自動批次／reframe 接線見下節；容量訊號、週期 checkpoint、明示政策的 recovery 與三方驗證接線見下節；最終報告仍未實作。
 
 ### Planner proposal → 既有 supporting 任務 → 新 Planner state
 
@@ -175,7 +175,7 @@ Private `executeInvestigation` 明示獨立 Planner model 與 worker models，�
 
 調查期 wiki task 綁定 proposal/context/task ID/inputs，沿原 WikiSearch/completeness，保存 terms、previous_terms、理由及真正 evidence owners。新搜尋以獨立 `wiki_results` Ref 明交 Planner／worker／support／fresh handoff，不塞進 ready context 的舊 resolve、不重抓 intake、不改寫舊 `Context.Wiki`。歷史搜尋按自己的 intake/binding 重驗；新 partial/unavailable/not-run gaps 不得用旧 context 的 complete 遮蔽，runtime worker 仍受必要 wiki 完整性前提限制。Terms echo／明列變更是任務驗收，不證明搜尋詞語義不同或 wiki pattern 能支持本次根因。
 
-匿名同一 RPC driver 覆蓋三 worker 加 Planner、逆序完成／有序交付、依賴批次、no-ready feedback、明報進展／兩輪 reframe、wiki partial 與歷史 owners、獨立模型、support/handoff、branch 失敗／取消／cleanup／半提交與會計。沒有新 driver、scheduler、任意總輪數／查詢次數 cap 或 crash resume；M5+ 與真模型／技能／產品入口驗收仍未完成。歷史 validation 的 raw evidence 重讀成本尚未完成容量量測，不能把匿名情境通過當作高負載保證。
+匿名同一 RPC driver 覆蓋三 worker 加 Planner、逆序完成／有序交付、依賴批次、no-ready feedback、明報進展／兩輪 reframe、wiki partial 與歷史 owners、獨立模型、support/handoff、branch 失敗／取消／cleanup／半提交與會計。沒有新 driver、scheduler、任意總輪數／查詢次數 cap 或 crash resume；M6+ 與真模型／技能／產品入口驗收仍未完成。歷史 validation 的 raw evidence 重讀成本尚未完成容量量測，不能把匿名情境通過當作高負載保證。
 
 ### 完整 checkpoint 與容量 handoff
 
@@ -206,6 +206,24 @@ Support 沿原 resolve/revise pipeline 保存已驗收 intake/wiki、原 proposa
 若當前 mandatory reframe 的 wiki 失敗，允許其明列 read-only inspection 先查證安全條件，再恢復該 reframe。只限同一未解決 reframe delivery、同一 context／reframe boundary／最後進展 round；一般 worker、舊 reframe 或已解決 delivery 不能繞過兩輪規則。Inspection 不自動歸零 streak，只有真正 wiki 交付才更新 reframe boundary。
 
 匿名案例沿既有 engine/Store/RPC及 filesystem fault 邊界覆蓋 Planner 首步/重試耗盡、全敗/mixed batch、兩輪 reframe、support/wiki phase續作與不重抓資料、identity/模型/echo/歷史/cleanup/fatal。未窮舉所有 sibling/fault 排列；未動態偽造內部 cleanup report 或宣稱 live/job 安全判讀已驗。中性 identity API 與舊 consumers 另保留 engine 回歸。
+
+### 獨立 claim、fresh pro/con/cross 與 Planner feedback
+
+`executeInvestigation` 接 caller 明示的 `VerificationPolicy`，每個 pro/con/cross 的完整 ModelSpec 與非負 retry budget 分別指定，不繼承一般 analysis 模型，不提供 live 預設。啟用時亦要求 M4 RecoveryPolicy；nil verification 沿舊流程。沒有第四個裁判 Agent，沒有最終報告／renderer／產品註冊。
+
+Planner 先提交完整 state，明列新 candidate 或要補缺角的既有 claim。新 candidate 由同一 Planner 角色/model 的正常 Step 產生 `triage.claim.v1`：只含 parent_state/context 的 exact Ref 與 candidate（ID/statement/premises/allowed_evidence），不含完整 Planner 敘事、ledger、舊 verdict 或附檔。Go 驗投影相等、producer/parent binding 與真正 evidence owners，不自行 Publish 第二 Ref。完整 state 透過明列 parent_state＋claim 引用閉包重建，必要 pending committed claim 在 handoff/timeout/下一 state 明交；未被正常 snapshot 消費不冒稱完整 checkpoint。沒有 engine 多 output、input journal 或第二 registry。
+
+三方使用真 Parallel/CollectAll、fresh sessions，每個 attempt 僅自己的角色工作，live Planner 另占 slot。Request inputs 僅 claim 與明列 allowed evidence owners，不注入 parent Planner state 的內容、其他角色/舊 verdict 或 RetryState feedback。Parent/context Ref 是 continuation metadata，不是讀取額外敘事的工作指示；這種 input isolation 不是 filesystem sandbox。
+
+Pro 檢查支持與前提，con 檢查反例/替代解釋，cross 獨立核對適用性、量測有效性及證據一致性，不先看其他兩角再投票。各自的 `triage.verification.v1` 綁 role/claim/exact ordered evidence，Agent 明報支持程度、理由/basis/runtime_basis、window/filter/environment/release、量測有效性、反例與處置、gaps；缺項可明列 unavailable。Go 只驗結構、版本、producer role/model、fresh attempt 與所引 evidence，不從字串、來源 schema 或模型共識認列因果。
+
+Claim Ref 與 evidence 集合固定版本；改 candidate 或 allowed evidence 要產新 claim，三角全 fresh。相同版本只補 unavailable 角色，已 accepted 的角色 Ref 不重跑或改綁。Planner/claim/verifier 沿同一 `retryPlannerInputs` 與既有 Scope.Retry/identity/strict-close/typed failure 機械；只有原已批准 timeout/可信 compaction 可安全有限補做。精確辨認本次 RetryExhausted 及完整已確認 failure history 才產 verification-unavailable；schema/內容拒絕仍是產物 failure，不是反證、PASS 或普通缺資料。取消/fatal/limits/storage/journal/cleanup 及其他 branch error 不得被較早 timeout 蓋過。
+
+同版結果驗收/Decision 後才保留，complete delivery 固定按 pro/con/cross 有序回 Planner。每批完整 feedback（包括明列 unavailable）被下一 Planner snapshot 消費，也算一個 round/cycle；claim production、角色內 retry/fresh 不另計，consumed_batch 仍只有真 worker Refs。是否有假說進展由 Agent 明報，原 reframe 與安全 inspection 規則不變。
+
+既有 Planner 必須提交綁定 delivery/claim 的 `verification_review`：支持程度、runtime/量測限制、可檢驗分歧、反例處置/gaps與等於 ledger.action 的下一步。Agent 決定補證、換版再驗或 yield 調查 state；Go 不投票、不加 hypothesis taxonomy、不因三角完成自動升 confirmed。歷史版本與處置保留，後續新 verifier 不接前輪 verdict。`PendingVerificationError` 明交已 committed state/claim、已驗 partial roles、history/recovery並 Unwrap 原錯誤，不偽造成功 output。
+
+匿名 fixtures 沿原 Store 與真 engine/Store/RPC，驗 pure claim/producer/版本隔離、三角逆序完成、同版補角/換版全驗、callback failure/未完成交付、Agent feedback→蒐證→新 claim 與 reframe。精確 claim acceptance→RetryFinished 的 filesystem 故障時點未動態注入，只有相鄰邊界與 source 證據；不宣稱所有 fault 排列、live 技能/模型或 runtime 因果判讀已驗。
 
 ### 同一次驗收內的讀取重用
 

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/claim.v1.json",
+  "description": "Pure candidate projection. parent_state and context are exact continuation/version metadata, not verifier inputs or a causal verdict. No narrative, ledger or prior assessments.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["parent_state", "context", "candidate"],
+  "properties": {
+    "parent_state": {"$ref": "common.v1.json#/$defs/ref"},
+    "context": {"$ref": "common.v1.json#/$defs/ref"},
+    "candidate": {"$ref": "#/$defs/candidate"}
+  },
+  "$defs": {
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "statement", "premises", "allowed_evidence"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "statement": {"type": "string", "minLength": 1},
+        "premises": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "allowed_evidence": {"type": "array", "uniqueItems": true, "items": {"$ref": "common.v1.json#/$defs/evidence"}}
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate", "claim", "reason"],
+      "properties": {
+        "candidate": {"anyOf": [{"$ref": "#/$defs/candidate"}, {"type": "null"}]},
+        "claim": {"anyOf": [{"$ref": "common.v1.json#/$defs/ref"}, {"type": "null"}]},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "oneOf": [
+        {"properties": {"candidate": {"type": "object"}, "claim": {"type": "null"}}},
+        {"properties": {"candidate": {"type": "null"}, "claim": {"type": "object"}}}
+      ]
+    }
+  }
+}

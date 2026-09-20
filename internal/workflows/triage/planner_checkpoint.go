@@ -61,6 +61,11 @@ func checkpointCounters(v, prior PlannerState) (cycle, checkpoint int, full bool
 		}
 		deliveries = len(suffix)
 	}
+	verificationBatch, e := verificationSuffix(v, prior)
+	if e != nil {
+		return 0, 0, false, e
+	}
+	deliveries += len(verificationBatch)
 	if cycle < 0 || deliveries > 1 || (deliveries == 1 && cycle == int(^uint(0)>>1)) {
 		return 0, 0, false, fmt.Errorf("invalid planner dispatch cycle transition")
 	}
@@ -124,7 +129,7 @@ func (p *plannerCaller) checkpointTask(a *acceptance) (*PlannerCheckpoint, error
 		}
 		prior = state.Data
 	}
-	v := PlannerState{Context: p.history.ref, Previous: p.last, WorkerResults: p.workerResults, WikiResults: p.wikiResults, Recovery: p.recovery}
+	v := PlannerState{Context: p.history.ref, Previous: p.last, WorkerResults: p.workerResults, WikiResults: p.wikiResults, Recovery: p.recovery, Verification: p.verification}
 	cycle, checkpoint, full, err := checkpointCounters(v, prior)
 	if err != nil {
 		return nil, err
@@ -140,6 +145,9 @@ func (p *plannerCaller) checkpointTask(a *acceptance) (*PlannerCheckpoint, error
 // Called only after strict close by handoff/support. Pending diagnostics have
 // not yet reached a Planner Step and must not disappear at this session boundary.
 func (p *plannerCaller) reopen(ctx context.Context, contextRef contract.Ref) (*plannerCaller, error) {
+	if err := p.checkPendingClaims(ctx); err != nil {
+		return nil, err
+	}
 	next, err := openPlannerWithEvidence(ctx, p.r, p.scope, p.model, contextRef, p.last, p.workerResults, p.wikiResults)
 	if err != nil {
 		return nil, err
@@ -159,6 +167,7 @@ func (p *plannerCaller) reopen(ctx context.Context, contextRef contract.Ref) (*p
 		}
 	}
 	next.recovery = p.recoveryTask()
+	next.verification = p.verificationTask()
 	next.recoveryErrors = slices.Clone(p.recoveryErrors)
 	return next, nil
 }

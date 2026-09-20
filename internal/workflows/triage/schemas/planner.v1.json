@@ -7,9 +7,13 @@
   "allOf": [
     {"if": {"required": ["ledger"]}, "then": {"required": ["worker_tasks", "worker_results", "wiki_results"]}},
     {"if": {"required": ["checkpoint"]}, "then": {"required": ["ledger"]}},
-    {"if": {"required": ["recovery"]}, "then": {"required": ["ledger"]}}
+    {"if": {"required": ["recovery"]}, "then": {"required": ["ledger"]}},
+    {"if": {"required": ["verification"]}, "then": {"required": ["ledger", "recovery"]}}
   ],
   "properties": {
+    "verification": {"$ref": "verification.v1.json#/$defs/state"},
+    "verification_request": {"$ref": "claim.v1.json#/$defs/request"},
+    "verification_review": {"$ref": "verification.v1.json#/$defs/review"},
     "recovery": {
       "type": "object", "additionalProperties": false,
       "required": ["policy", "dispatch_cycle", "deliveries", "planner_failures"],
@@ -33,7 +37,7 @@
       }
     },
     "checkpoint": {
-      "description": "Copy the supplied Controller metadata exactly. Retain policy and the entire controller_feedback prefix. dispatch_cycle counts one completed worker batch, supporting task or wiki delivery received by this full Planner snapshot, not ledger.round, planning or session changes. checkpoint_cycle is the latest multiple of three; full_checkpoint is true only on the delivery reaching that cycle. Go validates transitions, feedback refs and exact echo after the existing state checks.",
+      "description": "Copy the supplied Controller metadata exactly. Retain policy and the entire controller_feedback prefix. dispatch_cycle counts one completed worker batch, supporting task, wiki delivery or complete verification feedback delivery (including explicit unavailable roles) received by this full Planner snapshot, not ledger.round, claim production, individual verifier retries, planning or session changes. checkpoint_cycle is the latest multiple of three; full_checkpoint is true only on the delivery reaching that cycle. Go validates transitions, feedback refs and exact echo after the existing state checks.",
       "type": "object",
       "additionalProperties": false,
       "required": ["policy", "dispatch_cycle", "checkpoint_cycle", "full_checkpoint", "adaptive_note", "controller_feedback"],
@@ -82,7 +86,7 @@
       "additionalProperties": false,
       "required": ["action", "reason", "round", "no_progress", "reframe_round", "reframe_streak", "consumed_batch", "changes", "reframe"],
       "properties": {
-        "action": {"enum": ["workers", "support", "wiki", "reframe", "plan", "yield"]},
+        "action": {"enum": ["workers", "support", "wiki", "reframe", "verify", "plan", "yield"]},
         "reason": {"type": "string", "minLength": 1},
         "round": {"type": "integer", "minimum": 0},
         "no_progress": {"type": "integer", "minimum": 0},

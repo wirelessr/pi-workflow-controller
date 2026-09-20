@@ -86,6 +86,7 @@ func Serve() error {
 	var leaf any
 	holdEntries := false
 	holdAbort := false
+	exitOnAbort := false
 	appendMessage := func(message map[string]any) error {
 		id := fmt.Sprintf("e%d", len(entries)+1)
 		entry := map[string]any{"id": id, "parentId": leaf, "type": "message", "message": message}
@@ -205,9 +206,10 @@ func Serve() error {
 				}
 				state["isStreaming"] = false
 				err = out.Encode(map[string]any{"type": "agent_settled"})
-			case "hold", "hold-entries", "hold-abort":
+			case "hold", "hold-entries", "hold-abort", "hold-abort-exit":
 				holdEntries = ack.Type == "hold-entries"
-				holdAbort = ack.Type == "hold-abort"
+				exitOnAbort = ack.Type == "hold-abort-exit"
+				holdAbort = ack.Type == "hold-abort" || exitOnAbort
 				if holdAck {
 					if err = reply(nil); err != nil {
 						return err
@@ -222,6 +224,10 @@ func Serve() error {
 			if command.Type == "abort" && holdAbort {
 				if err := controlOut.Encode(Control{Type: "abort", SessionID: sid}); err != nil {
 					return err
+				}
+				// Avoid a host round trip racing the runtime's abort grace period.
+				if exitOnAbort {
+					os.Exit(3)
 				}
 				ack := <-acks
 				if ack.Type == "exit" {

@@ -59,7 +59,7 @@ type RecoveryChoice struct {
 	Basis      []Evidence `json:"basis"`
 }
 
-const recoveryRequirements = `Copy recovery exactly, including its complete delivery/failure history. One workers delivery is one round, including all-failed batches; consumed_batch still contains only the genuine new worker_results. Explicitly report hypothesis changes or an empty changes array. Timeout/compaction is execution failure, never incident disproof. Recovery metadata and pending phase refs are not a complete supporting context. Retain exact owners. For every unresolved failed delivery, declare recovery_choices with delivery_id, action (inspect, resume, redirect), reason and evidence basis. Unknown remote job status forbids blindly resubmitting work, even with another task ID. Inspect means use declared general workers only for authorized read-only status/evidence inspection, never restarting the uncertain operation. Resume requires evidence-backed safety established by the Agent; explain actual remote job status and why continuation is safe. Redirect explains an evidenced alternative which does not repeat uncertain work. A caller flag, local process exit or another task ID is not safety evidence. Support resume uses the original proposal and only unfinished phases, never reacquires accepted intake/wiki or promotes them to a complete context. Planner itself only reads supplied inputs; use workers for any new inspection. Yield/plan may retain pending failures without a safety choice.`
+const recoveryRequirements = `Copy recovery exactly, including its complete delivery/failure history. dispatch_cycle includes complete verification deliveries when M5 is enabled. One workers delivery is one round, including all-failed batches; consumed_batch still contains only the genuine new worker_results. Explicitly report hypothesis changes or an empty changes array. Timeout/compaction is execution failure, never incident disproof. Recovery metadata and pending phase refs are not a complete supporting context. Retain exact owners. For every unresolved failed delivery, declare recovery_choices with delivery_id, action (inspect, resume, redirect), reason and evidence basis. Unknown remote job status forbids blindly resubmitting work, even with another task ID. Inspect means use declared general workers only for authorized read-only status/evidence inspection, never restarting the uncertain operation. Resume requires evidence-backed safety established by the Agent; explain actual remote job status and why continuation is safe. Redirect explains an evidenced alternative which does not repeat uncertain work. A caller flag, local process exit or another task ID is not safety evidence. Support resume uses the original proposal and only unfinished phases, never reacquires accepted intake/wiki or promotes them to a complete context. Planner itself only reads supplied inputs; use workers for any new inspection. Yield/plan may retain pending failures without a safety choice.`
 
 type taskFailure struct {
 	cause    error
@@ -247,7 +247,7 @@ func (p *plannerCaller) recoveryTask() *PlannerRecovery {
 		return nil
 	}
 	copy := *p.recovery
-	copy.DispatchCycle = len(copy.Deliveries)
+	copy.DispatchCycle = len(copy.Deliveries) + verificationDeliveryCount(p.verification)
 	copy.Deliveries = slices.Clone(p.recovery.Deliveries)
 	copy.PlannerFailures = slices.Clone(p.recovery.PlannerFailures)
 	return &copy
@@ -322,6 +322,35 @@ func recoverySuffix(v, prior PlannerState) ([]RecoveryDelivery, error) {
 	return suffix, nil
 }
 
+func (a *acceptance) checkRecoveryFailure(f RecoveryFailure) error {
+	snapshot := a.run.Snapshot()
+	if f.Code == engine.Cancelled && f.Origin == engine.OriginFailFastSibling && f.AttemptID == "" {
+		if f.Execution != nil || !nonblank(f.Stage) {
+			return fmt.Errorf("undispatched sibling has fabricated execution")
+		}
+		if f.Identity == (runtime.Identity{}) {
+			if f.Cleanup != nil {
+				return fmt.Errorf("cleanup without owned sibling handle")
+			}
+			return nil
+		}
+		owner, ok := snapshot.Sessions[f.Identity.HandleID]
+		if !ok || !sameIdentity(owner.Identity, f.Identity) || f.Identity.SessionID == "" || f.Cleanup == nil || !sameIdentity(f.Cleanup.Identity, f.Identity) || !f.Cleanup.ConfirmsLocalClose(f.Identity.SessionID) {
+			return fmt.Errorf("undispatched owned sibling cleanup not confirmed")
+		}
+		return nil
+	}
+	attempt, ok := snapshot.Attempts[f.AttemptID]
+	owner, owned := snapshot.Sessions[f.Identity.HandleID]
+	if !ok || !owned || attempt.Failure == nil || attempt.Output != nil || f.RunID != a.run.ID() || attempt.Identity.InvocationID != f.StepID || attempt.HandleID != f.Identity.HandleID || !sameIdentity(owner.Identity, f.Identity) || f.Identity.SessionID == "" || attempt.Failure.Code != f.Code || attempt.Failure.Origin != f.Origin || attempt.DispatchAccepted != f.Dispatch || !reflect.DeepEqual(attempt.Execution, f.Execution) || f.Cleanup == nil || !sameIdentity(f.Cleanup.Identity, f.Identity) || !f.Cleanup.ConfirmsLocalClose(f.Identity.SessionID) {
+		return fmt.Errorf("recovery failure differs from owned failed attempt/cleanup")
+	}
+	if !(f.Code == engine.TimedOut && f.Origin == engine.OriginAttemptDeadline || f.Code == engine.CompactionFailed && f.Origin == engine.OriginCompaction || f.Code == engine.Cancelled && f.Origin == engine.OriginFailFastSibling) {
+		return fmt.Errorf("unapproved recovery failure")
+	}
+	return nil
+}
+
 func (a *acceptance) checkRecovery(v, prior PlannerState, sources map[contract.Ref][]file) error {
 	if _, err := recoverySuffix(v, prior); err != nil {
 		return err
@@ -332,48 +361,20 @@ func (a *acceptance) checkRecovery(v, prior PlannerState, sources map[contract.R
 		}
 		return nil
 	}
-	if v.Recovery.DispatchCycle != len(v.Recovery.Deliveries) {
+	if v.Recovery.DispatchCycle != len(v.Recovery.Deliveries)+verificationDeliveryCount(v.Verification) {
 		return fmt.Errorf("recovery dispatch cycle differs from delivered history")
-	}
-	snapshot := a.run.Snapshot()
-	checkFailure := func(f RecoveryFailure) error {
-		if f.Code == engine.Cancelled && f.Origin == engine.OriginFailFastSibling && f.AttemptID == "" {
-			if f.Execution != nil || !nonblank(f.Stage) {
-				return fmt.Errorf("undispatched sibling has fabricated execution")
-			}
-			if f.Identity == (runtime.Identity{}) {
-				if f.Cleanup != nil {
-					return fmt.Errorf("cleanup without owned sibling handle")
-				}
-				return nil
-			}
-			owner, ok := snapshot.Sessions[f.Identity.HandleID]
-			if !ok || !sameIdentity(owner.Identity, f.Identity) || f.Identity.SessionID == "" || f.Cleanup == nil || !sameIdentity(f.Cleanup.Identity, f.Identity) || !f.Cleanup.ConfirmsLocalClose(f.Identity.SessionID) {
-				return fmt.Errorf("undispatched owned sibling cleanup not confirmed")
-			}
-			return nil
-		}
-		attempt, ok := snapshot.Attempts[f.AttemptID]
-		owner, owned := snapshot.Sessions[f.Identity.HandleID]
-		if !ok || !owned || attempt.Failure == nil || attempt.Output != nil || f.RunID != a.run.ID() || attempt.Identity.InvocationID != f.StepID || attempt.HandleID != f.Identity.HandleID || !sameIdentity(owner.Identity, f.Identity) || f.Identity.SessionID == "" || attempt.Failure.Code != f.Code || attempt.Failure.Origin != f.Origin || attempt.DispatchAccepted != f.Dispatch || !reflect.DeepEqual(attempt.Execution, f.Execution) || f.Cleanup == nil || !sameIdentity(f.Cleanup.Identity, f.Identity) || !f.Cleanup.ConfirmsLocalClose(f.Identity.SessionID) {
-			return fmt.Errorf("recovery failure differs from owned failed attempt/cleanup")
-		}
-		if !(f.Code == engine.TimedOut && f.Origin == engine.OriginAttemptDeadline || f.Code == engine.CompactionFailed && f.Origin == engine.OriginCompaction || f.Code == engine.Cancelled && f.Origin == engine.OriginFailFastSibling) {
-			return fmt.Errorf("unapproved recovery failure")
-		}
-		return nil
 	}
 	for _, f := range v.Recovery.PlannerFailures {
 		if f.Stage != "planner" || f.Origin == engine.OriginFailFastSibling {
 			return fmt.Errorf("invalid Planner recovery failure")
 		}
-		if err := checkFailure(f); err != nil {
+		if err := a.checkRecoveryFailure(f); err != nil {
 			return err
 		}
 	}
 	for _, d := range v.Recovery.Deliveries {
 		for _, f := range d.Failures {
-			if err := checkFailure(f); err != nil {
+			if err := a.checkRecoveryFailure(f); err != nil {
 				return err
 			}
 		}
@@ -445,33 +446,51 @@ func (p *plannerCaller) planningStep(ctx context.Context) (contract.Ref, error) 
 	if p.recovery == nil {
 		return p.step(ctx)
 	}
+	ref, _, err := retryPlannerInputs(ctx, p.r, p.r.Root(), "planner-recovery-"+contract.NewID(), "planner", p.recovery.Policy.PlannerRetries, p.stepInScope, p.continuePlannerInputs)
+	return ref, err
+}
+
+func (p *plannerCaller) continuePlannerInputs(ctx context.Context, failure RecoveryFailure, again bool) error {
+	p.recovery.PlannerFailures = append(p.recovery.PlannerFailures, failure)
+	if again {
+		next, err := p.reopen(ctx, p.history.ref)
+		if err != nil {
+			return err
+		}
+		*p = *next
+	}
+	return nil
+}
+
+// Only supplied-input work may use this seam. Recovery never authorizes a
+// remote operation, and RetryState feedback is not an input to the next task.
+func retryPlannerInputs(ctx context.Context, r *engine.Run, scope *engine.Scope, key, output string, retries int, run func(context.Context, *engine.Scope) (contract.Ref, error), recovered func(context.Context, RecoveryFailure, bool) error) (contract.Ref, []RecoveryFailure, error) {
 	var ref contract.Ref
+	var failures []RecoveryFailure
 	var causes []error
-	_, err := p.r.Root().Retry(ctx, "planner-recovery-"+contract.NewID(), p.recovery.Policy.PlannerRetries, func(ctx context.Context, s *engine.Scope, state engine.RetryState) (engine.RetryAction, error) {
+	_, err := scope.Retry(ctx, key, retries, func(ctx context.Context, s *engine.Scope, state engine.RetryState) (engine.RetryAction, error) {
 		var err error
-		ref, err = p.stepInScope(ctx, s)
+		ref, err = run(ctx, s)
 		if err == nil {
-			return engine.RetryAction{Result: engine.Result{Outputs: map[string]contract.Ref{"planner": ref}}}, nil
+			return engine.RetryAction{Result: engine.Result{Outputs: map[string]contract.Ref{output: ref}}}, nil
 		}
 		causes = append(causes, err)
-		failure, e := confirmRecovery(ctx, p.r, err, false)
+		failure, e := confirmRecovery(ctx, r, err, false)
 		if e != nil {
 			return engine.RetryAction{}, e
 		}
-		p.recovery.PlannerFailures = append(p.recovery.PlannerFailures, failure)
-		if state.RetryCount < state.MaxRetries {
-			next, e := p.reopen(ctx, p.history.ref)
-			if e != nil {
+		failures = append(failures, failure)
+		if recovered != nil {
+			if e := recovered(ctx, failure, state.RetryCount < state.MaxRetries); e != nil {
 				return engine.RetryAction{}, recoveryError(e, err)
 			}
-			*p = *next
 		}
 		return engine.RetryAction{Again: true, Feedback: &engine.Feedback{Message: failure.Diagnostic, SourceAttemptID: failure.AttemptID, SourceCode: string(failure.Code)}}, nil
 	})
 	if err != nil {
-		return contract.Ref{}, recoveryError(err, causes...)
+		return contract.Ref{}, failures, recoveryError(err, causes...)
 	}
-	return ref, nil
+	return ref, failures, nil
 }
 
 func appendUniqueRefs(refs []contract.Ref, more ...contract.Ref) []contract.Ref {

@@ -134,11 +134,13 @@ R1–R4 的匿名驗收與 consumer 遷移完成後才啟動 M1，不因某個 h
 
 M1 已接入 `plannerCaller.work` 的單項明列 worker 派工與 Planner 結果交接；`taskStepRecovery` 供既有 slice adapter 與 worker 共用（M4 前為 `taskStep`，無 caller 的轉送 wrapper 已移除），原 session/Step/strict-close 語義不另造。`worker_results` 明交 exact refs 及真正 owners，fresh handoff／support 改版不重綁歷史結果；原 query checker/schema 等義共用。這不是自動批次、產品入口或 live 驗收，具體 contracts 見 [Jira triage](JIRA-TRIAGE.md)。逐次 review/gates/commit 狀態仍在外部工程紀錄。
 
-M2 已以 `executeInvestigation`／`adapt` 接明列 action，`workReady` 先限制最多三個 ready tasks 再使用真 Parallel，live Planner 另計。Ledger 只依 Agent 明報 changes 及 exact batch Refs 計數，不由 Go 比較領域內容。Reframe wiki 是獨立 committed Ref，沿原 WikiSearch/completeness，歷史 context binding 不重寫；模型由 caller 分別明示，不能將 Planner 默綁一般分析模型。單項 worker 及 supporting/fresh handoff 舊 callers 沿用共同執行機械。M5+／產品入口／live 尚未完成。
+M2 已以 `executeInvestigation`／`adapt` 接明列 action，`workReady` 先限制最多三個 ready tasks 再使用真 Parallel，live Planner 另計。Ledger 只依 Agent 明報 changes 及 exact batch Refs 計數，不由 Go 比較領域內容。Reframe wiki 是獨立 committed Ref，沿原 WikiSearch/completeness，歷史 context binding 不重寫；模型由 caller 分別明示，不能將 Planner 默綁一般分析模型。單項 worker 及 supporting/fresh handoff 舊 callers 沿用共同執行機械。M6+／產品入口／live 尚未完成。
 
 M3 已在既有 Planner snapshot 增加 exact checkpoint/counter/Controller feedback，三個 dispatch cycles 標記同份完整 snapshot，不新增抄寫 Step 或 journal。一次 workers batch／完整 support／wiki 交付各一 cycle，與 M2 hypothesis round 分開。`executeInvestigation` 非 nil 的明示容量政策沿原 adapt/step/handoff；unknown 記錄續作，達門檻 strict-close 後明交歷史及 pending feedback，不重派同 action。真 stats error 不吞，nil 保留舊 caller；沒有 live threshold 預設或週期 polling。
 
 M4 已以明示 RecoveryPolicy 沿既有 Scope.Retry 接 Planner 有限 fresh 恢復，worker/wiki/support 以 exact typed delivery 回 Planner，由 Agent 提出具 basis 的 inspection/resume/redirect。全敗worker batch亦計一輪，進展仍Agent明報；未完成的當前reframe可先做安全inspection，不重置streak或讓舊reframe繞規則。Support重用原pipeline續接已驗收phase，原intake/wiki/context provenance不重綁，pending中間Refs不升格checkpoint。SessionIdentity提供dispatch前known owner，所有replacement仍strict close/Wait，不改普通Close語義或造重試會計。取消/fatal/cleanup/unknownProviderFailed不吞，M5 verifier恢復待角色出現才接。
+
+M5 已接純claim producing Step與reference-linked state、fresh pro/con/cross、同版安全補角及Planner feedback；每角model/retry由caller明示。Planner/claim/verifier共用由M4抽出的retryPlannerInputs、Scope.Retry與原identity/strict-close，不加driver/engine多output/inputjournal。新verifier只claim/allowed evidence，不注入Planner敘事或舊verdict；同版Refs有序驗收、換版全fresh、pending partial不當checkpoint。完整verification delivery也算一輪，progress與支持程度由既有Planner判讀，Go不投票或按schema認列因果。M6報告/renderer及M7產品/live仍未接。
 
 M3 保存當時已有的工作結果／feedback；M5 新增 verifier 時，同步擴充可重建 state 與恢復驗收。不得把尚未存在的角色填成占位資料就宣稱完成，也不得要求 M4 先完成 M5 才能提供的 verifier，形成相依循環。
 
