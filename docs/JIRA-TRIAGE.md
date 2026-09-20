@@ -38,7 +38,7 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 
 - `Run.SessionContextUsage(ctx, handle)` 在 Step 邊界取得 lease，按需查 `get_session_stats`，不新增 health polling。結果帶 identity、seq／epoch、取樣時間與 nullable tokens/window/percent；unknown 不等於零，estimate 不保證 provider admission。
 - `Run.CloseSessionReport` 重取既有 closeOnce 結果並複製 slices；未完成不能視為 clean。Recovery 另驗 identity、WaitCompleted、ProcessExited、Unconfirmed、WaitError、KillError、DiscoveryError；舊 `CloseSession` error predicate 不變。
-- 成功 Planner Step 的 committed state 須能重建決策狀態，每三個 dispatch cycles 另做完整 checkpoint。確認舊 session cleanup 後，再 OpenSession，以已 committed Refs 接續。
+- 成功 Planner Step 的 committed state 須能重建決策狀態。每三個 dispatch cycles 在同份完整 snapshot 標記並驗收 checkpoint，不另叫 Agent 重抄或增加 Step；一批 workers、一次完整 supporting 工作或一次 wiki 交付各算一個 cycle，純 planning/no-ready/checkpoint/handoff 不計，與假說無進展 round 分開。確認舊 session cleanup 後，再 OpenSession，以已 committed Refs 接續。
 - Timeout 沒有新合法 Ref，從上一份 committed state 加後續已提交證據接續，不要求失敗 session 補 checkpoint、不重置 session／attempt accounting。
 - 本機 Wait 不證明 remote async job 已結束；未知 ProviderFailed 不分類成 overflow。取消、storage/journal failure、run hard cap 不可吞掉進 recovery。
 
@@ -131,7 +131,7 @@ Private `startPlanner` 從 exact committed supporting context（ready 或 needs-
 - Fresh session 明列上一份完整 Planner state、supporting context 及所有歷史 evidence owners，不靠舊對話、目錄掃描或複製 raw files。成功驗收及 Decision 持久化後才替換 caller 的 last state。無效 contract 或執行失敗使該 caller 停止，不交出失敗 candidate，也不自動 recovery；原始 fatal／取消／限額／cleanup 錯誤仍返回。
 - 匿名 RPC fixtures 覆蓋同 session 多 Step、fresh handoff、revised intake 歷史 owner、supporting query inputs、ready／incomplete、非法 Ref／schema／scope、失敗與會計。這不是正常 Pi 技能操作或指定 GLM live 驗證。
 
-`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；一般 worker 與自動批次／reframe 接線見下節；容量訊號觸發／timeout recovery、每三 dispatch cycles 完整 checkpoint、同版三方驗證與報告仍未實作。
+`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；一般 worker 與自動批次／reframe 接線見下節；容量訊號與週期 checkpoint 的接線見下節；timeout recovery、同版三方驗證與報告仍未實作。
 
 ### Planner proposal → 既有 supporting 任務 → 新 Planner state
 
@@ -175,7 +175,19 @@ Private `executeInvestigation` 明示獨立 Planner model 與 worker models，�
 
 調查期 wiki task 綁定 proposal/context/task ID/inputs，沿原 WikiSearch/completeness，保存 terms、previous_terms、理由及真正 evidence owners。新搜尋以獨立 `wiki_results` Ref 明交 Planner／worker／support／fresh handoff，不塞進 ready context 的舊 resolve、不重抓 intake、不改寫舊 `Context.Wiki`。歷史搜尋按自己的 intake/binding 重驗；新 partial/unavailable/not-run gaps 不得用旧 context 的 complete 遮蔽，runtime worker 仍受必要 wiki 完整性前提限制。Terms echo／明列變更是任務驗收，不證明搜尋詞語義不同或 wiki pattern 能支持本次根因。
 
-匿名同一 RPC driver 覆蓋三 worker 加 Planner、逆序完成／有序交付、依賴批次、no-ready feedback、明報進展／兩輪 reframe、wiki partial 與歷史 owners、獨立模型、support/handoff、branch 失敗／取消／cleanup／半提交與會計。沒有新 driver、scheduler、任意總輪數／查詢次數 cap 或 crash resume；M3+ 與真模型／技能／產品入口驗收仍未完成。歷史 validation 的 raw evidence 重讀成本尚未完成容量量測，不能把匿名情境通過當作高負載保證。
+匿名同一 RPC driver 覆蓋三 worker 加 Planner、逆序完成／有序交付、依賴批次、no-ready feedback、明報進展／兩輪 reframe、wiki partial 與歷史 owners、獨立模型、support/handoff、branch 失敗／取消／cleanup／半提交與會計。沒有新 driver、scheduler、任意總輪數／查詢次數 cap 或 crash resume；M4+ 與真模型／技能／產品入口驗收仍未完成。歷史 validation 的 raw evidence 重讀成本尚未完成容量量測，不能把匿名情境通過當作高負載保證。
+
+### 完整 checkpoint 與容量 handoff
+
+`executeInvestigation` 接明示 `*PlannerCapacityPolicy`，nil 保留原 M2 caller 模式；非 nil 沿同一 `adapt/step/handoff` 啟用容量接線，不是第二個 driver。Percent threshold 由 caller 指定有限的 `(0,100]` 值，沒有 live 預設。既有手動 handoff/support 與模型綁定保留。
+
+Planner 的 optional `checkpoint` 與完整 domain snapshot 一起提交，M3 caller 要求精確 echo：policy、dispatch/checkpoint cycle、full-checkpoint 標記、adaptive note 與追加的 Controller feedback。驗收真正交付差異與歷史 prefix，不靠文字猜進展。每第三個 cycle 標記的是當次同一份完整 snapshot，Decision 引用其 exact Ref；沒有另一份 Store/journal，也不因這個標記建立 crash resume。
+
+容量只在已成功接受 Planner state 的 Step 邊界按需取樣。即將 support/yield 的既有關閉路徑不額外查詢或重開。低於門檻續作；達門檻 strict close/Wait 後 fresh，仍執行原 snapshot 的同一個 action，不多跑 Planner Step、不重派工作、不重抓 intake。合法 unknown 保留診斷並維持 checkpoint 續作，不當零、不僅因此結案或反覆換 session。新 Step 不重用舊容量 sample，estimate 不保證 provider admission。
+
+`SessionContextUsage` 的 query/identity/format/error 語義不改：真正錯誤使 handle unusable 並進既有 close，不吞為 unknown。恢復仍屬 M4，沒有在此處猜哪些 ProviderFailed 是 overflow。Capacity feedback、no-ready note 與既有 evidence/results/owners 明交 fresh/support；尚未被下一個正常 Planner Step 消費的診斷只是 pending，不冒稱已 durable。下一成功 snapshot 驗收後才清 pending，歷史 Controller feedback 不可丟棄或改寫。
+
+匿名 fixtures 沿既有 Store/publication 與真 engine/Store/RPC driver，覆蓋週期計數、同一 snapshot checkpoint、unknown/門檻、fresh/support/owners/模型、非法 echo、stats failure/cancel/cleanup 與會計。Test protocol 的 stats control 是 opt-in 外部 provider 邊界，未開時保留舊回覆；不是產品 bypass。完整 live 能力、資料量容量與長歷史 raw/decode 成本仍未驗。
 
 ### 同一次驗收內的讀取重用
 

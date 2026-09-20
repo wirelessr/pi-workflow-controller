@@ -169,5 +169,5 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 	if err := p.r.Root().Decision(ctx, key+"-recorded", "Supporting result accepted for Planner reassessment, not a verified claim or final report", []contract.Ref{*p.last, before.Context, after.Context}); err != nil {
 		return nil, err
 	}
-	return openPlannerWithEvidence(ctx, p.r, p.scope, p.model, after.Context, p.last, p.workerResults, p.wikiResults)
+	return p.reopen(ctx, after.Context)
 }

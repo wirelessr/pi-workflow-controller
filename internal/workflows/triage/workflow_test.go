@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1445,15 +1446,21 @@ func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stag
 	t.Helper()
 	v := plannerFixture(t, "complete", req, task, step, contract.Ref{})
 	var delivered struct {
-		WorkerResults []contract.Ref `json:"worker_results"`
-		WikiResults   []contract.Ref `json:"wiki_results"`
-		AdaptiveNote  string         `json:"adaptive_note"`
+		WorkerResults []contract.Ref     `json:"worker_results"`
+		WikiResults   []contract.Ref     `json:"wiki_results"`
+		AdaptiveNote  string             `json:"adaptive_note"`
+		Checkpoint    *PlannerCheckpoint `json:"checkpoint"`
 	}
 	if err := json.Unmarshal([]byte(req.Prompt), &delivered); err != nil {
 		t.Fatal(err)
 	}
-	if task.Requirements != plannerRequirements+"\n\n"+adaptiveRequirements {
-		t.Fatal("adaptive Planner lost its requirements")
+	m3 := strings.HasPrefix(name, "m3-")
+	if m3 && name != "m3-illegal-optin" {
+		if delivered.Checkpoint == nil || !strings.HasPrefix(task.Requirements, plannerRequirements+"\n\n"+adaptiveRequirements+"\n\nCopy the supplied checkpoint object exactly") {
+			t.Fatal("M3 entry omitted checkpoint or requirements")
+		}
+	} else if task.Requirements != plannerRequirements+"\n\n"+adaptiveRequirements || delivered.Checkpoint != nil {
+		t.Fatal("adaptive Planner lost its requirements or nil policy gained checkpoint requirements")
 	}
 	previousWorkers, previousWikis := len(v.WorkerResults), len(v.WikiResults)
 	l := &InvestigationLedger{Action: "yield", Reason: "Hand accepted investigation state to later work; no verified conclusion", ConsumedBatch: []contract.Ref{}, Changes: []HypothesisChange{}}
@@ -1587,6 +1594,117 @@ func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stag
 			workers("w2")
 		} else if step == 2 && name == "m2-session-not-progress" {
 			l.Action = "plan"
+		}
+	}
+	if m3 {
+		v.WorkerTasks, v.SupportingWork, v.WikiTask = []WorkerTask{}, nil, nil
+		l.Action = "yield"
+		v.Checkpoint = delivered.Checkpoint
+		if len(l.ConsumedBatch) > 0 {
+			l.Changes = []HypothesisChange{{HypothesisID: "h1", Change: "Agent reports an anonymous comparison", Reason: "Continue the authorized investigation", Basis: basis}}
+			l.NoProgress, l.ReframeStreak = 0, 0
+		}
+		support := func() {
+			l.Action = "support"
+			v.SupportingWork = &SupportingWork{Kind: "resolve", Reason: "Complete the missing supporting wiki search", Basis: slices.Clone(basis), Sources: []intakeWork{}}
+		}
+		switch name {
+		case "m3-cycle-six":
+			switch step {
+			case 1:
+				workers("w1", "w2", "w3")
+			case 2:
+				support()
+			case 3, 5:
+				wiki(false)
+			case 4, 6:
+				workers(fmt.Sprintf("w%d", step))
+			}
+		case "m3-support-no-sample", "m3-support-pending":
+			if step == 1 {
+				support()
+			}
+		case "m3-yield-no-sample":
+		case "m3-plan-zero", "m3-capacity-at-plan", "m3-fresh-reconstruct":
+			if step == 1 {
+				l.Action = "plan"
+			}
+			if step == 2 {
+				workers("w1")
+			}
+		case "m3-no-ready-zero", "m3-feedback-reorder":
+			if step == 1 {
+				workers("waiting")
+				v.WorkerTasks[0].DependsOn = []string{"not-accepted"}
+			} else if step == 2 && name == "m3-no-ready-zero" {
+				if !strings.Contains(delivered.AdaptiveNote, "No declared task") {
+					t.Fatal("M3 lost no-ready feedback")
+				}
+				workers("w1")
+			}
+		case "m3-fresh-wiki-before-step":
+			if step == 1 {
+				wiki(false)
+			}
+		default:
+			if step == 1 {
+				workers("w1")
+			}
+		}
+		if step == 1 && name == "m3-checkpoint-missing" {
+			v.Checkpoint = nil
+		}
+		if step == 1 && name == "m3-policy-initial-echo" {
+			v.Checkpoint.Policy.HandoffPercent = 81
+		}
+		if strings.HasPrefix(name, "m3-retained-feedback-") {
+			if step == 2 {
+				l.Action = "plan"
+			}
+			if step == 3 {
+				switch name {
+				case "m3-retained-feedback-drop":
+					v.Checkpoint.ControllerFeedback = v.Checkpoint.ControllerFeedback[1:]
+				case "m3-retained-feedback-change":
+					v.Checkpoint.ControllerFeedback[0].Note = "rewritten committed feedback"
+				case "m3-retained-feedback-reorder":
+					slices.Reverse(v.Checkpoint.ControllerFeedback)
+				}
+			}
+		}
+		if step == 1 && name == "m3-illegal-optin" {
+			v.Checkpoint = &PlannerCheckpoint{Policy: PlannerCapacityPolicy{HandoffPercent: 80}, ControllerFeedback: []PlannerFeedback{}}
+		}
+		if step == 2 {
+			c := v.Checkpoint
+			switch name {
+			case "m3-checkpoint-drop":
+				v.Checkpoint = nil
+			case "m3-policy-change":
+				c.Policy.HandoffPercent = 81
+			case "m3-cycle-backward":
+				c.DispatchCycle = 0
+			case "m3-cycle-skip":
+				c.DispatchCycle++
+			case "m3-checkpoint-forged":
+				c.CheckpointCycle = 3
+			case "m3-full-forged":
+				c.FullCheckpoint = true
+			case "m3-feedback-drop":
+				c.ControllerFeedback = []PlannerFeedback{}
+			case "m3-feedback-change":
+				c.ControllerFeedback[0].Note = "Agent rewrote controller diagnostic"
+			case "m3-feedback-reorder":
+				slices.Reverse(c.ControllerFeedback)
+			case "m3-feedback-owner":
+				c.ControllerFeedback[0].After = v.Context
+			case "m3-feedback-blank":
+				c.ControllerFeedback[0].Note = " "
+			case "m3-feedback-invent":
+				c.ControllerFeedback = append(c.ControllerFeedback, PlannerFeedback{After: *v.Previous, Note: "Invented diagnostic"})
+			case "m3-note-change":
+				c.AdaptiveNote = "invented controller note"
+			}
 		}
 	}
 	if name == "m2-parallel-batches-yield" && step == 3 {
@@ -1737,6 +1855,7 @@ type m2Barrier struct {
 	waiting  string
 	proved   bool
 	faulted  bool
+	stats    []contract.Ref
 }
 
 func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
@@ -1818,14 +1937,79 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models sliceModels, input contract.Ref, name string) (contract.Ref, error) {
 	t.Helper()
 	plannerModel := runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}
+	m3 := strings.HasPrefix(name, "m3-")
+	capacity := &PlannerCapacityPolicy{HandoffPercent: 80}
+	if strings.HasPrefix(name, "m3-policy-invalid-") {
+		switch strings.TrimPrefix(name, "m3-policy-invalid-") {
+		case "zero":
+			capacity.HandoffPercent = 0
+		case "negative":
+			capacity.HandoffPercent = -1
+		case "above":
+			capacity.HandoffPercent = 101
+		case "nan":
+			capacity.HandoffPercent = math.NaN()
+		case "infinite":
+			capacity.HandoffPercent = math.Inf(1)
+		}
+		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity)
+	}
+	if slices.Contains([]string{"m3-cycle-six", "m3-capacity-below", "m3-capacity-zero", "m3-capacity-at", "m3-capacity-at-plan", "m3-capacity-above", "m3-unknown", "m3-unknown-null", "m3-unknown-missing", "m3-unknown-tokens", "m3-plan-zero", "m3-no-ready-zero", "m3-support-no-sample", "m3-yield-no-sample"}, name) {
+		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity)
+	}
 	if name == "m2-parallel-batches-yield" || name == "m2-no-ready-feedback" || name == "m2-wiki-support" {
-		return executeInvestigation(ctx, r, scope, plannerModel, models, input)
+		return executeInvestigation(ctx, r, scope, plannerModel, models, input, nil)
 	}
 	p, err := startPlanner(ctx, r, scope, plannerModel, input)
 	if err != nil {
 		return contract.Ref{}, err
 	}
 	p.adaptive = true
+	if m3 && name != "m3-illegal-optin" {
+		p.capacity = capacity
+	}
+	if strings.HasPrefix(name, "m3-fresh-") || name == "m3-support-pending" {
+		_, err = p.step(ctx)
+		if err == nil && name != "m3-fresh-reconstruct" {
+			p, err = p.capacityHandoff(ctx)
+		}
+		if err == nil {
+			switch name {
+			case "m3-fresh-worker-before-step":
+				_, err = p.workReady(ctx, models)
+			case "m3-fresh-wiki-before-step":
+				_, err = p.searchWiki(ctx, models)
+			}
+		}
+		if err == nil {
+			old, before := p, r.Snapshot()
+			switch name {
+			case "m3-support-pending":
+				p, err = p.support(ctx, models)
+			case "m3-fresh-reconstruct":
+				err = p.close(ctx)
+				if err == nil {
+					p, err = openPlannerWithEvidence(ctx, r, scope, plannerModel, input, old.last, old.workerResults, old.wikiResults)
+				}
+			default:
+				p, err = p.handoff(ctx)
+			}
+			if err == nil {
+				if !old.stopped || p.last == nil || *p.last != *old.last || p.model != old.model || p.capacity == nil || *p.capacity != *old.capacity || !slices.Equal(p.workerResults, old.workerResults) || !slices.Equal(p.wikiResults, old.wikiResults) || !slices.Equal(p.pendingFeedback, old.pendingFeedback) || p.adaptiveNote != old.adaptiveNote {
+					t.Error("M3 fresh continuation lost exact state, policy, pending feedback or independent Model")
+				}
+				if name != "m3-support-pending" && len(r.Snapshot().Attempts) != len(before.Attempts) {
+					t.Error("M3 handoff created a copying Step or reset accounting")
+				}
+				if name == "m3-support-pending" && p.history.ref == old.history.ref {
+					t.Error("M3 supporting handoff lost new context")
+				}
+				if p.capacity == old.capacity {
+					t.Error("M3 fresh capacity policy aliases prior caller")
+				}
+			}
+		}
+	}
 	if name == "m2-session-not-progress" || name == "m2-wiki-handoff" {
 		_, err = p.step(ctx)
 		if err == nil {
@@ -1858,6 +2042,12 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 	}
 	last := p.last
 	ordinal := 1
+	if name == "m3-checkpoint-missing" || name == "m3-illegal-optin" || name == "m3-policy-initial-echo" {
+		ordinal = 0
+	}
+	if strings.HasPrefix(name, "m3-retained-feedback-") {
+		ordinal = 2
+	}
 	switch name {
 	case "m2-ledger-missing", "m2-action-mismatch", "m2-progress-without-batch", "m2-round-initial", "m2-wiki-previous-terms", "m2-wiki-basis-owner":
 		ordinal = 0
@@ -1903,6 +2093,7 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 			t.Error("batch failure replaced last accepted Planner state")
 		}
 	}
+	beforeRejectedRetries := r.Snapshot()
 	if _, e := p.workReady(ctx, models); e == nil {
 		t.Error("failed caller allowed another batch")
 	}
@@ -1917,6 +2108,9 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 	}
 	if _, e := p.support(ctx, models); e == nil {
 		t.Error("failed caller allowed supporting work")
+	}
+	if m3 && (len(r.Snapshot().Attempts) != len(beforeRejectedRetries.Attempts) || len(r.Snapshot().Sessions) != len(beforeRejectedRetries.Sessions)) {
+		t.Error("stopped M3 retries changed session/attempt accounting")
 	}
 	if p.last != last || !slices.Equal(workers, p.workerResults) || !slices.Equal(wikis, p.wikiResults) {
 		t.Error("rejected retries changed last/deliveries")
@@ -1952,7 +2146,7 @@ func m2AssertWikiOwners(t *testing.T, inputs []contract.Ref) {
 
 func m2AssertWorkerInputs(t *testing.T, r *engine.Run, req contract.Request, request workerRequest, original ContextResult, name string) {
 	t.Helper()
-	if request.Requirements != workerRequirements || request.Context != original.Context || !slices.Contains(req.Inputs, request.Proposal) || !slices.Contains(req.Inputs, request.Context) {
+	if request.Requirements != workerRequirements || (!strings.HasPrefix(name, "m3-") && request.Context != original.Context) || !slices.Contains(req.Inputs, request.Proposal) || !slices.Contains(req.Inputs, request.Context) {
 		t.Fatal("M2 worker changed original context or lost explicit proposal/requirements")
 	}
 	var state publication[PlannerState]
@@ -1990,6 +2184,62 @@ func m2StoreSchema(t *testing.T, store *contract.Store, base validationInputs, n
 	t.Helper()
 	v := PlannerState{Context: base.intakeRef, Hypotheses: []PlannerHypothesis{}, Pending: []PlannerQuestion{}, Gaps: []string{}, Rationale: "Anonymous schema boundary", Ledger: &InvestigationLedger{Action: "yield", Reason: "Accepted investigation only", ConsumedBatch: []contract.Ref{}, Changes: []HypothesisChange{}}}
 	var data any = m2PlannerData(t, v)
+	if strings.HasPrefix(name, "m3-store-") {
+		if name == "m3-store-absent" {
+			ref, err := storeFixture(t, store, PlannerSchema, data, nil, false)
+			if err != nil {
+				t.Fatal("nil policy schema regression", err)
+			}
+			if storedPublication[PlannerState](t, store, ref).Data.Checkpoint != nil {
+				t.Fatal("nil policy invented checkpoint")
+			}
+			return
+		}
+		v.Checkpoint = &PlannerCheckpoint{Policy: PlannerCapacityPolicy{HandoffPercent: 80}, ControllerFeedback: []PlannerFeedback{}}
+		v.WorkerTasks, v.WorkerResults, v.WikiResults = []WorkerTask{}, []contract.Ref{}, []contract.Ref{}
+		ref, err := storeFixture(t, store, PlannerSchema, m2PlannerData(t, v), nil, false)
+		if err != nil {
+			t.Fatal("invalid M3 schema prerequisite", err)
+		}
+		storedPublication[PlannerState](t, store, ref, v)
+		raw := m2PlannerData(t, v)
+		c := raw["checkpoint"].(map[string]any)
+		field := strings.TrimPrefix(name, "m3-store-missing-")
+		if strings.HasPrefix(name, "m3-store-missing-") {
+			delete(c, field)
+		} else {
+			switch name {
+			case "m3-store-negative-cycle":
+				c["dispatch_cycle"], field = -1, "dispatch_cycle"
+			case "m3-store-fractional-cycle":
+				c["dispatch_cycle"], field = 1.5, "dispatch_cycle"
+			case "m3-store-negative-checkpoint":
+				c["checkpoint_cycle"], field = -1, "checkpoint_cycle"
+			case "m3-store-full-type":
+				c["full_checkpoint"], field = "true", "full_checkpoint"
+			case "m3-store-policy-zero":
+				c["policy"].(map[string]any)["handoff_percent"], field = 0, "handoff_percent"
+			case "m3-store-policy-above":
+				c["policy"].(map[string]any)["handoff_percent"], field = 101, "handoff_percent"
+			case "m3-store-extra-control":
+				c["model"], field = "agent-selected", "model"
+			case "m3-store-policy-extra":
+				c["policy"].(map[string]any)["model"], field = "agent-selected", "model"
+			case "m3-store-feedback-null":
+				c["controller_feedback"], field = nil, "controller_feedback"
+			case "m3-store-null":
+				raw["checkpoint"], field = nil, "checkpoint"
+			default:
+				t.Fatal("unmapped M3 schema case")
+			}
+		}
+		_, err = storeFixture(t, store, PlannerSchema, raw, nil, false)
+		var failure *contract.Error
+		if !errors.As(err, &failure) || failure.Code != contract.ContractInvalid || failure.Phase != "schema" || !strings.Contains(err.Error(), field) {
+			t.Fatalf("expected M3 %s schema rejection: %v", field, err)
+		}
+		return
+	}
 	if _, err := storeFixture(t, store, PlannerSchema, data, nil, false); err != nil {
 		t.Fatal("invalid M2 schema prerequisite", err)
 	}
@@ -2025,6 +2275,206 @@ func m2StoreSchema(t *testing.T, store *contract.Store, base validationInputs, n
 
 func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref contract.Ref, original ContextResult, expected PlannerState, barrier m2Barrier, prompts, hellos int) {
 	t.Helper()
+	if strings.HasPrefix(tc.name, "m3-") {
+		if report.Final != nil || len(report.Snapshot.Retries) != 0 || report.Snapshot.Policy.MaxLiveSessions != 4 || len(report.Snapshot.Attempts) != prompts || len(report.Snapshot.Sessions) != hellos || len(report.Cleanup) != hellos {
+			t.Fatal("M3 lost run accounting or invented retries/final")
+		}
+		planners := 0
+		for _, s := range report.Snapshot.Sessions {
+			if s.State != "Closed" {
+				t.Fatal("M3 returned before session cleanup")
+			}
+			if s.Role.Name == "triage-planner" {
+				planners++
+				if s.Role.Model != (runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}) {
+					t.Fatal("M3 changed the independent Planner Model")
+				}
+			}
+		}
+		for _, c := range report.Cleanup {
+			if !c.WaitCompleted || !c.ProcessExited {
+				t.Fatal("M3 did not wait for local process exit")
+			}
+			if tc.name != "m3-stats-cleanup-failure" && tc.name != "m3-stats-fatal" && !c.ConfirmsLocalClose(c.Identity.SessionID) {
+				t.Fatalf("M3 strict cleanup failed: %+v", c)
+			}
+		}
+		if (len(report.CleanupErrors) != 0) != (tc.name == "m3-stats-cleanup-failure" || tc.name == "m3-stats-fatal") {
+			t.Fatal("M3 swallowed or invented cleanup errors")
+		}
+		if tc.name == "m3-stats-fatal" && !slices.ContainsFunc(report.Cleanup, func(c runtime.CleanupReport) bool {
+			return slices.Contains(c.Unconfirmed, "abort not acknowledged") && slices.Contains(c.Unconfirmed, "abort_bash not acknowledged")
+		}) {
+			t.Fatal("fatal reader shutdown lost unacknowledged cleanup diagnostics")
+		}
+		var states []engine.AttemptState
+		workers := map[string]bool{}
+		for _, a := range report.Snapshot.Attempts {
+			if a.State != engine.Succeeded || a.Output == nil {
+				t.Fatal("M3 boundary failure rewrote a committed Step")
+			}
+			if a.Output.SchemaID == PlannerSchema {
+				states = append(states, a)
+			}
+			if a.Output.SchemaID == WorkerSchema {
+				var worker publication[WorkerResult]
+				if err := protocol.ReadJSON(a.Output.Path, &worker); err != nil {
+					t.Fatal(err)
+				}
+				key := worker.Data.Proposal.AttemptID + "/" + worker.Data.TaskID
+				if workers[key] {
+					t.Fatal("M3 replayed a task from the same accepted proposal")
+				}
+				workers[key] = true
+			}
+		}
+		slices.SortFunc(states, func(a, b engine.AttemptState) int {
+			if a.LastSeq < b.LastSeq {
+				return -1
+			}
+			if a.LastSeq > b.LastSeq {
+				return 1
+			}
+			return 0
+		})
+		if tc.failure {
+			if ref.AttemptID != "" || len(report.Result.Outputs) != 0 {
+				t.Fatal("M3 failure exposed successful outputs")
+			}
+			if strings.HasPrefix(tc.name, "m3-policy-invalid-") {
+				if planners != 0 || len(states) != 0 || len(barrier.stats) != 0 || !strings.Contains(fmt.Sprint(report.Failure), "explicit finite handoff percentage") {
+					t.Fatal("invalid policy dispatched a Planner or was not rejected at entry")
+				}
+				return
+			}
+			if planners != 1 {
+				t.Fatal("M3 error was hidden by a fresh session")
+			}
+			if strings.HasPrefix(tc.name, "m3-stats-") {
+				want := engine.ProtocolFailed
+				switch tc.name {
+				case "m3-stats-identity", "m3-stats-history":
+					want = engine.SessionChanged
+				case "m3-stats-timeout":
+					want = engine.RPCUnresponsive
+				case "m3-stats-cancel":
+					want = engine.Cancelled
+				case "m3-stats-cleanup-failure":
+					want = engine.CleanupFailed
+				}
+				var failure *engine.Failure
+				if !errors.As(report.Failure, &failure) || failure.Code != want || len(states) != 1 || len(barrier.stats) != 1 || len(workers) != 0 {
+					t.Fatalf("M3 stats failure lost classification/accepted state: want %s, got %v", want, report.Failure)
+				}
+				if tc.name == "m3-stats-cancel" && failure.Origin != engine.OriginControllerUser {
+					t.Fatal("stats cancellation lost its origin")
+				}
+				return
+			}
+			message := "checkpoint differs from supplied continuation metadata"
+			switch tc.name {
+			case "m3-checkpoint-drop":
+				message = "retain checkpoint metadata"
+			case "m3-policy-change":
+				message = "cannot change checkpoint capacity policy"
+			case "m3-cycle-backward", "m3-cycle-skip", "m3-checkpoint-forged", "m3-full-forged":
+				message = "counter echo mismatch"
+			case "m3-retained-feedback-drop", "m3-retained-feedback-change", "m3-retained-feedback-reorder":
+				message = "cannot drop or change controller feedback"
+			case "m3-feedback-owner", "m3-feedback-blank":
+				message = "feedback must bind the preceding accepted snapshot"
+			}
+			var failure *engine.Failure
+			var schemaErr *contract.Error
+			if errors.As(report.Failure, &failure) || errors.As(report.Failure, &schemaErr) || !strings.Contains(fmt.Sprint(report.Failure), message) {
+				t.Fatalf("M3 semantic publication rejection, want %q, got %v", message, report.Failure)
+			}
+			return
+		}
+		var final publication[PlannerState]
+		if err := protocol.ReadJSON(ref.Path, &final); err != nil || !reflect.DeepEqual(final.Data, expected) || report.Result.Outputs["planner"] != ref || final.Data.Ledger.Action != "yield" {
+			t.Fatal("M3 lost exact full final snapshot", err)
+		}
+		cycles, wantPlanners, wantStats := []int{0, 1}, 1, 1
+		switch tc.name {
+		case "m3-cycle-six":
+			cycles, wantPlanners, wantStats = []int{0, 1, 2, 3, 4, 5, 6}, 2, 5
+		case "m3-plan-zero", "m3-no-ready-zero":
+			cycles, wantStats = []int{0, 0, 1}, 2
+		case "m3-capacity-at-plan":
+			cycles, wantPlanners, wantStats = []int{0, 0, 1}, 3, 2
+		case "m3-fresh-reconstruct":
+			cycles, wantPlanners = []int{0, 0, 1}, 2
+		case "m3-capacity-at", "m3-capacity-above", "m3-fresh-worker-before-step", "m3-fresh-wiki-before-step", "m3-support-pending":
+			wantPlanners = 2
+		case "m3-support-no-sample":
+			wantPlanners, wantStats = 2, 0
+		case "m3-yield-no-sample":
+			cycles, wantStats = []int{0}, 0
+		}
+		if len(states) != len(cycles) || planners != wantPlanners || len(barrier.stats) != wantStats {
+			t.Fatalf("M3 copying Step, fresh loop or extra stats: snapshots=%d planners=%d stats=%d", len(states), planners, len(barrier.stats))
+		}
+		for i, a := range states {
+			var p publication[PlannerState]
+			if err := protocol.ReadJSON(a.Output.Path, &p); err != nil {
+				t.Fatal(err)
+			}
+			c := p.Data.Checkpoint
+			full := i > 0 && cycles[i] != cycles[i-1] && cycles[i]%3 == 0
+			if c == nil || c.Policy.HandoffPercent != 80 || c.DispatchCycle != cycles[i] || c.CheckpointCycle != cycles[i]/3*3 || c.FullCheckpoint != full {
+				t.Fatalf("M3 snapshot %d counters/full/policy differ: %+v", i+1, c)
+			}
+			if i == 0 && p.Data.Previous != nil || i > 0 && (p.Data.Previous == nil || *p.Data.Previous != *states[i-1].Output) {
+				t.Fatal("M3 snapshot lost exact committed previous")
+			}
+			if len(p.Data.Hypotheses) != 1 || len(p.Data.Pending) != 1 {
+				t.Fatal("M3 checkpoint was a delta instead of full domain state")
+			}
+		}
+		c := final.Data.Checkpoint
+		feedbackSamples := 0
+		for _, f := range c.ControllerFeedback {
+			if strings.Contains(f.Note, "No declared task") {
+				continue
+			}
+			_, raw, ok := strings.Cut(f.Note, "On-demand sample: ")
+			var usage runtime.ContextUsage
+			if !ok || json.Unmarshal([]byte(raw), &usage) != nil || usage.Identity.SessionID == "" || usage.SampledAt.IsZero() || usage.Seq == 0 || !slices.Contains(barrier.stats, f.After) {
+				t.Fatal("M3 dropped actual sample diagnostics or exact snapshot feedback binding")
+			}
+			if tc.name == "m3-capacity-at" || tc.name == "m3-capacity-above" || tc.name == "m3-capacity-at-plan" {
+				if usage.Percent == nil || *usage.Percent < 80 || !strings.Contains(f.Note, "strict close") {
+					t.Fatal("known high usage was not retained")
+				}
+			} else if usage.Percent != nil || !strings.Contains(f.Note, "unknown") || !strings.Contains(f.Note, "without treating it as zero") {
+				t.Fatal("unknown became zero or a business conclusion")
+			}
+			if tc.name == "m3-unknown-tokens" && (usage.Tokens == nil || *usage.Tokens != 99000) {
+				t.Fatal("unknown percent lost known tokens")
+			}
+			feedbackSamples++
+		}
+		wantSamples := wantStats
+		if tc.name == "m3-cycle-six" || tc.name == "m3-capacity-below" || tc.name == "m3-capacity-zero" {
+			wantSamples = 0
+		}
+		if feedbackSamples != wantSamples {
+			t.Fatalf("M3 pending feedback lost across fresh/support: got %d want %d", feedbackSamples, wantSamples)
+		}
+		if tc.name == "m3-cycle-six" {
+			if len(final.Data.WorkerResults) != 5 || len(final.Data.WikiResults) != 2 || final.Data.Context == original.Context || final.Data.Ledger.Round != 3 {
+				t.Fatal("M3 batch/support/wiki cycles were conflated with Steps or worker rounds")
+			}
+			for _, workerRef := range final.Data.WorkerResults[:3] {
+				var w publication[WorkerResult]
+				if err := protocol.ReadJSON(workerRef.Path, &w); err != nil || w.Data.Context != original.Context {
+					t.Fatal("M3 rebound historical worker to new context", err)
+				}
+			}
+		}
+		return
+	}
 	if report.Final != nil || len(report.Snapshot.Retries) != 0 {
 		t.Fatal("investigation invented final delivery/retry policy")
 	}
@@ -2248,6 +2698,23 @@ type triageCase struct {
 }
 
 var triageCases = []triageCase{
+	{"m3-cycle-six", 19, false, true},
+	{"m3-capacity-zero", 6, false, true}, {"m3-capacity-at-plan", 7, false, true}, {"m3-policy-initial-echo", 4, true, false},
+	{"m3-retained-feedback-drop", 7, true, false}, {"m3-retained-feedback-change", 7, true, false}, {"m3-retained-feedback-reorder", 7, true, false},
+	{"m3-stats-window-zero", 4, true, false}, {"m3-stats-percent-type", 4, true, false}, {"m3-stats-tokens-type", 4, true, false}, {"m3-stats-missing-percent", 4, true, false}, {"m3-stats-missing-identity", 4, true, false},
+	{"m3-capacity-below", 6, false, true}, {"m3-capacity-at", 6, false, true}, {"m3-capacity-above", 6, false, true},
+	{"m3-unknown", 6, false, true}, {"m3-unknown-null", 6, false, true}, {"m3-unknown-missing", 6, false, true}, {"m3-unknown-tokens", 6, false, true},
+	{"m3-plan-zero", 7, false, true}, {"m3-no-ready-zero", 7, false, true},
+	{"m3-support-no-sample", 7, false, true}, {"m3-yield-no-sample", 4, false, true},
+	{"m3-fresh-worker-before-step", 6, false, true}, {"m3-fresh-wiki-before-step", 6, false, true}, {"m3-fresh-reconstruct", 7, false, true}, {"m3-support-pending", 7, false, true},
+	{"m3-checkpoint-missing", 4, true, false}, {"m3-illegal-optin", 4, true, false},
+	{"m3-checkpoint-drop", 6, true, false}, {"m3-policy-change", 6, true, false}, {"m3-cycle-backward", 6, true, false}, {"m3-cycle-skip", 6, true, false}, {"m3-checkpoint-forged", 6, true, false}, {"m3-full-forged", 6, true, false},
+	{"m3-feedback-drop", 6, true, false}, {"m3-feedback-change", 6, true, false}, {"m3-feedback-reorder", 5, true, false}, {"m3-feedback-owner", 6, true, false}, {"m3-feedback-blank", 6, true, false}, {"m3-feedback-invent", 6, true, false}, {"m3-note-change", 6, true, false},
+	{"m3-stats-reject", 4, true, false}, {"m3-stats-identity", 4, true, false}, {"m3-stats-history", 4, true, false}, {"m3-stats-format", 4, true, false}, {"m3-stats-timeout", 4, true, false}, {"m3-stats-cancel", 4, true, false}, {"m3-stats-fatal", 4, true, false}, {"m3-stats-cleanup-failure", 4, true, false},
+	{"m3-policy-invalid-zero", 3, true, false}, {"m3-policy-invalid-negative", 3, true, false}, {"m3-policy-invalid-above", 3, true, false}, {"m3-policy-invalid-nan", 3, true, false}, {"m3-policy-invalid-infinite", 3, true, false},
+	{"m3-store-absent", 0, false, false}, {"m3-store-null", 0, true, false},
+	{"m3-store-missing-policy", 0, true, false}, {"m3-store-missing-dispatch_cycle", 0, true, false}, {"m3-store-missing-checkpoint_cycle", 0, true, false}, {"m3-store-missing-full_checkpoint", 0, true, false}, {"m3-store-missing-adaptive_note", 0, true, false}, {"m3-store-missing-controller_feedback", 0, true, false},
+	{"m3-store-negative-cycle", 0, true, false}, {"m3-store-fractional-cycle", 0, true, false}, {"m3-store-negative-checkpoint", 0, true, false}, {"m3-store-full-type", 0, true, false}, {"m3-store-policy-zero", 0, true, false}, {"m3-store-policy-above", 0, true, false}, {"m3-store-extra-control", 0, true, false}, {"m3-store-policy-extra", 0, true, false}, {"m3-store-feedback-null", 0, true, false},
 	{"m2-batch-consumed-order", 8, true, false}, {"m2-batch-results-order", 8, true, false}, {"m2-batch-foreign-ref", 8, true, false},
 	{"m2-parallel-batches-yield", 11, false, true}, {"m2-no-ready-feedback", 7, false, true},
 	{"m2-progress-explicit", 8, false, true}, {"m2-assessment-not-progress", 6, false, true},
@@ -2352,6 +2819,9 @@ var triageCases = []triageCase{
 // Truncated intake, blank proposal reason and history-alias negatives also stay
 // there to detect a production loader accidentally bypassing its validator.
 func validationStage(name string) string {
+	if strings.HasPrefix(name, "m3-store-") {
+		return "m2-schema"
+	}
 	if strings.HasPrefix(name, "m2-store-") {
 		return "m2-schema"
 	}
@@ -2963,7 +3433,8 @@ func TestIntakeToContext(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			m1 := strings.HasPrefix(tc.name, "m1-")
-			m2 := strings.HasPrefix(tc.name, "m2-")
+			m3 := strings.HasPrefix(tc.name, "m3-")
+			m2 := strings.HasPrefix(tc.name, "m2-") || m3
 			working := strings.HasPrefix(tc.name, "work-") || tc.name == "m1-support"
 			transitionProbe := slices.Contains([]string{"work-unproposed-transition", "work-skipped-context", "work-wrong-task", "work-resolve-changed-intake", "work-refresh-work-mismatch"}, tc.name)
 			workKind, workFixture := "update", "update-replace"
@@ -2991,6 +3462,9 @@ func TestIntakeToContext(t *testing.T) {
 				mode = "complete"
 				if tc.name == "m2-wiki-support" {
 					mode = "time-unresolved"
+				}
+				if tc.name == "m3-cycle-six" || tc.name == "m3-support-no-sample" || tc.name == "m3-support-pending" {
+					mode = "wiki-partial"
 				}
 			}
 			if revising {
@@ -3222,7 +3696,14 @@ func TestIntakeToContext(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pi, err := runtime.New(runtime.Options{Executable: exe, Args: []string{"-test.run=^TestTriageProtocolSubprocess$", "--"}, Env: []string{"PWC_TRIAGE_PROTOCOL=1", "PWC_ENGINE_MANUAL_CANDIDATE=1", "PWC_ENGINE_CONTROL=" + host.Addr().String(), "GORACE=atexit_sleep_ms=0"}, BridgeDir: bridge, Policy: policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return r.Observe(ctx, o) }})
+			statsControl := ""
+			if m3 {
+				statsControl = "1"
+			}
+			if tc.name == "m3-stats-timeout" {
+				policy.Runtime.RPCTimeout = time.Second
+			}
+			pi, err := runtime.New(runtime.Options{Executable: exe, Args: []string{"-test.run=^TestTriageProtocolSubprocess$", "--"}, Env: []string{"PWC_TRIAGE_PROTOCOL=1", "PWC_ENGINE_MANUAL_CANDIDATE=1", "PWC_ENGINE_CONTROL_STATS=" + statsControl, "PWC_ENGINE_CONTROL=" + host.Addr().String(), "GORACE=atexit_sleep_ms=0"}, BridgeDir: bridge, Policy: policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return r.Observe(ctx, o) }})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -3657,6 +4138,80 @@ func TestIntakeToContext(t *testing.T) {
 						hellos[e.Message.SessionID] = e.Message
 						continue
 					}
+					if m3 && e.Message.Type == "stats" {
+						snapshot := r.Snapshot()
+						var latest *engine.AttemptState
+						for _, a := range snapshot.Attempts {
+							if a.Output != nil && a.Output.SchemaID == PlannerSchema && (latest == nil || a.LastSeq > latest.LastSeq) {
+								copy := a
+								latest = &copy
+							}
+						}
+						if latest == nil || latest.State != engine.Succeeded || snapshot.Sessions[latest.HandleID].Identity.SessionID != e.Message.SessionID {
+							t.Fatal("stats did not sample the live owner of an accepted Planner snapshot")
+						}
+						if slices.Contains(barrier.stats, *latest.Output) {
+							t.Fatal("capacity polled twice for the same snapshot")
+						}
+						barrier.stats = append(barrier.stats, *latest.Output)
+						var percent any
+						var tokens any
+						switch tc.name {
+						case "m3-capacity-below", "m3-cycle-six":
+							percent, tokens = 79.9, 79900
+						case "m3-capacity-zero":
+							percent, tokens = 0, 0
+						case "m3-capacity-at", "m3-capacity-at-plan", "m3-stats-cleanup-failure":
+							percent, tokens = 80, 80000
+						case "m3-capacity-above":
+							percent, tokens = 95, 95000
+						case "m3-unknown-tokens":
+							tokens = 99000
+						}
+						body := map[string]any{"sessionId": e.Message.SessionID, "sessionFile": e.Message.History, "contextUsage": map[string]any{"tokens": tokens, "contextWindow": 100000, "percent": percent}}
+						ack := protocol.Control{Type: "stats"}
+						switch tc.name {
+						case "m3-unknown-null":
+							body["contextUsage"] = nil
+						case "m3-unknown-missing":
+							delete(body, "contextUsage")
+						case "m3-stats-identity":
+							body["sessionId"] = "foreign-session"
+						case "m3-stats-history":
+							body["sessionFile"] = "foreign-history"
+						case "m3-stats-format":
+							body["contextUsage"] = map[string]any{"tokens": -1, "percent": nil, "contextWindow": 100000}
+						case "m3-stats-window-zero":
+							body["contextUsage"].(map[string]any)["contextWindow"] = 0
+						case "m3-stats-percent-type":
+							body["contextUsage"].(map[string]any)["percent"] = "80"
+						case "m3-stats-tokens-type":
+							body["contextUsage"].(map[string]any)["tokens"] = "80000"
+						case "m3-stats-missing-percent":
+							delete(body["contextUsage"].(map[string]any), "percent")
+						case "m3-stats-missing-identity":
+							delete(body, "sessionId")
+						case "m3-stats-reject":
+							ack.Type = "stats-reject"
+						case "m3-stats-fatal":
+							ack.Type = "stats-fatal"
+						case "m3-stats-timeout", "m3-stats-cancel":
+							ack.Type = "stats-hold"
+						case "m3-stats-cleanup-failure":
+							path := filepath.Join(bridge, e.Message.SessionID+".json")
+							if err := os.Rename(path, path+".recovering"); err != nil {
+								t.Fatal(err)
+							}
+						}
+						ack.Data = testJSON(body)
+						if err := e.Reply(ack); err != nil {
+							t.Fatal(err)
+						}
+						if tc.name == "m3-stats-cancel" {
+							r.Cancel(engine.OriginControllerUser)
+						}
+						continue
+					}
 					if m2 && e.Message.Type == "held" {
 						continue
 					}
@@ -3719,7 +4274,12 @@ func TestIntakeToContext(t *testing.T) {
 							expectedPlanner = m2PlannerFixture(t, tc.name, req, task, plannerSteps)
 							data = m2PlannerData(t, expectedPlanner)
 						case WikiSchema:
-							data, files = m2WikiFixture(t, tc.name, req)
+							if m3 && task.SupportingProposal != nil {
+								wiki, files = wikiFixture("complete", req.Inputs[0])
+								data = wiki
+							} else {
+								data, files = m2WikiFixture(t, tc.name, req)
+							}
 						case WorkerSchema:
 							var request workerRequest
 							if err := json.Unmarshal([]byte(req.Prompt), &request); err != nil {
@@ -3754,10 +4314,12 @@ func TestIntakeToContext(t *testing.T) {
 								barrier.held[request.Task.ID], barrier.attempts[request.Task.ID] = e, req.Identity.AttemptID
 							}
 						case ContextSchema:
-							if tc.name != "m2-wiki-support" || task.SupportingProposal == nil {
+							if (!m3 && tc.name != "m2-wiki-support") || task.SupportingProposal == nil {
 								t.Fatal("unexpected M2 supporting task")
 							}
-							m2AssertWikiOwners(t, req.Inputs)
+							if !m3 {
+								m2AssertWikiOwners(t, req.Inputs)
+							}
 							var prior publication[Context]
 							if err := protocol.ReadJSON(req.Inputs[2].Path, &prior); err != nil {
 								t.Fatal(err)

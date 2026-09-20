@@ -31,6 +31,7 @@ type PlannerState struct {
 	WikiTask       *InvestigationWikiTask `json:"wiki_task,omitempty"`
 	WikiResults    []contract.Ref         `json:"wiki_results,omitempty"`
 	Ledger         *InvestigationLedger   `json:"ledger,omitempty"`
+	Checkpoint     *PlannerCheckpoint     `json:"checkpoint,omitempty"`
 }
 
 type PlannerHypothesis struct {
@@ -53,18 +54,20 @@ const plannerRequirements = `Read the exact committed supporting context and all
 // Supporting work and worker results retain their own accepted provenance;
 // failure recovery remains a separate unit.
 type plannerCaller struct {
-	r             *engine.Run
-	scope         Scope
-	model         runtime.ModelSpec
-	history       contextHistory
-	handle        *engine.SessionHandle
-	last          *contract.Ref
-	session       string
-	stopped       bool
-	workerResults []contract.Ref
-	wikiResults   []contract.Ref
-	adaptive      bool
-	adaptiveNote  string
+	r               *engine.Run
+	scope           Scope
+	model           runtime.ModelSpec
+	history         contextHistory
+	handle          *engine.SessionHandle
+	last            *contract.Ref
+	session         string
+	stopped         bool
+	workerResults   []contract.Ref
+	wikiResults     []contract.Ref
+	adaptive        bool
+	adaptiveNote    string
+	capacity        *PlannerCapacityPolicy
+	pendingFeedback []PlannerFeedback
 }
 
 func startPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime.ModelSpec, contextRef contract.Ref) (*plannerCaller, error) {
@@ -109,6 +112,7 @@ func openPlannerWithEvidence(ctx context.Context, r *engine.Run, scope Scope, mo
 	}
 	var prior *contract.Ref
 	adaptive := false
+	var checkpoint *PlannerCheckpoint
 	for i := len(chain) - 1; i >= 0; i-- {
 		state, err := readAccepted[PlannerState](a, chain[i], PlannerSchema)
 		if err != nil {
@@ -128,6 +132,7 @@ func openPlannerWithEvidence(ctx context.Context, r *engine.Run, scope Scope, mo
 			return nil, fmt.Errorf("planner wiki results differ from accepted history")
 		}
 		adaptive = state.Data.Ledger != nil
+		checkpoint = state.Data.Checkpoint
 		prior = &chain[i]
 	}
 	if err := a.checkPlannerContextChange(h, prior); err != nil {
@@ -137,7 +142,12 @@ func openPlannerWithEvidence(ctx context.Context, r *engine.Run, scope Scope, mo
 	if err != nil {
 		return nil, err
 	}
-	return &plannerCaller{r: r, scope: scope, model: model, history: h, handle: handle, last: prior, workerResults: slices.Clone(accepted), wikiResults: slices.Clone(wikiResults), adaptive: adaptive}, nil
+	p := &plannerCaller{r: r, scope: scope, model: model, history: h, handle: handle, last: prior, workerResults: slices.Clone(accepted), wikiResults: slices.Clone(wikiResults), adaptive: adaptive}
+	if checkpoint != nil {
+		policy := checkpoint.Policy
+		p.capacity, p.adaptiveNote = &policy, checkpoint.AdaptiveNote
+	}
+	return p, nil
 }
 
 func checkPlanner(ctx context.Context, r *engine.Run, ref contract.Ref, h contextHistory, previous *contract.Ref) error {
@@ -261,12 +271,21 @@ func (p *plannerCaller) step(ctx context.Context) (contract.Ref, error) {
 	if p.adaptive {
 		requirements += "\n\n" + adaptiveRequirements
 	}
+	checkpoint, err := p.checkpointTask(a)
+	if err != nil {
+		p.stopped = true
+		return contract.Ref{}, err
+	}
+	if checkpoint != nil {
+		requirements += "\n\nCopy the supplied checkpoint object exactly into this full snapshot, including policy, dispatch_cycle, checkpoint_cycle, full_checkpoint, adaptive_note and all controller_feedback in order. Do not drop, rewrite or invent feedback, adjust these counters, or replace historical evidence owners. These are Controller continuation metadata, not hypothesis progress or proof. Every third completed dispatch cycle marks this same full snapshot as a full checkpoint; do not create another Step or publication. Unknown capacity is a diagnostic, not zero or a reason to conclude."
+	}
 	task := struct {
 		stageTask
-		WorkerResults []contract.Ref  `json:"worker_results"`
-		WikiResults   *[]contract.Ref `json:"wiki_results,omitempty"`
-		AdaptiveNote  string          `json:"adaptive_note,omitempty"`
-	}{stageTask{Stage: "planner", Scope: p.scope, Previous: p.last, Gaps: p.history.value.Gaps, Requirements: requirements}, slices.Clone(p.workerResults), nil, p.adaptiveNote}
+		WorkerResults []contract.Ref     `json:"worker_results"`
+		WikiResults   *[]contract.Ref    `json:"wiki_results,omitempty"`
+		AdaptiveNote  string             `json:"adaptive_note,omitempty"`
+		Checkpoint    *PlannerCheckpoint `json:"checkpoint,omitempty"`
+	}{stageTask{Stage: "planner", Scope: p.scope, Previous: p.last, Gaps: p.history.value.Gaps, Requirements: requirements}, slices.Clone(p.workerResults), nil, p.adaptiveNote, checkpoint}
 	if p.adaptive {
 		wikiResults := append([]contract.Ref{}, p.wikiResults...)
 		task.WikiResults = &wikiResults
@@ -295,13 +314,20 @@ func (p *plannerCaller) step(ctx context.Context) (contract.Ref, error) {
 			if err == nil && (!slices.Equal(state.Data.WikiResults, p.wikiResults) || (p.adaptive && state.Data.Ledger == nil)) {
 				err = fmt.Errorf("planner requires exact wiki deliveries and adaptive ledger")
 			}
+			if err == nil && !samePlannerCheckpoint(state.Data.Checkpoint, checkpoint) {
+				err = fmt.Errorf("planner checkpoint differs from supplied continuation metadata")
+			}
 			if err == nil && state.Data.Ledger != nil {
 				adaptive = true
 			}
 		}
 	}
 	if err == nil {
-		err = p.r.Root().Decision(ctx, key+"-recorded", "Planning snapshot accepted for continuation only; no worker dispatch or verified conclusion", []contract.Ref{p.history.ref, out.Output})
+		reason := "Planning snapshot accepted for continuation only; no worker dispatch or verified conclusion"
+		if checkpoint != nil && checkpoint.FullCheckpoint {
+			reason += fmt.Sprintf("; full checkpoint at dispatch cycle %d", checkpoint.DispatchCycle)
+		}
+		err = p.r.Root().Decision(ctx, key+"-recorded", reason, []contract.Ref{p.history.ref, out.Output})
 	}
 	if err != nil {
 		p.stopped = true
@@ -309,6 +335,7 @@ func (p *plannerCaller) step(ctx context.Context) (contract.Ref, error) {
 	}
 	p.last, p.session = &out.Output, out.Execution.SessionID
 	p.adaptive = adaptive
+	p.pendingFeedback = nil
 	return out.Output, nil
 }
 
@@ -331,5 +358,5 @@ func (p *plannerCaller) handoff(ctx context.Context) (*plannerCaller, error) {
 	if err := p.close(ctx); err != nil {
 		return nil, err
 	}
-	return openPlannerWithEvidence(ctx, p.r, p.scope, p.model, p.history.ref, p.last, p.workerResults, p.wikiResults)
+	return p.reopen(ctx, p.history.ref)
 }

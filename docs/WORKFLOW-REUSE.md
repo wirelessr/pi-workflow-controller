@@ -23,7 +23,7 @@
 | Child、Parallel、Retry、Decision | `engine/scope.go` | 直接重用；workflow 決定批次、依賴及可重做分支 |
 | Stage／Confirm／Publish、committed resolver | `contract/`、`engine/resolve.go`、`step.go` | 直接重用；禁止第二個 Store／commit／journal |
 | Result／FinalSelection／FinalDelivery | `engine/api.go`、`resolve.go`、`run.go` | 直接重用；禁止另一個 final artifact registry |
-| Context usage 與 cleanup report | `engine/session.go`、`runtime/types.go` | 已有 API；triage 的容量／續作策略尚需接線 |
+| Context usage 與 cleanup report | `engine/session.go`、`runtime/types.go` | M3 triage 沿 SessionContextUsage／既有 strict-close handoff 接入明示容量政策；sample 非 provider admission |
 | Discovery 自動 preflight | `runtime.New` 固定有效 BridgeDir；`Pi.Start` → `runtime/preflight.go` 的 `preflightDiscovery` | R1 已接線：review 私有 guard 已移除；smoke/review/triage 共用 Start，仍須部署版本核對/live 驗收 |
 | 嚴格收尾確認 | `runtime.CleanupReport.ConfirmsLocalClose(expectedSessionID)` | R2 已接線：triage slice／Planner 共用；caller 先處理 CloseSessionReport error，普通 CloseSession 不改義 |
 | Envelope／file consumer | `contract.FileEntry`／`Publication[T]`／`DecodePublication[T]`；review `readReviewContract`、triage `readAccepted` 經 `engine.ReadContract` 後消費 | R3 已接線：只共用投影與 fresh decode，不新增授權；review ID 索引、triage lineage/cache 留 caller |
@@ -134,7 +134,9 @@ R1–R4 的匿名驗收與 consumer 遷移完成後才啟動 M1，不因某個 h
 
 M1 已接入 `plannerCaller.work` 的單項明列 worker 派工與 Planner 結果交接；`taskStep` 供既有 slice adapter 與 worker 共用，原 session/Step/strict-close 語義不另造。`worker_results` 明交 exact refs 及真正 owners，fresh handoff／support 改版不重綁歷史結果；原 query checker/schema 等義共用。這不是自動批次、產品入口或 live 驗收，具體 contracts 見 [Jira triage](JIRA-TRIAGE.md)。逐次 review/gates/commit 狀態仍在外部工程紀錄。
 
-M2 已以 `executeInvestigation`／`adapt` 接明列 action，`workReady` 先限制最多三個 ready tasks 再使用真 Parallel，live Planner 另計。Ledger 只依 Agent 明報 changes 及 exact batch Refs 計數，不由 Go 比較領域內容。Reframe wiki 是獨立 committed Ref，沿原 WikiSearch/completeness，歷史 context binding 不重寫；模型由 caller 分別明示，不能將 Planner 默綁一般分析模型。單項 worker 及 supporting/fresh handoff 舊 callers 沿用共同執行機械。M3+／產品入口／live 尚未完成。
+M2 已以 `executeInvestigation`／`adapt` 接明列 action，`workReady` 先限制最多三個 ready tasks 再使用真 Parallel，live Planner 另計。Ledger 只依 Agent 明報 changes 及 exact batch Refs 計數，不由 Go 比較領域內容。Reframe wiki 是獨立 committed Ref，沿原 WikiSearch/completeness，歷史 context binding 不重寫；模型由 caller 分別明示，不能將 Planner 默綁一般分析模型。單項 worker 及 supporting/fresh handoff 舊 callers 沿用共同執行機械。M4+／產品入口／live 尚未完成。
+
+M3 已在既有 Planner snapshot 增加 exact checkpoint/counter/Controller feedback，三個 dispatch cycles 標記同份完整 snapshot，不新增抄寫 Step 或 journal。一次 workers batch／完整 support／wiki 交付各一 cycle，與 M2 hypothesis round 分開。`executeInvestigation` 非 nil 的明示容量政策沿原 adapt/step/handoff；unknown 記錄續作，達門檻 strict-close 後明交歷史及 pending feedback，不重派同 action。真 stats error 不吞，nil 保留舊 caller；沒有 live threshold 預設或週期 polling。
 
 M3 保存當時已有的工作結果／feedback；M5 新增 verifier 時，同步擴充可重建 state 與恢復驗收。不得把尚未存在的角色填成占位資料就宣稱完成，也不得要求 M4 先完成 M5 才能提供的 verifier，形成相依循環。
 

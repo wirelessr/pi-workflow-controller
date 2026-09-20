@@ -52,7 +52,7 @@ func (a *acceptance) checkInvestigation(v PlannerState, h contextHistory, source
 		if prior.Ledger != nil || v.WikiTask != nil || len(v.WikiResults) != 0 {
 			return fmt.Errorf("investigation state requires a retained ledger")
 		}
-		return nil
+		return checkPlannerCheckpoint(v, prior)
 	}
 	if !nonblank(l.Reason) {
 		return fmt.Errorf("investigation action requires a reason")
@@ -166,7 +166,10 @@ func (a *acceptance) checkInvestigation(v PlannerState, h contextHistory, source
 			}
 		}
 	}
-	return a.checkWikiTask(v, h, sources)
+	if err := a.checkWikiTask(v, h, sources); err != nil {
+		return err
+	}
+	return checkPlannerCheckpoint(v, prior)
 }
 
 func (p *plannerCaller) workReady(ctx context.Context, models sliceModels) (int, error) {
@@ -239,14 +242,23 @@ func (p *plannerCaller) workReady(ctx context.Context, models sliceModels) (int,
 	return len(joined), nil
 }
 
-// The returned Ref is investigation state only. Capacity handoff, recovery,
-// verification and final delivery are intentionally not part of this caller.
-func executeInvestigation(ctx context.Context, r *engine.Run, scope Scope, plannerModel runtime.ModelSpec, models sliceModels, contextRef contract.Ref) (contract.Ref, error) {
+// The returned Ref is investigation state only. A nonnil capacity policy opts
+// into checkpoint/capacity continuation; recovery and verification remain separate.
+func executeInvestigation(ctx context.Context, r *engine.Run, scope Scope, plannerModel runtime.ModelSpec, models sliceModels, contextRef contract.Ref, capacity *PlannerCapacityPolicy) (contract.Ref, error) {
+	if capacity != nil {
+		if err := capacity.check(); err != nil {
+			return contract.Ref{}, err
+		}
+	}
 	p, err := startPlanner(ctx, r, scope, plannerModel, contextRef)
 	if err != nil {
 		return contract.Ref{}, err
 	}
 	p.adaptive = true
+	if capacity != nil {
+		policy := *capacity
+		p.capacity = &policy
+	}
 	return p.adapt(ctx, models)
 }
 
@@ -263,12 +275,23 @@ func (p *plannerCaller) adapt(ctx context.Context, models sliceModels) (contract
 			return contract.Ref{}, err
 		}
 		p.adaptiveNote = ""
+		// These actions already close the Planner. Sampling would add an
+		// unnecessary failure boundary or a second fresh session.
+		if state.Data.Ledger.Action != "support" && state.Data.Ledger.Action != "yield" {
+			p, err = p.capacityHandoff(ctx)
+			if err != nil {
+				return contract.Ref{}, err
+			}
+		}
 		switch state.Data.Ledger.Action {
 		case "workers":
 			var count int
 			count, err = p.workReady(ctx, models)
 			if err == nil && count == 0 {
 				p.adaptiveNote = "No declared task has all dependencies in accepted worker results. Revise pending tasks, propose an authorized supporting/wiki task, or explicitly yield with reasons and gaps. No worker batch ran; do not increment the round or report progress."
+				if p.capacity != nil {
+					p.pendingFeedback = append(p.pendingFeedback, PlannerFeedback{After: ref, Note: p.adaptiveNote})
+				}
 			}
 		case "support":
 			p, err = p.support(ctx, models)

@@ -25,6 +25,7 @@ type Control struct {
 	SessionID     string
 	RequestPath   string
 	CandidatePath string
+	Data          json.RawMessage `json:",omitempty"`
 }
 
 type Data struct {
@@ -114,7 +115,27 @@ func Serve() error {
 		case "get_state":
 			err = reply(state)
 		case "get_session_stats":
-			err = reply(map[string]any{"sessionId": sid, "sessionFile": history, "contextUsage": map[string]any{"tokens": 95000, "contextWindow": 100000, "percent": 95}})
+			if os.Getenv("PWC_ENGINE_CONTROL_STATS") != "1" {
+				err = reply(map[string]any{"sessionId": sid, "sessionFile": history, "contextUsage": map[string]any{"tokens": 95000, "contextWindow": 100000, "percent": 95}})
+				break
+			}
+			if err = controlOut.Encode(Control{Type: "stats", SessionID: sid, History: history}); err != nil {
+				return err
+			}
+			ack := <-acks
+			switch ack.Type {
+			case "stats":
+				err = reply(ack.Data)
+			case "stats-reject":
+				err = out.Encode(map[string]any{"type": "response", "id": command.ID, "command": command.Type, "success": false, "error": "fixture stats rejected"})
+			case "stats-hold":
+				// Leave this request unanswered but keep servicing cleanup RPC.
+				continue
+			case "stats-fatal":
+				_, err = fmt.Fprintln(os.Stdout, "not-json")
+			default:
+				return fmt.Errorf("unexpected stats barrier ack %q", ack.Type)
+			}
 		case "get_entries":
 			if holdEntries {
 				if err := controlOut.Encode(Control{Type: "entries-held"}); err != nil {

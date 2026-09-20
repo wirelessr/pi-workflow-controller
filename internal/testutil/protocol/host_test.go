@@ -173,11 +173,14 @@ func TestHostEventsAndConcurrentReplies(t *testing.T) {
 			for i := 0; i < tc.peers; i++ {
 				peer := f.dial(t)
 				message := protocol.Control{Type: "hello", PID: i + 1, SessionID: fmt.Sprintf("peer-%d", i), History: "history", RequestPath: "request", CandidatePath: "candidate"}
+				if i > 0 {
+					message.Data = json.RawMessage(`{"tokens":95}`)
+				}
 				if err := json.NewEncoder(peer).Encode(message); err != nil {
 					t.Fatal(err)
 				}
 				event := hostEvent(t, f.host)
-				if event.Err != nil || event.Message != message {
+				if event.Err != nil || !reflect.DeepEqual(event.Message, message) {
 					t.Fatalf("event message differs from sender, error = %v", event.Err)
 				}
 				events[i] = event

@@ -4,8 +4,43 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["context", "previous", "hypotheses", "pending", "gaps", "rationale"],
-  "allOf": [{"if": {"required": ["ledger"]}, "then": {"required": ["worker_tasks", "worker_results", "wiki_results"]}}],
+  "allOf": [
+    {"if": {"required": ["ledger"]}, "then": {"required": ["worker_tasks", "worker_results", "wiki_results"]}},
+    {"if": {"required": ["checkpoint"]}, "then": {"required": ["ledger"]}}
+  ],
   "properties": {
+    "checkpoint": {
+      "description": "Copy the supplied Controller metadata exactly. Retain policy and the entire controller_feedback prefix. dispatch_cycle counts one completed worker batch, supporting task or wiki delivery received by this full Planner snapshot, not ledger.round, planning or session changes. checkpoint_cycle is the latest multiple of three; full_checkpoint is true only on the delivery reaching that cycle. Go validates transitions, feedback refs and exact echo after the existing state checks.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "dispatch_cycle", "checkpoint_cycle", "full_checkpoint", "adaptive_note", "controller_feedback"],
+      "properties": {
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["handoff_percent"],
+          "properties": {
+            "handoff_percent": {"type": "number", "exclusiveMinimum": 0, "maximum": 100}
+          }
+        },
+        "dispatch_cycle": {"type": "integer", "minimum": 0},
+        "checkpoint_cycle": {"type": "integer", "minimum": 0, "multipleOf": 3},
+        "full_checkpoint": {"type": "boolean"},
+        "adaptive_note": {"type": "string"},
+        "controller_feedback": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["after", "note"],
+            "properties": {
+              "after": {"$ref": "common.v1.json#/$defs/ref"},
+              "note": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    },
     "wiki_results": {"type": "array", "uniqueItems": true, "items": {"$ref": "common.v1.json#/$defs/ref"}},
     "wiki_task": {
       "type": "object",
