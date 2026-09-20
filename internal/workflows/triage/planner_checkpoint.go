@@ -41,6 +41,8 @@ type PlannerCheckpoint struct {
 func checkpointCounters(v, prior PlannerState) (cycle, checkpoint int, full bool, err error) {
 	if prior.Checkpoint != nil {
 		cycle = prior.Checkpoint.DispatchCycle
+	} else if prior.Recovery != nil {
+		cycle = prior.Recovery.DispatchCycle
 	}
 	deliveries := 0
 	if len(v.WorkerResults) > len(prior.WorkerResults) {
@@ -51,6 +53,13 @@ func checkpointCounters(v, prior PlannerState) (cycle, checkpoint int, full bool
 	}
 	if v.Previous != nil && v.Context != prior.Context {
 		deliveries++
+	}
+	if v.Recovery != nil {
+		suffix, e := recoverySuffix(v, prior)
+		if e != nil {
+			return 0, 0, false, e
+		}
+		deliveries = len(suffix)
 	}
 	if cycle < 0 || deliveries > 1 || (deliveries == 1 && cycle == int(^uint(0)>>1)) {
 		return 0, 0, false, fmt.Errorf("invalid planner dispatch cycle transition")
@@ -115,7 +124,7 @@ func (p *plannerCaller) checkpointTask(a *acceptance) (*PlannerCheckpoint, error
 		}
 		prior = state.Data
 	}
-	v := PlannerState{Context: p.history.ref, Previous: p.last, WorkerResults: p.workerResults, WikiResults: p.wikiResults}
+	v := PlannerState{Context: p.history.ref, Previous: p.last, WorkerResults: p.workerResults, WikiResults: p.wikiResults, Recovery: p.recovery}
 	cycle, checkpoint, full, err := checkpointCounters(v, prior)
 	if err != nil {
 		return nil, err
@@ -141,6 +150,16 @@ func (p *plannerCaller) reopen(ctx context.Context, contextRef contract.Ref) (*p
 		next.adaptiveNote = p.adaptiveNote
 		next.pendingFeedback = slices.Clone(p.pendingFeedback)
 	}
+	next.adaptive = p.adaptive
+	next.adaptiveNote = p.adaptiveNote
+	if p.recovery != nil && next.identity.SessionID == "" {
+		next.identity, err = p.r.SessionIdentity(ctx, next.handle)
+		if err != nil {
+			return nil, err
+		}
+	}
+	next.recovery = p.recoveryTask()
+	next.recoveryErrors = slices.Clone(p.recoveryErrors)
 	return next, nil
 }
 

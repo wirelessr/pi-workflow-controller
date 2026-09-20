@@ -103,6 +103,10 @@ func (a *acceptance) wikiSources(scope Scope, base map[contract.Ref][]file, refs
 			return nil, err
 		}
 		maps.Copy(owners, history)
+		owners, err = a.recoverySources(scope, owners, v.Recovery)
+		if err != nil {
+			return nil, err
+		}
 		planning := h
 		planning.sources = owners
 		if err := checkPlannerSnapshot(v, planning); err != nil {
@@ -164,6 +168,10 @@ func (p *plannerCaller) searchWiki(ctx context.Context, models sliceModels) (con
 	if err != nil {
 		return contract.Ref{}, err
 	}
+	sources, err = a.recoverySources(p.scope, sources, state.Data.Recovery)
+	if err != nil {
+		return contract.Ref{}, err
+	}
 	inputs := appendSourceInputs([]contract.Ref{*p.last, p.history.ref}, sources)
 	request := struct {
 		Stage        string                `json:"stage"`
@@ -177,9 +185,25 @@ func (p *plannerCaller) searchWiki(ctx context.Context, models sliceModels) (con
 	if err := p.r.Root().Decision(ctx, key+"-dispatch", "Dispatch explicit investigation wiki task", inputs); err != nil {
 		return contract.Ref{}, err
 	}
-	ref, err := taskStep(ctx, p.r, p.r.Root(), models.Analysis, request.Stage, key, request, WikiSchema, inputs)
+	if p.recovery != nil {
+		request.Requirements += "\nRead the exact proposal recovery metadata and choices. Do not repeat a failed search or submit remote work unless the Agent has supplied an evidence-backed safe resume or nonoverlapping redirect. Preserve the original failed proposal/task and diagnostic binding in recovery metadata; this attempt has its own binding."
+	}
+	ref, err := taskStepRecovery(ctx, p.r, p.r.Root(), models.Analysis, request.Stage, key, request, WikiSchema, inputs, p.recovery != nil)
 	if err != nil {
-		return contract.Ref{}, err
+		if p.recovery == nil {
+			return contract.Ref{}, err
+		}
+		failure, recoveryErr := confirmRecovery(ctx, p.r, err, false)
+		if recoveryErr != nil {
+			return contract.Ref{}, recoveryErr
+		}
+		delivery := newDelivery("wiki", p)
+		failure.TaskID = state.Data.WikiTask.ID
+		delivery.Failures = []RecoveryFailure{failure}
+		p.recovery.Deliveries = append(p.recovery.Deliveries, delivery)
+		p.recoveryErrors = append(p.recoveryErrors, err)
+		p.stopped = false
+		return contract.Ref{}, nil
 	}
 	a = newAcceptance(ctx, p.r)
 	records, err = a.loadWorkerResults(p.scope, p.workerResults)
@@ -192,6 +216,11 @@ func (p *plannerCaller) searchWiki(ctx context.Context, models sliceModels) (con
 	}
 	if err := p.r.Root().Decision(ctx, key+"-recorded", "Investigation wiki delivery accepted with actual completeness, not hypothesis progress", append(slices.Clone(inputs), ref)); err != nil {
 		return contract.Ref{}, err
+	}
+	if p.recovery != nil {
+		delivery := newDelivery("wiki", p)
+		delivery.Results = []contract.Ref{ref}
+		p.recovery.Deliveries = append(p.recovery.Deliveries, delivery)
 	}
 	p.wikiResults, p.stopped = accepted, false
 	return ref, nil

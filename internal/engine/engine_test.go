@@ -283,13 +283,29 @@ func TestEngineContextUsageLease(t *testing.T) {
 					return Result{}, err
 				}
 				handle = h
+				beforeIdentity := run.Snapshot()
+				identity, err := run.SessionIdentity(ctx, h)
+				if err != nil || identity != h.session.Identity() || identity.SessionID == "" || !reflect.DeepEqual(beforeIdentity, run.Snapshot()) {
+					t.Fatalf("owned identity read changed accounting or returned wrong identity: %+v %v", identity, err)
+				}
 				for _, invalid := range []*SessionHandle{nil, {run: &Run{}}} {
+					if _, err := run.SessionIdentity(ctx, invalid); !engTestCode(err, InvalidDefinition) {
+						t.Errorf("invalid identity handle: %v", err)
+					}
 					if _, err := run.SessionContextUsage(ctx, invalid); !engTestCode(err, InvalidDefinition) {
 						t.Errorf("invalid usage handle: %v", err)
 					}
 					if _, err := run.CloseSessionReport(ctx, invalid); !engTestCode(err, InvalidDefinition) {
 						t.Errorf("invalid close handle: %v", err)
 					}
+				}
+				if _, err := run.SessionIdentity(ctx, &SessionHandle{run: run, id: "unowned"}); !engTestCode(err, IdentityMismatch) {
+					t.Errorf("unowned identity accepted: %v", err)
+				}
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				if _, err := run.SessionIdentity(cancelled, h); !errors.Is(err, context.Canceled) {
+					t.Errorf("identity swallowed caller cancellation: %v", err)
 				}
 				done := make(chan error, 1)
 				go func() {
@@ -300,6 +316,11 @@ func TestEngineContextUsageLease(t *testing.T) {
 					done <- err
 				}()
 				engDeadlineReceive(t, entered)
+				beforeIdentity = run.Snapshot()
+				gotIdentity, identityErr := run.SessionIdentity(ctx, h)
+				if identityErr != nil || gotIdentity != identity || !reflect.DeepEqual(beforeIdentity, run.Snapshot()) {
+					t.Errorf("identity read used busy RPC lease or changed committed state: %+v %v", gotIdentity, identityErr)
+				}
 				// Snapshot and rejected lease requests must not wait on the RPC.
 				if len(run.Snapshot().Attempts) != 0 {
 					t.Error("usage consumed an attempt")
@@ -337,6 +358,11 @@ func TestEngineContextUsageLease(t *testing.T) {
 				if _, err := run.SessionContextUsage(ctx, h); !engTestCode(err, InvalidDefinition) {
 					t.Errorf("closed handle reused: %v", err)
 				}
+				beforeIdentity = run.Snapshot()
+				gotIdentity, identityErr = run.SessionIdentity(ctx, h)
+				if identityErr != nil || gotIdentity != identity || !reflect.DeepEqual(beforeIdentity, run.Snapshot()) {
+					t.Errorf("closed identity lost committed owner or changed accounting: %+v %v", gotIdentity, identityErr)
+				}
 				return engTestResult(step), nil
 			})
 			report := engDeadlineReceive(t, engTestExecuteAsync(t, r))
@@ -344,6 +370,9 @@ func TestEngineContextUsageLease(t *testing.T) {
 				engTestReport(t, report, Failed, 1)
 			} else {
 				engTestReport(t, report, Succeeded, 0)
+			}
+			if _, err := r.SessionIdentity(context.Background(), handle); !engTestCode(err, InvalidDefinition) {
+				t.Errorf("identity after Execute: %v", err)
 			}
 			if _, err := r.SessionContextUsage(context.Background(), handle); !engTestCode(err, InvalidDefinition) {
 				t.Errorf("usage after Execute: %v", err)

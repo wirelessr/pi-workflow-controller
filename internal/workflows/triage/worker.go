@@ -206,6 +206,10 @@ func (a *acceptance) workerDispatch(scope Scope, proposal contract.Ref, taskID s
 	if err != nil {
 		return request, nil, nil, err
 	}
+	sources, err = a.recoverySources(scope, sources, state.Data.Recovery)
+	if err != nil {
+		return request, nil, nil, err
+	}
 	if task.SourceKind == "db" || task.SourceKind == "logs" || task.SourceKind == "metrics" {
 		intake, err := a.checkIntake(h.value.Intake, scope.Ticket)
 		if err != nil {
@@ -340,9 +344,10 @@ func (p *plannerCaller) work(ctx context.Context, models sliceModels, taskID str
 }
 
 type preparedWorker struct {
-	request workerRequest
-	inputs  []contract.Ref
-	key     string
+	recovery bool
+	request  workerRequest
+	inputs   []contract.Ref
+	key      string
 }
 
 func prepareWorker(ctx context.Context, r *engine.Run, scope Scope, contextRef, proposal contract.Ref, accepted []contract.Ref, taskID string) (preparedWorker, error) {
@@ -371,13 +376,27 @@ func prepareWorker(ctx context.Context, r *engine.Run, scope Scope, contextRef, 
 func runWorker(ctx context.Context, r *engine.Run, s *engine.Scope, models sliceModels, prepared preparedWorker) (contract.Ref, error) {
 	request, inputs, key := prepared.request, prepared.inputs, prepared.key
 	if err := s.Decision(ctx, key+"-dispatch", "Dispatch one explicit worker task: "+request.Task.ID, inputs); err != nil {
+		if prepared.recovery {
+			return contract.Ref{}, &taskFailure{cause: err, stage: request.Stage}
+		}
 		return contract.Ref{}, err
 	}
 	model := models.Analysis
 	if request.Task.Responsibility == "evidence-only" {
 		model = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: models.FetchThinking}
 	}
-	return taskStep(ctx, r, s, model, request.Stage, key, request, WorkerSchema, inputs)
+	if prepared.recovery {
+		state, err := readAccepted[PlannerState](newAcceptance(ctx, r), request.Proposal, PlannerSchema)
+		if err != nil {
+			return contract.Ref{}, err
+		}
+		for _, choice := range state.Data.RecoveryChoices {
+			if choice.Action == "inspect" {
+				request.Requirements += "\nRecovery inspection only: inspect authorized read-only status/evidence for the uncertain remote work in the exact proposal recovery metadata. Do not create, resubmit or restart that work. Record job identity, actual status, limitations and evidence-backed safety assessment."
+			}
+		}
+	}
+	return taskStepRecovery(ctx, r, s, model, request.Stage, key, request, WorkerSchema, inputs, prepared.recovery)
 }
 
 func acceptWorker(ctx context.Context, r *engine.Run, scope Scope, proposal contract.Ref, accepted []contract.Ref, prepared preparedWorker, ref contract.Ref) error {

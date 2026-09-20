@@ -193,10 +193,10 @@ func checkRevision(v Context, h contextHistory, fact func(Fact) error, wikiRef c
 // returns supporting state even if gaps remain; it is not a finalization or a
 // full adaptive planner. Further calls consume the same run's budgets.
 func resolveSlice(ctx context.Context, r *engine.Run, scope Scope, models sliceModels, previous ContextResult) (ContextResult, error) {
-	return resolveWithProposal(ctx, r, scope, models, previous, nil, nil)
+	return resolveWithProposal(ctx, r, scope, models, previous, nil, nil, nil)
 }
 
-func resolveWithProposal(ctx context.Context, r *engine.Run, scope Scope, models sliceModels, previous ContextResult, proposal *contract.Ref, supportingSources map[contract.Ref][]file) (ContextResult, error) {
+func resolveWithProposal(ctx context.Context, r *engine.Run, scope Scope, models sliceModels, previous ContextResult, proposal *contract.Ref, supportingSources map[contract.Ref][]file, continuation *supportContinuation) (ContextResult, error) {
 	result := previous
 	h, err := loadContextHistory(ctx, r, scope, previous.Context)
 	if err != nil {
@@ -217,7 +217,7 @@ func resolveWithProposal(ctx context.Context, r *engine.Run, scope Scope, models
 	if err != nil {
 		return result, err
 	}
-	key := "resolution-" + previous.Context.AttemptID
+	key := continuation.key("resolution-" + previous.Context.AttemptID)
 	if err := r.Root().Decision(ctx, key+"-dispatch", "Remedy required wiki search and unresolved local identity/time only; reuse committed intake and preserve remaining acquisition gaps", []contract.Ref{previous.Context, previous.Intake, previous.Wiki}); err != nil {
 		return result, err
 	}
@@ -225,7 +225,7 @@ func resolveWithProposal(ctx context.Context, r *engine.Run, scope Scope, models
 	if !wikiComplete(wiki) {
 		wikiInputs := appendSourceInputs([]contract.Ref{previous.Intake, previous.Wiki, previous.Context}, h.sources)
 		wikiInputs = appendSourceInputs(wikiInputs, supportingSources)
-		wikiRef, err = sliceStep(ctx, r, models, key+"-wiki", stageTask{Stage: "wiki-resolution", SupportingProposal: proposal, Scope: scope, Gaps: wiki.Gaps, Previous: &previous.Context, Requirements: `Remedy the required wiki search using committed intake and previous wiki/context inputs. Perform a new read-only wiki-only search with existing tools; save raw search results and page evidence. Do not read other WIP/session history or write back. Preserve failed/partial status and diagnostics; unavailable/not-run/partial is never no matches. Bind intake to request.inputs[0]. Do not repeat Jira acquisition or expand production scope.`}, WikiSchema, wikiInputs)
+		wikiRef, err = continuation.step(ctx, r, models, key+"-wiki", stageTask{Stage: "wiki-resolution", SupportingProposal: proposal, Scope: scope, Gaps: wiki.Gaps, Previous: &previous.Context, Requirements: `Remedy the required wiki search using committed intake and previous wiki/context inputs. Perform a new read-only wiki-only search with existing tools; save raw search results and page evidence. Do not read other WIP/session history or write back. Preserve failed/partial status and diagnostics; unavailable/not-run/partial is never no matches. Bind intake to request.inputs[0]. Do not repeat Jira acquisition or expand production scope.`}, WikiSchema, wikiInputs)
 		if err != nil {
 			return result, err
 		}
@@ -233,6 +233,7 @@ func resolveWithProposal(ctx context.Context, r *engine.Run, scope Scope, models
 		if err != nil {
 			return result, err
 		}
+		continuation.accepted(WikiSchema, wikiRef)
 	}
 	inputs := []contract.Ref{previous.Intake, wikiRef, previous.Context}
 	// Include every retained evidence source explicitly; no implicit cross-Step
@@ -247,7 +248,7 @@ func resolveWithProposal(ctx context.Context, r *engine.Run, scope Scope, models
 		kinds = append(kinds, "time")
 	}
 	allowed := nonblank(scope.Stack) && nonblank(scope.Pop) && nonblank(scope.Binding) && len(scope.TenantIDs) > 0 && intake.Complete && wikiComplete(wiki)
-	contextRef, err := sliceStep(ctx, r, models, key+"-context", stageTask{Stage: "context-resolution", SupportingProposal: proposal, Scope: scope, Previous: &previous.Context, Gaps: h.value.Gaps, ResolutionKinds: kinds, RuntimeResolutionAllowed: allowed, Requirements: `Produce a new supporting context bound to previous=request.inputs[2], intake=request.inputs[0], wiki=request.inputs[1]. Work only on the Controller's unresolved resolution_kinds and required wiki remediation. Reuse valid committed intake, observations, identity and incident UTC anchors; do not refetch Jira or repeat resolved lookups. Retain prior observations and resolution attempts with exact input refs; qualify previous self-owned evidence with its previous contract ref, never recopy attachments. Actively seek missing identity/time evidence with existing tools and save new raw sources, metadata and outcomes to this attempt. Production/paid queries are forbidden unless runtime_resolution_allowed; ticket-only scope can still inspect committed/local evidence. Keep unresolved acquisition/wiki prerequisites in gaps, not final blocked. Every removed previous gap requires a resolved_gaps fact whose value is the exact gap and whose evidence includes a new local file or new wiki evidence; no unsupported gap deletion. Preserve original timestamp/offset/epoch calculations and target/DB receipt rules; from/to remains observed anchors, not a query window. Do not change already resolved identity/time or problem scope in this local cycle; new contradictions require the future invalidation/reframe path, not silent replacement. New evidence does not authorize a wider target. No final report, root cause, drafts or final selection.`}, ContextSchema, inputs)
+	contextRef, err := continuation.step(ctx, r, models, key+"-context", stageTask{Stage: "context-resolution", SupportingProposal: proposal, Scope: scope, Previous: &previous.Context, Gaps: h.value.Gaps, ResolutionKinds: kinds, RuntimeResolutionAllowed: allowed, Requirements: `Produce a new supporting context bound to previous=request.inputs[2], intake=request.inputs[0], wiki=request.inputs[1]. Work only on the Controller's unresolved resolution_kinds and required wiki remediation. Reuse valid committed intake, observations, identity and incident UTC anchors; do not refetch Jira or repeat resolved lookups. Retain prior observations and resolution attempts with exact input refs; qualify previous self-owned evidence with its previous contract ref, never recopy attachments. Actively seek missing identity/time evidence with existing tools and save new raw sources, metadata and outcomes to this attempt. Production/paid queries are forbidden unless runtime_resolution_allowed; ticket-only scope can still inspect committed/local evidence. Keep unresolved acquisition/wiki prerequisites in gaps, not final blocked. Every removed previous gap requires a resolved_gaps fact whose value is the exact gap and whose evidence includes a new local file or new wiki evidence; no unsupported gap deletion. Preserve original timestamp/offset/epoch calculations and target/DB receipt rules; from/to remains observed anchors, not a query window. Do not change already resolved identity/time or problem scope in this local cycle; new contradictions require the future invalidation/reframe path, not silent replacement. New evidence does not authorize a wider target. No final report, root cause, drafts or final selection.`}, ContextSchema, inputs)
 	if err != nil {
 		return result, err
 	}

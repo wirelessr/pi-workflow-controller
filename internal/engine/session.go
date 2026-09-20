@@ -115,6 +115,25 @@ func (r *Run) OpenSession(ctx context.Context, role RoleSpec) (*SessionHandle, e
 	return h, nil
 }
 
+// SessionIdentity reads the committed identity of an owned handle, without RPC
+// or attempt accounting. It remains available after local close while the run
+// still accepts workflow operations.
+func (r *Run) SessionIdentity(ctx context.Context, h *SessionHandle) (runtime.Identity, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.checkLocked(ctx); err != nil {
+		return runtime.Identity{}, err
+	}
+	if h == nil || h.run != r {
+		return runtime.Identity{}, newFailure(InvalidDefinition, "SessionIdentity", "foreign or nil handle")
+	}
+	v, ok := r.state.Sessions[h.id]
+	if !ok || v.Identity.HandleID != h.id || v.Identity.SessionID == "" {
+		return runtime.Identity{}, newFailure(IdentityMismatch, "SessionIdentity", "owned session has no committed identity")
+	}
+	return v.Identity, nil
+}
+
 // SessionContextUsage leases an idle owned handle without holding the control
 // lock across RPC. It does not consume an attempt or add a health probe.
 func (r *Run) SessionContextUsage(ctx context.Context, h *SessionHandle) (runtime.ContextUsage, error) {

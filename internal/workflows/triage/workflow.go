@@ -44,6 +44,10 @@ func slicePolicy() engine.RunPolicy {
 }
 
 func sliceStep(ctx context.Context, r *engine.Run, models sliceModels, key string, task stageTask, schema string, inputs []contract.Ref) (contract.Ref, error) {
+	return sliceStepRecovery(ctx, r, models, key, task, schema, inputs, false)
+}
+
+func sliceStepRecovery(ctx context.Context, r *engine.Run, models sliceModels, key string, task stageTask, schema string, inputs []contract.Ref, recovery bool) (contract.Ref, error) {
 	model := models.Analysis
 	if task.Stage == "intake" || task.Stage == "intake-revision" || task.Stage == "intake-update" {
 		model = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: models.FetchThinking}
@@ -55,13 +59,22 @@ func sliceStep(ctx context.Context, r *engine.Run, models sliceModels, key strin
 		inputs = append(inputs, *task.SupportingProposal)
 		task.Requirements += "\n\nRead the exact supporting_proposal Planner input for the accepted supporting_work reason and basis. Perform this stage of that task within the supplied scope and completion conditions. Other pending text and hypotheses are planning context, not additional dispatch authorization."
 	}
-	return taskStep(ctx, r, r.Root(), model, task.Stage, key, task, schema, inputs)
+	return taskStepRecovery(ctx, r, r.Root(), model, task.Stage, key, task, schema, inputs, recovery)
 }
 
-func taskStep(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref) (contract.Ref, error) {
+func taskStepRecovery(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref, recovery bool) (contract.Ref, error) {
 	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + stage, CWD: filepath.Join(r.Dir(), "triage-work"), Model: model})
 	if err != nil {
 		return contract.Ref{}, err
+	}
+	var identity runtime.Identity
+	if recovery {
+		// A sibling may cancel after OpenSession. Capture this owned handle for
+		// parent-context cleanup without permitting a cancelled Step dispatch.
+		identity, err = r.SessionIdentity(context.WithoutCancel(ctx), h)
+		if err != nil {
+			return contract.Ref{}, err
+		}
 	}
 	prompt, err := json.Marshal(task)
 	if err != nil {
@@ -69,13 +82,26 @@ func taskStep(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime
 	}
 	out, err := s.Step(ctx, engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: inputs, Output: contract.Spec{SchemaID: schema}, Timeout: 30 * time.Minute})
 	if err != nil {
+		if recovery {
+			return contract.Ref{}, &taskFailure{cause: err, handle: h, identity: identity, stage: stage, attempt: out.AttemptID}
+		}
 		return contract.Ref{}, err
+	}
+	return closeTaskStep(ctx, r, h, identity, stage, out, recovery)
+}
+
+func closeTaskStep(ctx context.Context, r *engine.Run, h *engine.SessionHandle, identity runtime.Identity, stage string, out engine.StepResult, recovery bool) (contract.Ref, error) {
+	if recovery && out.Execution.SessionID != identity.SessionID {
+		return out.Output, fmt.Errorf("task execution identity mismatch")
 	}
 	closed, err := r.CloseSessionReport(ctx, h)
 	if err != nil {
+		if recovery {
+			return out.Output, &taskFailure{cause: err, handle: h, identity: identity, stage: stage, attempt: out.AttemptID}
+		}
 		return out.Output, err
 	}
-	if !closed.ConfirmsLocalClose(out.Execution.SessionID) {
+	if !closed.ConfirmsLocalClose(out.Execution.SessionID) || recovery && closed.Identity != identity {
 		return out.Output, fmt.Errorf("%s cleanup not confirmed", stage)
 	}
 	return out.Output, nil

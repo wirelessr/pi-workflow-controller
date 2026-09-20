@@ -85,6 +85,7 @@ func Serve() error {
 	entries := []map[string]any{}
 	var leaf any
 	holdEntries := false
+	holdAbort := false
 	appendMessage := func(message map[string]any) error {
 		id := fmt.Sprintf("e%d", len(entries)+1)
 		entry := map[string]any{"id": id, "parentId": leaf, "type": "message", "message": message}
@@ -185,7 +186,12 @@ func Serve() error {
 			}
 			ack := <-acks
 			switch ack.Type {
-			case "settle", "provider-error":
+			case "settle", "provider-error", "compaction-error":
+				if ack.Type == "compaction-error" {
+					if err = out.Encode(map[string]any{"type": "compaction_end", "aborted": false, "errorMessage": "fixture compaction failed"}); err != nil {
+						return err
+					}
+				}
 				stop := "stop"
 				if ack.Type == "provider-error" {
 					stop = "error"
@@ -199,8 +205,9 @@ func Serve() error {
 				}
 				state["isStreaming"] = false
 				err = out.Encode(map[string]any{"type": "agent_settled"})
-			case "hold", "hold-entries":
+			case "hold", "hold-entries", "hold-abort":
 				holdEntries = ack.Type == "hold-entries"
+				holdAbort = ack.Type == "hold-abort"
 				if holdAck {
 					if err = reply(nil); err != nil {
 						return err
@@ -212,6 +219,19 @@ func Serve() error {
 				return fmt.Errorf("unexpected prompt barrier ack %q", ack.Type)
 			}
 		case "abort", "abort_bash":
+			if command.Type == "abort" && holdAbort {
+				if err := controlOut.Encode(Control{Type: "abort", SessionID: sid}); err != nil {
+					return err
+				}
+				ack := <-acks
+				if ack.Type == "exit" {
+					os.Exit(3)
+				}
+				if ack.Type != "release-abort" {
+					return fmt.Errorf("unexpected abort barrier ack %q", ack.Type)
+				}
+				holdAbort = false
+			}
 			if command.Type == "abort" {
 				state["isStreaming"] = false
 			}

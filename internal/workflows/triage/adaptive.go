@@ -36,7 +36,7 @@ type InvestigationLedger struct {
 }
 
 const adaptiveRequirements = `This is the adaptive investigation Planner, not a verifier or report writer. Submit the full hypotheses/pending/gaps/worker_tasks/worker_results/wiki_results state and a ledger every time. Echo worker_results and wiki_results exactly as supplied. Choose an explicit ledger.action: workers, support, wiki, reframe, plan, or yield, and explain ledger.reason. Workers means dispatch only declared worker_tasks whose dependencies have accepted results; at most three are dispatched in declaration order. Adjust unfinished tasks freely in each new snapshot, but never reuse a completed ID. Support uses the existing supporting_work contract to remedy prerequisites, not first-missing-field closure. Its basis still names only supporting-context evidence; investigation wiki/worker delivery does not expand Context provenance or supporting_work eligibility. Wiki/reframe declares wiki_task with stable id, terms, previous_terms exactly from the latest delivered wiki (initially Context.Wiki), reason and evidence basis; reframe changes the terms. Wiki tasks do not replace intake or Context.Wiki. Preserve new incomplete wiki gaps even if the old Context.Wiki was complete. Interpret wiki applicability yourself; completed search is not runtime proof or hypothesis progress.
-One round is one delivered worker batch followed by this Planner update. ledger.consumed_batch is exactly the new suffix of worker_results since previous; increment round only for that nonempty batch. For that batch explicitly report changes with hypothesis_id, change description, reason and supplied basis, or an empty changes array for no hypothesis progress. Do not call repeated successful searches, additional files, ordinary planning/support or a fresh session hypothesis progress. Go does not compare assessments or determine truth. Increment no_progress for an empty-changes worker round; reset it only for an explicitly reported hypothesis change. Without a worker batch preserve no_progress and report no changes. Preserve reframe_round/reframe_streak independently: on the update receiving the previous reframe action's wiki delivery, set them to that proposal's round/no_progress (even if the search is incomplete), not zero and not a success-derived progress event. Actual hypothesis progress resets reframe_streak to zero, retaining reframe_round. Otherwise echo these counters. Initially all counters are zero. Two no-progress worker rounds since the separate reframe boundary require action reframe, a concrete reframe change/reason/basis, a different source, counterexample, healthy control or problem premise, and new wiki terms. If no feasible authorized path exists, explicitly yield with reason and gaps instead of implying a conclusion. Reframe attempts do not erase incomplete search gaps. Extra planning, support, wiki tasks and session changes do not add rounds. plan has no dispatch. yield has no dispatch and hands only accepted investigation state to a later phase; explicitly explain needed next work or why no authorized path is feasible. It is never a verified claim, final report, root-cause confirmation or publication.`
+One round is one delivered worker batch followed by this Planner update. Without recovery, increment round only for a nonempty new worker_results batch. With recovery, each new workers delivery increments round once, including an all-failed delivery with no worker_results. ledger.consumed_batch is exactly the new suffix of genuine successful worker_results since previous; never include failures or fabricate success Refs. For that worker round explicitly report changes with hypothesis_id, change description, reason and supplied basis, or an empty changes array for no hypothesis progress. Do not call repeated successful searches, additional files, ordinary planning/support or a fresh session hypothesis progress. Go does not compare assessments or determine truth. Increment no_progress for an empty-changes worker round; reset it only for an explicitly reported hypothesis change. Without a worker round preserve no_progress and report no changes. Preserve reframe_round/reframe_streak independently: on the update receiving the previous reframe action's wiki delivery, set them to that proposal's round/no_progress (even if the search is incomplete), not zero and not a success-derived progress event. Actual hypothesis progress resets reframe_streak to zero, retaining reframe_round. Otherwise echo these counters. Initially all counters are zero. Two no-progress worker rounds since the separate reframe boundary require action reframe, a concrete reframe change/reason/basis, a different source, counterexample, healthy control or problem premise, and new wiki terms. If no feasible authorized path exists, explicitly yield with reason and gaps instead of implying a conclusion. Reframe attempts do not erase incomplete search gaps. Extra planning, support, wiki tasks and session changes do not add rounds. plan has no dispatch. yield has no dispatch and hands only accepted investigation state to a later phase; explicitly explain needed next work or why no authorized path is feasible. It is never a verified claim, final report, root-cause confirmation or publication.`
 
 func (a *acceptance) checkInvestigation(v PlannerState, h contextHistory, sources map[contract.Ref][]file) error {
 	var prior PlannerState
@@ -46,6 +46,9 @@ func (a *acceptance) checkInvestigation(v PlannerState, h contextHistory, source
 			return err
 		}
 		prior = p.Data
+	}
+	if err := a.checkRecovery(v, prior, sources); err != nil {
+		return err
 	}
 	l := v.Ledger
 	if l == nil {
@@ -91,7 +94,15 @@ func (a *acceptance) checkInvestigation(v PlannerState, h contextHistory, source
 			reframeRound, reframeStreak = round, streak
 		}
 	}
-	if len(batch) > 0 {
+	deliveries, err := recoverySuffix(v, prior)
+	if err != nil {
+		return err
+	}
+	workerRound := len(batch) > 0
+	if len(deliveries) > 0 && deliveries[0].Kind == "workers" {
+		workerRound = true
+	}
+	if workerRound {
 		round++
 		if len(l.Changes) == 0 {
 			streak++
@@ -119,7 +130,32 @@ func (a *acceptance) checkInvestigation(v PlannerState, h contextHistory, source
 		}
 	}
 	if streak-reframeStreak >= 2 && l.Action != "reframe" && l.Action != "yield" {
-		return fmt.Errorf("two rounds without reported hypothesis progress require reframe")
+		inspection := false
+		// checkRecovery already requires an unresolved delivery and explicit inspection.
+		// Only the current mandatory reframe may defer this guard for safety inspection.
+		if l.Action == "workers" && v.Recovery != nil {
+			for _, choice := range v.RecoveryChoices {
+				if choice.Action != "inspect" {
+					continue
+				}
+				for _, d := range v.Recovery.Deliveries {
+					if d.ID != choice.DeliveryID || d.Kind != "wiki" || len(d.Failures) == 0 || len(d.Results) != 0 || d.Context != v.Context {
+						continue
+					}
+					original, err := readAccepted[PlannerState](a, d.Proposal, PlannerSchema)
+					if err != nil {
+						return err
+					}
+					old := original.Data.Ledger
+					if old != nil && old.Action == "reframe" && original.Data.WikiTask != nil && old.NoProgress-old.ReframeStreak >= 2 && old.ReframeRound == reframeRound && old.ReframeStreak == reframeStreak && old.Round <= round && old.Round-old.NoProgress == round-streak {
+						inspection = true
+					}
+				}
+			}
+		}
+		if !inspection {
+			return fmt.Errorf("two rounds without reported hypothesis progress require reframe")
+		}
 	}
 	if streak-reframeStreak >= 2 && l.Action == "yield" && len(v.Gaps) == 0 {
 		return fmt.Errorf("yield instead of required reframe must retain explicit gaps")
@@ -211,12 +247,13 @@ func (p *plannerCaller) workReady(ctx context.Context, models sliceModels) (int,
 			return 0, err
 		}
 		work := prepared[i]
+		work.recovery = p.recovery != nil
 		branches[i] = engine.Branch{Name: fmt.Sprintf("worker-%d", i), Do: func(ctx context.Context, s *engine.Scope) (engine.Result, error) {
 			ref, err := runWorker(ctx, p.r, s, models, work)
-			if err != nil {
+			if err != nil && (!work.recovery || ref == (contract.Ref{})) {
 				return engine.Result{}, err
 			}
-			return engine.Result{Outputs: map[string]contract.Ref{"worker": ref}}, nil
+			return engine.Result{Outputs: map[string]contract.Ref{"worker": ref}}, err
 		}}
 	}
 	if len(branches) == 0 {
@@ -224,6 +261,9 @@ func (p *plannerCaller) workReady(ctx context.Context, models sliceModels) (int,
 		return 0, nil
 	}
 	joined, err := p.r.Root().Parallel(ctx, "workers-"+p.last.AttemptID, engine.FailFast, branches)
+	if p.recovery != nil {
+		return p.receiveWorkers(ctx, prepared, joined, err)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -242,9 +282,12 @@ func (p *plannerCaller) workReady(ctx context.Context, models sliceModels) (int,
 	return len(joined), nil
 }
 
-// The returned Ref is investigation state only. A nonnil capacity policy opts
-// into checkpoint/capacity continuation; recovery and verification remain separate.
-func executeInvestigation(ctx context.Context, r *engine.Run, scope Scope, plannerModel runtime.ModelSpec, models sliceModels, contextRef contract.Ref, capacity *PlannerCapacityPolicy) (contract.Ref, error) {
+// The returned Ref is investigation state only. Capacity and recovery require
+// explicit caller policies; verification and final delivery remain separate.
+func executeInvestigation(ctx context.Context, r *engine.Run, scope Scope, plannerModel runtime.ModelSpec, models sliceModels, contextRef contract.Ref, capacity *PlannerCapacityPolicy, recovery *RecoveryPolicy) (contract.Ref, error) {
+	if recovery != nil && recovery.PlannerRetries < 0 {
+		return contract.Ref{}, fmt.Errorf("explicit nonnegative planner retry budget required")
+	}
 	if capacity != nil {
 		if err := capacity.check(); err != nil {
 			return contract.Ref{}, err
@@ -259,13 +302,25 @@ func executeInvestigation(ctx context.Context, r *engine.Run, scope Scope, plann
 		policy := *capacity
 		p.capacity = &policy
 	}
+	if recovery != nil {
+		p.recovery = &PlannerRecovery{Policy: *recovery, Deliveries: []RecoveryDelivery{}, PlannerFailures: []RecoveryFailure{}}
+		p.identity, err = r.SessionIdentity(ctx, p.handle)
+		if err != nil {
+			return contract.Ref{}, err
+		}
+	}
 	return p.adapt(ctx, models)
 }
 
-func (p *plannerCaller) adapt(ctx context.Context, models sliceModels) (contract.Ref, error) {
+func (p *plannerCaller) adapt(ctx context.Context, models sliceModels) (result contract.Ref, retErr error) {
+	defer func() {
+		if retErr != nil && p.recovery != nil && len(p.recoveryErrors) > 0 {
+			retErr = recoveryError(retErr, p.recoveryErrors...)
+		}
+	}()
 	p.adaptive = true
 	for {
-		ref, err := p.step(ctx)
+		ref, err := p.planningStep(ctx)
 		if err != nil {
 			return contract.Ref{}, err
 		}
@@ -278,10 +333,11 @@ func (p *plannerCaller) adapt(ctx context.Context, models sliceModels) (contract
 		// These actions already close the Planner. Sampling would add an
 		// unnecessary failure boundary or a second fresh session.
 		if state.Data.Ledger.Action != "support" && state.Data.Ledger.Action != "yield" {
-			p, err = p.capacityHandoff(ctx)
-			if err != nil {
-				return contract.Ref{}, err
+			next, handoffErr := p.capacityHandoff(ctx)
+			if handoffErr != nil {
+				return contract.Ref{}, handoffErr
 			}
+			p = next
 		}
 		switch state.Data.Ledger.Action {
 		case "workers":
@@ -294,7 +350,11 @@ func (p *plannerCaller) adapt(ctx context.Context, models sliceModels) (contract
 				}
 			}
 		case "support":
-			p, err = p.support(ctx, models)
+			var next *plannerCaller
+			next, err = p.support(ctx, models)
+			if next != nil {
+				p = next
+			}
 		case "wiki", "reframe":
 			_, err = p.searchWiki(ctx, models)
 		case "yield":

@@ -131,7 +131,7 @@ Private `startPlanner` 從 exact committed supporting context（ready 或 needs-
 - Fresh session 明列上一份完整 Planner state、supporting context 及所有歷史 evidence owners，不靠舊對話、目錄掃描或複製 raw files。成功驗收及 Decision 持久化後才替換 caller 的 last state。無效 contract 或執行失敗使該 caller 停止，不交出失敗 candidate，也不自動 recovery；原始 fatal／取消／限額／cleanup 錯誤仍返回。
 - 匿名 RPC fixtures 覆蓋同 session 多 Step、fresh handoff、revised intake 歷史 owner、supporting query inputs、ready／incomplete、非法 Ref／schema／scope、失敗與會計。這不是正常 Pi 技能操作或指定 GLM live 驗證。
 
-`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；一般 worker 與自動批次／reframe 接線見下節；容量訊號與週期 checkpoint 的接線見下節；timeout recovery、同版三方驗證與報告仍未實作。
+`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；一般 worker 與自動批次／reframe 接線見下節；容量訊號、週期 checkpoint 與明示政策的 recovery 接線見下節；同版三方驗證與報告仍未實作。
 
 ### Planner proposal → 既有 supporting 任務 → 新 Planner state
 
@@ -157,7 +157,7 @@ Planner 可在 `worker_tasks` 明列任務 ID、source kind、evidence-only／an
 
 Source kind 與 responsibility 是明列的派工欄位，不是 Go 從文字推導的分類。Evidence-only 使用既定 fetch model，analysis 由 caller 明示模型；不猜 GLM ID，不宣稱 vision 或真模型能力已驗。假說真假、證據適用性、工作結果是否足以支持下一判斷均屬 Agent；Go 不根據檔案數、查詢成功、schema 或自由文字認列進展。
 
-Worker 與既有 slice 共用 scope-aware `taskStep` 的 OpenSession／Step／30 分鐘期限／strict-close 機械。結果須通過綁定、Inputs、evidence、query 驗收及 Decision 後才納入 caller 的 accepted refs；先有 engine committed output 不代表 workflow 已接受。失敗停止 caller、保留最後 Planner state 與原 typed failure，不吞 timeout、fatal 或 cleanup failure。
+Worker 與既有 slice 共用 scope-aware `taskStepRecovery` 的 OpenSession／Step／30 分鐘期限／strict-close 機械。結果須通過綁定、Inputs、evidence、query 驗收及 Decision 後才納入 caller 的 accepted refs；先有 engine committed output 不代表 workflow 已接受。失敗停止 caller、保留最後 Planner state 與原 typed failure，不吞 timeout、fatal 或 cleanup failure。
 
 下一 Planner Step 明交 `worker_results`、原 proposal/context 及所有真正 owners，snapshot 必須保留 caller 已接受的完整結果清單。Fresh handoff 亦交付已接受但尚未納入下一 snapshot 的結果，不靠 session 記憶。Supporting context 改版及其各中間 Steps 保留必要 worker inputs，舊結果仍綁原 context；這不擴張 Context 本身的 evidence eligibility 或舊 supporting proposal basis 規則。結果保留不等於 Controller 認定仍適用。
 
@@ -175,7 +175,7 @@ Private `executeInvestigation` 明示獨立 Planner model 與 worker models，�
 
 調查期 wiki task 綁定 proposal/context/task ID/inputs，沿原 WikiSearch/completeness，保存 terms、previous_terms、理由及真正 evidence owners。新搜尋以獨立 `wiki_results` Ref 明交 Planner／worker／support／fresh handoff，不塞進 ready context 的舊 resolve、不重抓 intake、不改寫舊 `Context.Wiki`。歷史搜尋按自己的 intake/binding 重驗；新 partial/unavailable/not-run gaps 不得用旧 context 的 complete 遮蔽，runtime worker 仍受必要 wiki 完整性前提限制。Terms echo／明列變更是任務驗收，不證明搜尋詞語義不同或 wiki pattern 能支持本次根因。
 
-匿名同一 RPC driver 覆蓋三 worker 加 Planner、逆序完成／有序交付、依賴批次、no-ready feedback、明報進展／兩輪 reframe、wiki partial 與歷史 owners、獨立模型、support/handoff、branch 失敗／取消／cleanup／半提交與會計。沒有新 driver、scheduler、任意總輪數／查詢次數 cap 或 crash resume；M4+ 與真模型／技能／產品入口驗收仍未完成。歷史 validation 的 raw evidence 重讀成本尚未完成容量量測，不能把匿名情境通過當作高負載保證。
+匿名同一 RPC driver 覆蓋三 worker 加 Planner、逆序完成／有序交付、依賴批次、no-ready feedback、明報進展／兩輪 reframe、wiki partial 與歷史 owners、獨立模型、support/handoff、branch 失敗／取消／cleanup／半提交與會計。沒有新 driver、scheduler、任意總輪數／查詢次數 cap 或 crash resume；M5+ 與真模型／技能／產品入口驗收仍未完成。歷史 validation 的 raw evidence 重讀成本尚未完成容量量測，不能把匿名情境通過當作高負載保證。
 
 ### 完整 checkpoint 與容量 handoff
 
@@ -188,6 +188,24 @@ Planner 的 optional `checkpoint` 與完整 domain snapshot 一起提交，M3 ca
 `SessionContextUsage` 的 query/identity/format/error 語義不改：真正錯誤使 handle unusable 並進既有 close，不吞為 unknown。恢復仍屬 M4，沒有在此處猜哪些 ProviderFailed 是 overflow。Capacity feedback、no-ready note 與既有 evidence/results/owners 明交 fresh/support；尚未被下一個正常 Planner Step 消費的診斷只是 pending，不冒稱已 durable。下一成功 snapshot 驗收後才清 pending，歷史 Controller feedback 不可丟棄或改寫。
 
 匿名 fixtures 沿既有 Store/publication 與真 engine/Store/RPC driver，覆蓋週期計數、同一 snapshot checkpoint、unknown/門檻、fresh/support/owners/模型、非法 echo、stats failure/cancel/cleanup 與會計。Test protocol 的 stats control 是 opt-in 外部 provider 邊界，未開時保留舊回覆；不是產品 bypass。完整 live 能力、資料量容量與長歷史 raw/decode 成本仍未驗。
+
+### 明示政策的 failure delivery 與安全續接
+
+`executeInvestigation` 另接 caller 明示的 `*RecoveryPolicy`，nil 保留舊 failure 出口；capacity 與 recovery 可獨立啟用。Planner 的非負 retry budget 沒有 live 預設。只有純 inputs 的 Planner 單次工作以既有 `Scope.Retry` 有限 fresh 重試，不將整個調查放進 Retry、不重置原 run/session/attempt 會計；M5 角色此時不預造。
+
+`Run.SessionIdentity(ctx, handle)` 讀取已 committed 的 owned identity，不 RPC、不取 execution lease、不耗 attempt，在 run 仍接受操作時可於 close 後讀取。Triage 的真正 dispatch callers 事前保存 identity，不依賴成功 Step 才有的 session ID，也不從並發 snapshot 差分猜人。這涵蓋容量 handoff 後 fresh Planner 尚未執行 Step 的失敗路徑。原 `CloseSession` producer/predicate 不改，replacement 前另驗 exact owner、strict-close、Wait、exit 與 cleanup。
+
+可恢復來源僅可信 typed `TimedOut/AttemptDeadline` 與 `CompactionFailed/Compaction`；unknown ProviderFailed 不猜為 overflow。取消、parent/run deadline、storage/journal/run cap、cleanup/unconfirmed 或 locked outcome 不能降級。每個 branch 都檢查；FailFastSibling 只是同批從屬診斷，不單獨觸發 retry。Error wrapper/後續錯誤仍保留 `errors.Is/As` 原 chain，歷史 timeout 不得蓋過新的 fatal/cancel 分類。
+
+一般 worker、wiki、support 失敗明交 typed delivery，不能自動原樣重發遠端操作。`recovery` 與 `recovery_choices` 保留 policy、原 proposal/context、delivery identity、failed attempt/dispatch/cleanup、已接受結果與 phase refs。每批 worker 的成功結果或全敗 feedback 被下一 Planner snapshot 消費，都算一個 round/cycle；`consumed_batch` 仍只是真成功結果，不造假 Ref。是否有假說進展由 Agent 明報，timeout 不是反證，retry/fresh 不另灌輪數。Mixed siblings 仍須真 acceptance/Decision；已 commit 但 branch close 遇 FailFastSibling 的結果保留原 Ref/owner，join 後以 parent context 驗 succeeded attempt、strict cleanup，再接受結果，不偽裝失敗 attempt。其他 fatal/cleanup failure 不降級；未 committed candidate 只是診斷。
+
+未知遠端狀態只能 pending、明列 read-only inspection 或具 basis 的安全改向／resume，不能 caller bool 或換 task ID 冒充安全。安全內容由 Agent 查證及判讀；Go 驗 exact delivery/scope/Refs/轉移，不新增遠端 job 領域 recognizer，也不宣稱 sandbox 或遠端 exactly-once。
+
+Support 沿原 resolve/revise pipeline 保存已驗收 intake/wiki、原 proposal/failed phase 及 resume authorization，重驗 lineage/scope/UTC/receipt/completeness後只補未完成階段。不重抓已接受的 Jira 資料、不把中間 refs 當完整 context/checkpoint、不重綁歷史。Wiki resume 沿原 task/terms/history，partial 不等執行失敗或 no matches。尚未由下一 Planner Step 提交的 delivery/feedback 仍是 pending，不聲稱 crash resume。
+
+若當前 mandatory reframe 的 wiki 失敗，允許其明列 read-only inspection 先查證安全條件，再恢復該 reframe。只限同一未解決 reframe delivery、同一 context／reframe boundary／最後進展 round；一般 worker、舊 reframe 或已解決 delivery 不能繞過兩輪規則。Inspection 不自動歸零 streak，只有真正 wiki 交付才更新 reframe boundary。
+
+匿名案例沿既有 engine/Store/RPC及 filesystem fault 邊界覆蓋 Planner 首步/重試耗盡、全敗/mixed batch、兩輪 reframe、support/wiki phase續作與不重抓資料、identity/模型/echo/歷史/cleanup/fatal。未窮舉所有 sibling/fault 排列；未動態偽造內部 cleanup report 或宣稱 live/job 安全判讀已驗。中性 identity API 與舊 consumers 另保留 engine 回歸。
 
 ### 同一次驗收內的讀取重用
 

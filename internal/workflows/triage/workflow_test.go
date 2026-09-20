@@ -123,18 +123,40 @@ func TestTriageProtocolSubprocess(t *testing.T) {
 
 // Only the external runtime execution context is shortened; Step and its
 // cancellation/commit/cleanup machinery remain real.
-type deadlineRuntime struct{ runtime.Runtime }
-type deadlineSession struct{ runtime.Session }
+type deadlineRuntime struct {
+	runtime.Runtime
+	taskTimeouts map[string]time.Duration
+}
+type deadlineSession struct {
+	runtime.Session
+	taskTimeouts map[string]time.Duration
+}
 
 func (r deadlineRuntime) Start(ctx context.Context, spec runtime.SessionSpec) (runtime.Session, error) {
 	s, err := r.Runtime.Start(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
-	return deadlineSession{s}, nil
+	return deadlineSession{s, r.taskTimeouts}, nil
 }
 func (s deadlineSession) Execute(ctx context.Context, d runtime.Dispatch) (runtime.Execution, error) {
-	timed, cancel := context.WithTimeoutCause(ctx, time.Second, &runtime.Failure{Code: runtime.TimedOut, Origin: runtime.AttemptDeadline, Message: "fixture step deadline"})
+	timeout := time.Second
+	if len(s.taskTimeouts) != 0 {
+		_, _, req, err := protocol.ParseDispatch(d.Message)
+		if err != nil {
+			return runtime.Execution{}, err
+		}
+		var task struct {
+			Task WorkerTask `json:"task"`
+		}
+		if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
+			return runtime.Execution{}, err
+		}
+		if override, ok := s.taskTimeouts[task.Task.ID]; ok {
+			timeout = override
+		}
+	}
+	timed, cancel := context.WithTimeoutCause(ctx, timeout, &runtime.Failure{Code: runtime.TimedOut, Origin: runtime.AttemptDeadline, Message: "fixture step deadline"})
 	defer cancel()
 	return s.Session.Execute(timed, d)
 }
@@ -1264,6 +1286,10 @@ func workerFixture(name string, request workerRequest, inputs []contract.Ref) (W
 	v := WorkerResult{Proposal: request.Proposal, Context: request.Context, TaskID: request.Task.ID, Work: "Inspected an anonymous fixture", Status: "complete", Inputs: slices.Clone(inputs), Evidence: []Evidence{{FileID: "worker-raw"}}, Queries: []SupportingQuery{}, Analysis: []Fact{}, Gaps: []string{}, Next: []PlannerQuestion{}}
 	files := map[string][]byte{"worker-raw": []byte("anonymous evidence\n")}
 	v.Evidence = append(v.Evidence, request.Task.Basis...)
+	if strings.HasPrefix(name, "m4-reframe-") && strings.HasPrefix(request.Task.ID, "inspection") {
+		v.Work = "Read anonymous-wiki-job status without creating, restarting or resubmitting work"
+		files["worker-raw"] = []byte("job=anonymous-wiki-job status=completed; existing partial results available for read-only retrieval; no remote resubmission; hypothesis applicability unverified\n")
+	}
 	switch name {
 	case "m1-incomplete", "m1-dependencies-incomplete":
 		v.Status, v.Gaps = "incomplete", []string{"Upstream source supplied only partial evidence"}
@@ -1444,18 +1470,31 @@ func corruptInputEvidence(ref contract.Ref) error {
 
 func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stageTask, step int) PlannerState {
 	t.Helper()
-	v := plannerFixture(t, "complete", req, task, step, contract.Ref{})
+	fixtureStep := step
+	m4 := strings.HasPrefix(name, "m4-") && name != "m4-nil-recovery-timeout"
+	if m4 && task.Previous == nil {
+		fixtureStep = 1
+	}
+	v := plannerFixture(t, "complete", req, task, fixtureStep, contract.Ref{})
 	var delivered struct {
 		WorkerResults []contract.Ref     `json:"worker_results"`
 		WikiResults   []contract.Ref     `json:"wiki_results"`
 		AdaptiveNote  string             `json:"adaptive_note"`
 		Checkpoint    *PlannerCheckpoint `json:"checkpoint"`
+		Recovery      *PlannerRecovery   `json:"recovery"`
 	}
 	if err := json.Unmarshal([]byte(req.Prompt), &delivered); err != nil {
 		t.Fatal(err)
 	}
 	m3 := strings.HasPrefix(name, "m3-")
-	if m3 && name != "m3-illegal-optin" {
+	if m4 {
+		if delivered.Recovery == nil || !strings.Contains(task.Requirements, recoveryRequirements) {
+			t.Fatal("M4 omitted recovery metadata or requirements")
+		}
+		if (delivered.Checkpoint != nil) != (name == "m4-capacity-fresh-worker-timeout" || name == "m4-allfail-reframe-checkpoint" || strings.HasPrefix(name, "m4-reframe-")) {
+			t.Fatal("M4 recovery unexpectedly changed capacity policy")
+		}
+	} else if m3 && name != "m3-illegal-optin" {
 		if delivered.Checkpoint == nil || !strings.HasPrefix(task.Requirements, plannerRequirements+"\n\n"+adaptiveRequirements+"\n\nCopy the supplied checkpoint object exactly") {
 			t.Fatal("M3 entry omitted checkpoint or requirements")
 		}
@@ -1594,6 +1633,212 @@ func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stag
 			workers("w2")
 		} else if step == 2 && name == "m2-session-not-progress" {
 			l.Action = "plan"
+		}
+	}
+	if m4 {
+		priorDeliveries := 0
+		if v.Recovery != nil {
+			priorDeliveries = len(v.Recovery.Deliveries)
+		}
+		v.Recovery, v.Checkpoint = delivered.Recovery, delivered.Checkpoint
+		v.RecoveryChoices = []RecoveryChoice{}
+		v.WorkerTasks, v.SupportingWork, v.WikiTask = []WorkerTask{}, nil, nil
+		l.Action = "yield"
+		if len(v.Recovery.Deliveries) > priorDeliveries {
+			d := v.Recovery.Deliveries[priorDeliveries]
+			if d.Kind == "workers" && len(d.Results) == 0 {
+				l.Round++
+				l.NoProgress++
+			}
+		}
+		if len(v.Recovery.Deliveries) == 0 && (name == "m4-success-batch" || name == "m4-worker-timeout" || name == "m4-capacity-fresh-worker-timeout" || strings.HasPrefix(name, "m4-mixed-") || strings.HasPrefix(name, "m4-delivery-")) {
+			workers("w1")
+			if name == "m4-success-batch" || strings.HasPrefix(name, "m4-mixed-") {
+				workers("w2", "w3")
+			}
+		}
+		if strings.HasPrefix(name, "m4-allfail-") || strings.HasPrefix(name, "m4-reframe-") {
+			if len(v.Recovery.Deliveries) < 2 {
+				workers(fmt.Sprintf("failed-%d", len(v.Recovery.Deliveries)))
+			} else if (name == "m4-allfail-reframe-checkpoint" || strings.HasPrefix(name, "m4-reframe-")) && len(v.Recovery.Deliveries) == 2 {
+				wiki(true)
+			}
+			if len(v.Recovery.Deliveries) > 0 && len(v.Recovery.Deliveries) <= 2 {
+				d := v.Recovery.Deliveries[len(v.Recovery.Deliveries)-1]
+				v.RecoveryChoices = []RecoveryChoice{{DeliveryID: d.ID, Action: "redirect", Reason: "Use a different offline source; do not resubmit the uncertain operation", Basis: slices.Clone(basis)}}
+			}
+			if name == "m4-allfail-agent-progress" && len(v.Recovery.Deliveries) == 2 {
+				l.Changes = []HypothesisChange{{HypothesisID: "h1", Change: "Agent reinterprets the existing evidence despite execution failure", Reason: "Alternative interpretation, not timeout as incident disproof", Basis: slices.Clone(basis)}}
+				l.NoProgress, l.ReframeStreak = 0, 0
+			}
+		}
+		if strings.HasPrefix(name, "m4-meta-") && len(v.Recovery.PlannerFailures) > 0 {
+			f := &v.Recovery.PlannerFailures[0]
+			switch name {
+			case "m4-meta-identity":
+				f.Identity.SessionID = "not-the-dispatched-session"
+			case "m4-meta-attempt":
+				f.AttemptID = req.Identity.AttemptID
+			case "m4-meta-cleanup":
+				f.Cleanup.Identity.HandleID = "not-the-owned-handle"
+			case "m4-meta-diagnostic":
+				f.Diagnostic = "invented diagnostic"
+			case "m4-meta-prefix":
+				if task.Previous == nil {
+					l.Action = "plan"
+				} else {
+					f.Diagnostic = "rewritten historical diagnostic"
+				}
+			}
+		}
+		if strings.HasPrefix(name, "m4-reframe-") {
+			deliveries := len(v.Recovery.Deliveries)
+			wantRound := []int{0, 1, 2, 2, 3, 3}
+			wantStreak := wantRound
+			wantBoundary, wantChanges := 0, 0
+			if deliveries >= 5 {
+				wantBoundary = 3
+			}
+			if name == "m4-reframe-stale-inspection" {
+				wantRound, wantStreak = []int{0, 1, 2, 2, 3, 4, 5}, []int{0, 1, 2, 2, 0, 1, 2}
+				wantBoundary = 0
+				if deliveries == 4 {
+					l.Changes = []HypothesisChange{{HypothesisID: "h1", Change: "Agent revises the hypothesis using inspection evidence", Reason: "A changed interpretation, not automatic inspection progress", Basis: []Evidence{{Ref: &v.WorkerResults[0], FileID: "worker-raw"}}}}
+					l.NoProgress, l.ReframeStreak, wantChanges = 0, 0, 1
+				}
+			}
+			if name == "m4-reframe-completed-inspection" {
+				wantRound = []int{0, 1, 2, 2, 3, 3, 4, 5}
+				wantStreak = wantRound
+			}
+			if deliveries >= len(wantRound) || l.Round != wantRound[deliveries] || l.NoProgress != wantStreak[deliveries] || l.ReframeRound != wantBoundary || l.ReframeStreak != wantBoundary || len(l.Changes) != wantChanges || v.Checkpoint.DispatchCycle != deliveries || v.Checkpoint.CheckpointCycle != deliveries/3*3 {
+				t.Fatalf("reframe recovery changed round/no-progress/boundary/checkpoint: deliveries=%d ledger=%+v checkpoint=%+v", deliveries, l, v.Checkpoint)
+			}
+			if deliveries >= 3 {
+				d := v.Recovery.Deliveries[2]
+				if d.Kind != "wiki" || len(d.Results) != 0 || len(d.Failures) != 1 || d.Failures[0].Code != engine.TimedOut || d.Failures[0].Origin != engine.OriginAttemptDeadline || d.Failures[0].Cleanup == nil || !d.Failures[0].Cleanup.ConfirmsLocalClose(d.Failures[0].Identity.SessionID) {
+					t.Fatal("reframe timeout lost actual failed delivery or confirmed cleanup")
+				}
+				if len(v.Checkpoint.ControllerFeedback) != 1 || v.Checkpoint.ControllerFeedback[0].After != d.Proposal {
+					t.Fatal("fresh Planner lost committed reframe handoff feedback")
+				}
+				switch deliveries {
+				case 3:
+					if !v.Checkpoint.FullCheckpoint || len(v.WorkerResults) != 0 || len(v.WikiResults) != 0 {
+						t.Fatal("failed reframe invented results or lost the three-delivery checkpoint")
+					}
+					workers("inspection")
+					v.WorkerTasks[0].Question = "Read anonymous-wiki-job status without creating or resubmitting remote work"
+					v.RecoveryChoices = []RecoveryChoice{{DeliveryID: d.ID, Action: "inspect", Reason: "Inspect unknown reframe wiki job read-only before continuation", Basis: slices.Clone(basis)}}
+					if name == "m4-reframe-no-inspection" {
+						v.WorkerTasks[0].Question = "Investigate a different offline source"
+						v.RecoveryChoices[0].Action = "redirect"
+						v.RecoveryChoices[0].Reason = "Use offline evidence without repeating the uncertain wiki operation"
+					}
+				case 4:
+					if len(v.WorkerResults) != 1 || len(l.ConsumedBatch) != 1 {
+						t.Fatal("safe reframe resume lacks the committed inspection round")
+					}
+					var original publication[PlannerState]
+					if err := protocol.ReadJSON(d.Proposal.Path, &original); err != nil {
+						t.Fatal(err)
+					}
+					v.WikiTask, l.Action, l.Reframe = original.Data.WikiTask, "reframe", original.Data.Ledger.Reframe
+					v.RecoveryChoices = []RecoveryChoice{{DeliveryID: d.ID, Action: "resume", Reason: "Inspection confirms anonymous-wiki-job completed; read its result without resubmitting the search", Basis: []Evidence{{Ref: &v.WorkerResults[0], FileID: "worker-raw"}}}}
+				}
+				if name == "m4-reframe-stale-inspection" && deliveries >= 4 {
+					v.WikiTask, l.Reframe = nil, nil
+					workers(fmt.Sprintf("inspection-%d", deliveries))
+					v.WorkerTasks[0].Question = "Read remaining anonymous job status without resubmitting work"
+					v.RecoveryChoices = []RecoveryChoice{{DeliveryID: d.ID, Action: "inspect", Reason: "Continue read-only inspection of the earlier unresolved wiki operation", Basis: slices.Clone(basis)}}
+				}
+				if name == "m4-reframe-completed-inspection" && deliveries >= 5 {
+					workers(fmt.Sprintf("later-%d", deliveries))
+					if deliveries == 7 {
+						v.RecoveryChoices = []RecoveryChoice{{DeliveryID: d.ID, Action: "inspect", Reason: "Inspect the earlier wiki operation again", Basis: slices.Clone(basis)}}
+					}
+				}
+			}
+			t.Logf("reframe recovery: deliveries=%d action=%s round=%d no_progress=%d reframe=%d/%d", deliveries, l.Action, l.Round, l.NoProgress, l.ReframeRound, l.ReframeStreak)
+		}
+		if name == "m4-wiki-timeout-partial-resume" {
+			switch len(v.Recovery.Deliveries) {
+			case 0:
+				wiki(false)
+			case 1:
+				workers("inspection")
+				v.RecoveryChoices = []RecoveryChoice{{DeliveryID: v.Recovery.Deliveries[0].ID, Action: "inspect", Reason: "Inspect unknown wiki job before continuing", Basis: slices.Clone(basis)}}
+			case 2:
+				d := v.Recovery.Deliveries[0]
+				var original publication[PlannerState]
+				if err := protocol.ReadJSON(d.Proposal.Path, &original); err != nil {
+					t.Fatal(err)
+				}
+				v.WikiTask, l.Action = original.Data.WikiTask, "wiki"
+				v.RecoveryChoices = []RecoveryChoice{{DeliveryID: d.ID, Action: "resume", Reason: "Inspection confirms wiki job completed; read the result without repeating remote work", Basis: []Evidence{{Ref: &v.WorkerResults[0], FileID: "worker-raw"}}}}
+			}
+		}
+		if strings.HasPrefix(name, "m4-support-") {
+			switch len(v.Recovery.Deliveries) {
+			case 0:
+				l.Action = "support"
+				v.SupportingWork = &SupportingWork{Kind: "resolve", Reason: "Complete supporting wiki prerequisites", Basis: slices.Clone(basis), Sources: []intakeWork{}}
+				if strings.HasPrefix(name, "m4-support-update-") {
+					v.SupportingWork.Kind = "update"
+				}
+			case 1:
+				d := v.Recovery.Deliveries[0]
+				if d.Support == nil || len(d.Failures) != 1 || len(d.Results) != 0 || (d.Support.Intake != nil) != strings.HasPrefix(name, "m4-support-update-") || d.Support.Proposal != d.Proposal || d.Support.Context != v.Context {
+					t.Fatal("support failure lost original proposal/phase or reacquired intake")
+				}
+				workers("inspection")
+				v.RecoveryChoices = []RecoveryChoice{{DeliveryID: d.ID, Action: "inspect", Reason: "Remote status is unknown; inspect read-only evidence before continuation", Basis: slices.Clone(basis)}}
+			case 2:
+				d := v.Recovery.Deliveries[0]
+				if len(v.WorkerResults) != 1 {
+					t.Fatal("resume lacks a committed inspection result")
+				}
+				l.Action = "support"
+				work := d.Support.Work
+				v.SupportingWork = &work
+				v.RecoveryChoices = []RecoveryChoice{{DeliveryID: d.ID, Action: "resume", Reason: "Inspection confirms the remote read completed and continuation will not resubmit it", Basis: []Evidence{{Ref: &v.WorkerResults[0], FileID: "worker-raw"}}}}
+			}
+		}
+		if strings.HasPrefix(name, "m4-support-unsafe-") && len(v.Recovery.Deliveries) == 2 {
+			switch name {
+			case "m4-support-unsafe-no-basis":
+				v.RecoveryChoices[0].Basis = []Evidence{}
+			case "m4-support-unsafe-no-reason":
+				v.RecoveryChoices[0].Reason = " "
+			case "m4-support-unsafe-owner":
+				bad := *v.RecoveryChoices[0].Basis[0].Ref
+				bad.SHA256 = strings.Repeat("0", 64)
+				v.RecoveryChoices[0].Basis[0].Ref = &bad
+			}
+		}
+		if strings.HasPrefix(name, "m4-delivery-") && len(v.Recovery.Deliveries) == 1 {
+			d := &v.Recovery.Deliveries[0]
+			switch name {
+			case "m4-delivery-id":
+				d.ID = "invented-delivery-id"
+			case "m4-delivery-proposal":
+				d.Proposal = d.Context
+			case "m4-delivery-context":
+				d.Context = d.Proposal
+			case "m4-delivery-results":
+				d.Results = []contract.Ref{}
+			}
+		}
+		if (name == "m4-allfail-blind-new-id" || name == "m4-allfail-caller-bool") && len(v.Recovery.Deliveries) == 1 {
+			v.RecoveryChoices = []RecoveryChoice{}
+		}
+		switch name {
+		case "m4-policy-echo":
+			v.Recovery.Policy.PlannerRetries++
+		case "m4-drop-recovery":
+			v.Recovery = nil
+		case "m4-cycle-echo":
+			v.Recovery.DispatchCycle++
 		}
 	}
 	if m3 {
@@ -1819,11 +2064,15 @@ func m2WikiFixture(t *testing.T, name string, req contract.Request) (WikiSearch,
 	if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(task.Binding.Inputs, req.Inputs) || !slices.Contains(req.Inputs, task.Binding.Proposal) || !slices.Contains(req.Inputs, task.Binding.Context) || task.Requirements != investigationWikiRequirements {
+	requirements := investigationWikiRequirements
+	if strings.HasPrefix(name, "m4-") {
+		requirements += "\nRead the exact proposal recovery metadata and choices. Do not repeat a failed search or submit remote work unless the Agent has supplied an evidence-backed safe resume or nonoverlapping redirect. Preserve the original failed proposal/task and diagnostic binding in recovery metadata; this attempt has its own binding."
+	}
+	if !slices.Equal(task.Binding.Inputs, req.Inputs) || !slices.Contains(req.Inputs, task.Binding.Proposal) || !slices.Contains(req.Inputs, task.Binding.Context) || task.Requirements != requirements {
 		t.Fatal("wiki task lost exact binding/requirements")
 	}
 	mode := "complete"
-	if strings.Contains(name, "partial") {
+	if strings.Contains(name, "partial") || strings.HasPrefix(name, "m4-reframe-") {
 		mode = "wiki-partial"
 	}
 	v, files := wikiFixture(mode, task.Intake)
@@ -1888,10 +2137,30 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 		}
 		b.proved = true
 	}
+	if name == "m4-mixed-three-failed" {
+		for _, id := range []string{"w1", "w3", "w2"} {
+			ack := "hold"
+			if id == "w2" {
+				ack = "compaction-error"
+			}
+			if err := b.held[id].Reply(protocol.Control{Type: ack}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		b.faulted, b.order = true, []string{"w2"}
+		return
+	}
 	if b.waiting != "" {
 		a := snapshot.Attempts[b.attempts[b.waiting]]
-		if a.State != engine.Succeeded || a.Output == nil || snapshot.Sessions[a.HandleID].State != "Closed" {
+		if a.State != engine.Succeeded || a.Output == nil || snapshot.Sessions[a.HandleID].State != "Closed" && !strings.HasPrefix(name, "m4-mixed-committed-close-") {
 			return
+		}
+		if name == "m4-mixed-committed-close-cleanup-fatal" {
+			sid := snapshot.Sessions[a.HandleID].Identity.SessionID
+			path := filepath.Join(bridge, sid+".json")
+			if err := os.Rename(path, path+".recovering"); err != nil {
+				t.Fatal(err)
+			}
 		}
 		b.waiting = ""
 	}
@@ -1901,22 +2170,28 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 	id := []string{"w3", "w2", "w1"}[len(b.order)]
 	ack := "settle"
 	if id == "w2" {
-		if strings.HasPrefix(name, "m2-branch-") && name != "m2-branch-binding" {
+		if (strings.HasPrefix(name, "m2-branch-") && name != "m2-branch-binding") || strings.HasPrefix(name, "m4-mixed-") {
 			b.faulted = true
 			if name != "m2-branch-abort-unacknowledged" {
 				// A streaming sibling must leave the fixture's prompt-ack
 				// barrier so the real RPC abort can be acknowledged.
-				if err := b.held["w1"].Reply(protocol.Control{Type: "hold"}); err != nil {
+				control := "hold"
+				if name == "m4-mixed-storage-fatal" || name == "m4-mixed-journal-fatal" || name == "m4-mixed-user-cancel" || name == "m4-mixed-wait-fatal" {
+					control = "hold-abort"
+				}
+				if err := b.held["w1"].Reply(protocol.Control{Type: control}); err != nil {
 					t.Fatal(err)
 				}
 			}
 		}
 		switch name {
-		case "m2-branch-provider-failure", "m2-branch-abort-unacknowledged":
+		case "m4-mixed-compaction", "m4-mixed-committed-close-cancel", "m4-mixed-committed-close-cleanup-fatal", "m4-mixed-committed-close-storage-fatal", "m4-mixed-committed-close-journal-fatal", "m4-mixed-binding-fatal", "m4-mixed-storage-fatal", "m4-mixed-journal-fatal", "m4-mixed-user-cancel", "m4-mixed-wait-fatal":
+			ack = "compaction-error"
+		case "m2-branch-provider-failure", "m2-branch-abort-unacknowledged", "m4-mixed-provider-fatal":
 			ack = "provider-error"
-		case "m2-branch-cancel", "m2-branch-timeout":
+		case "m2-branch-cancel", "m2-branch-timeout", "m4-mixed-timeout":
 			ack = "hold"
-		case "m2-branch-cleanup-failure":
+		case "m2-branch-cleanup-failure", "m4-mixed-cleanup-fatal":
 			sid := snapshot.Sessions[snapshot.Attempts[b.attempts[id]].HandleID].Identity.SessionID
 			path := filepath.Join(bridge, sid+".json")
 			if err := os.Rename(path, path+".recovering"); err != nil {
@@ -1937,6 +2212,107 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models sliceModels, input contract.Ref, name string) (contract.Ref, error) {
 	t.Helper()
 	plannerModel := runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}
+	if strings.HasPrefix(name, "m4-mixed-committed-close-") {
+		p, err := startPlanner(ctx, r, scope, plannerModel, input)
+		if err != nil {
+			return contract.Ref{}, err
+		}
+		p.adaptive = true
+		p.recovery = &PlannerRecovery{Policy: RecoveryPolicy{PlannerRetries: 1}, Deliveries: []RecoveryDelivery{}, PlannerFailures: []RecoveryFailure{}}
+		p.identity, err = r.SessionIdentity(ctx, p.handle)
+		if err != nil {
+			return contract.Ref{}, err
+		}
+		if _, err = p.planningStep(ctx); err != nil {
+			return contract.Ref{}, err
+		}
+		prepared := make([]preparedWorker, 3)
+		branches := make([]engine.Branch, 3)
+		for i, id := range []string{"w1", "w2", "w3"} {
+			prepared[i], err = prepareWorker(ctx, r, scope, input, *p.last, nil, id)
+			if err != nil {
+				return contract.Ref{}, err
+			}
+			work := prepared[i]
+			work.recovery = true
+			branches[i] = engine.Branch{Name: id, Do: func(ctx context.Context, s *engine.Scope) (engine.Result, error) {
+				if work.request.Task.ID != "w3" {
+					ref, err := runWorker(ctx, r, s, models, work)
+					return engine.Result{Outputs: map[string]contract.Ref{"worker": ref}}, err
+				}
+				// Exercise the real commit -> cancelled close boundary without a
+				// production hook. This is primitive/consumer integration, not a
+				// deterministic reproduction inside taskStepRecovery itself.
+				model := runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: models.FetchThinking}
+				h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + work.request.Stage, CWD: filepath.Join(r.Dir(), "triage-work"), Model: model})
+				if err != nil {
+					return engine.Result{}, err
+				}
+				identity, err := r.SessionIdentity(ctx, h)
+				if err != nil {
+					return engine.Result{}, err
+				}
+				out, err := s.Step(ctx, engine.StepSpec{Key: work.key, Session: h, Prompt: string(testJSON(work.request)), Inputs: work.inputs, Output: contract.Spec{SchemaID: WorkerSchema}})
+				if err != nil {
+					return engine.Result{}, err
+				}
+				<-ctx.Done()
+				var cause *engine.Failure
+				if !errors.As(context.Cause(ctx), &cause) || cause.Origin != engine.OriginFailFastSibling || r.Snapshot().Sessions[identity.HandleID].State != "Idle" {
+					return engine.Result{}, fmt.Errorf("fixture missed committed-before-close sibling cancellation")
+				}
+				ref, err := closeTaskStep(ctx, r, h, identity, work.request.Stage, out, true)
+				if err == nil || ref != out.Output || r.Snapshot().Sessions[identity.HandleID].State != "Idle" {
+					return engine.Result{}, fmt.Errorf("cancelled close changed committed output or ran cleanup")
+				}
+				return engine.Result{Outputs: map[string]contract.Ref{"worker": ref}}, err
+			}}
+		}
+		joined, groupErr := r.Root().Parallel(ctx, "committed-close-boundary", engine.FailFast, branches)
+		ref := joined[2].Result.Outputs["worker"]
+		attempt := r.Snapshot().Attempts[ref.AttemptID]
+		if ref == (contract.Ref{}) || attempt.State != engine.Succeeded || attempt.Output == nil || *attempt.Output != ref {
+			return contract.Ref{}, fmt.Errorf("fixture lost the real succeeded sibling: %w", groupErr)
+		}
+		faultPath := ""
+		switch name {
+		case "m4-mixed-committed-close-storage-fatal":
+			faultPath = filepath.Join(r.Dir(), "run.json")
+		case "m4-mixed-committed-close-journal-fatal":
+			faultPath = filepath.Join(r.Dir(), "events.jsonl")
+		}
+		if faultPath != "" {
+			if err := os.Rename(faultPath, faultPath+".recovering"); err != nil {
+				return contract.Ref{}, err
+			}
+			if err := os.Mkdir(faultPath, 0700); err != nil {
+				return contract.Ref{}, err
+			}
+		}
+		if _, err := p.receiveWorkers(ctx, prepared, joined, groupErr); err != nil {
+			if len(p.workerResults) != 0 || len(p.recovery.Deliveries) != 0 {
+				t.Error("fatal committed sibling was delivered to Planner")
+			}
+			return contract.Ref{}, err
+		}
+		if strings.HasSuffix(name, "-fatal") {
+			return contract.Ref{}, fmt.Errorf("committed sibling swallowed cleanup persistence failure")
+		}
+		if r.Snapshot().Sessions[attempt.HandleID].State != "Closed" {
+			return contract.Ref{}, fmt.Errorf("committed sibling accepted before parent-context strict cleanup")
+		}
+		return p.adapt(ctx, models)
+	}
+	if strings.HasPrefix(name, "m4-") {
+		if name == "m4-nil-recovery-timeout" {
+			return executeInvestigation(ctx, r, scope, plannerModel, models, input, nil, nil)
+		}
+		var capacity *PlannerCapacityPolicy
+		if name == "m4-capacity-fresh-worker-timeout" || name == "m4-allfail-reframe-checkpoint" || strings.HasPrefix(name, "m4-reframe-") {
+			capacity = &PlannerCapacityPolicy{HandoffPercent: 80}
+		}
+		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity, &RecoveryPolicy{PlannerRetries: 1})
+	}
 	m3 := strings.HasPrefix(name, "m3-")
 	capacity := &PlannerCapacityPolicy{HandoffPercent: 80}
 	if strings.HasPrefix(name, "m3-policy-invalid-") {
@@ -1952,13 +2328,13 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 		case "infinite":
 			capacity.HandoffPercent = math.Inf(1)
 		}
-		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity)
+		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity, nil)
 	}
 	if slices.Contains([]string{"m3-cycle-six", "m3-capacity-below", "m3-capacity-zero", "m3-capacity-at", "m3-capacity-at-plan", "m3-capacity-above", "m3-unknown", "m3-unknown-null", "m3-unknown-missing", "m3-unknown-tokens", "m3-plan-zero", "m3-no-ready-zero", "m3-support-no-sample", "m3-yield-no-sample"}, name) {
-		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity)
+		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity, nil)
 	}
 	if name == "m2-parallel-batches-yield" || name == "m2-no-ready-feedback" || name == "m2-wiki-support" {
-		return executeInvestigation(ctx, r, scope, plannerModel, models, input, nil)
+		return executeInvestigation(ctx, r, scope, plannerModel, models, input, nil, nil)
 	}
 	p, err := startPlanner(ctx, r, scope, plannerModel, input)
 	if err != nil {
@@ -2146,7 +2522,11 @@ func m2AssertWikiOwners(t *testing.T, inputs []contract.Ref) {
 
 func m2AssertWorkerInputs(t *testing.T, r *engine.Run, req contract.Request, request workerRequest, original ContextResult, name string) {
 	t.Helper()
-	if request.Requirements != workerRequirements || (!strings.HasPrefix(name, "m3-") && request.Context != original.Context) || !slices.Contains(req.Inputs, request.Proposal) || !slices.Contains(req.Inputs, request.Context) {
+	requirements := workerRequirements
+	if strings.HasPrefix(name, "m4-support-") || name == "m4-wiki-timeout-partial-resume" || strings.HasPrefix(name, "m4-reframe-") && strings.HasPrefix(request.Task.ID, "inspection") {
+		requirements += "\nRecovery inspection only: inspect authorized read-only status/evidence for the uncertain remote work in the exact proposal recovery metadata. Do not create, resubmit or restart that work. Record job identity, actual status, limitations and evidence-backed safety assessment."
+	}
+	if request.Requirements != requirements || (!strings.HasPrefix(name, "m3-") && request.Context != original.Context) || !slices.Contains(req.Inputs, request.Proposal) || !slices.Contains(req.Inputs, request.Context) {
 		t.Fatal("M2 worker changed original context or lost explicit proposal/requirements")
 	}
 	var state publication[PlannerState]
@@ -2275,6 +2655,490 @@ func m2StoreSchema(t *testing.T, store *contract.Store, base validationInputs, n
 
 func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref contract.Ref, original ContextResult, expected PlannerState, barrier m2Barrier, prompts, hellos int) {
 	t.Helper()
+	if strings.HasPrefix(tc.name, "m4-") {
+		if report.Final != nil || len(report.Snapshot.Attempts) != prompts || len(report.Snapshot.Sessions) != hellos || len(report.Cleanup) != hellos {
+			t.Fatal("M4 lost actual attempt/session accounting or invented a final report")
+		}
+		persistenceFault := tc.name == "m4-planner-storage-fatal" || tc.name == "m4-planner-journal-fatal" || tc.name == "m4-mixed-storage-fatal" || tc.name == "m4-mixed-journal-fatal" || tc.name == "m4-mixed-committed-close-storage-fatal" || tc.name == "m4-mixed-committed-close-journal-fatal"
+		plannerSessions, failedAttempts, retries := 0, 0, 0
+		for _, s := range report.Snapshot.Sessions {
+			if s.State != "Closed" && !persistenceFault || s.Identity.SessionID == "" {
+				t.Fatal("M4 returned before owned session cleanup")
+			}
+			if s.Role.Name == "triage-planner" {
+				plannerSessions++
+				if s.Role.Model != (runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}) {
+					t.Fatal("M4 changed Planner model")
+				}
+			}
+		}
+		for _, c := range report.Cleanup {
+			owner, ok := report.Snapshot.Sessions[c.Identity.HandleID]
+			if !ok || !sameIdentity(c.Identity, owner.Identity) || !c.WaitCompleted || !c.ProcessExited || !c.ConfirmsLocalClose(owner.Identity.SessionID) && tc.name != "m4-mixed-cleanup-fatal" && tc.name != "m4-mixed-wait-fatal" && tc.name != "m4-mixed-committed-close-cleanup-fatal" {
+				t.Fatalf("M4 cleanup differs from independently recorded owner: %+v", c)
+			}
+		}
+		for _, a := range report.Snapshot.Attempts {
+			if a.Failure != nil {
+				failedAttempts++
+				if a.Output != nil {
+					t.Fatal("M4 promoted a failed candidate to committed output")
+				}
+			}
+		}
+		for _, retry := range report.Snapshot.Retries {
+			if retry.Active && !persistenceFault || retry.MaxRetries != 1 {
+				t.Fatal("M4 retry activation escaped finite policy or remained active")
+			}
+			retries += retry.RetryCount
+		}
+		wantPlanners, wantRetries := 1, 0
+		if tc.name == "m4-planner-first-timeout" || tc.name == "m4-planner-retry-exhausted" || tc.name == "m4-planner-first-compaction" || strings.HasPrefix(tc.name, "m4-meta-") || strings.HasPrefix(tc.name, "m4-planner-later-") || tc.name == "m4-planner-parent-deadline" || tc.name == "m4-planner-run-limit" || persistenceFault {
+			wantPlanners, wantRetries = 2, 1
+		}
+		if strings.HasPrefix(tc.name, "m4-mixed-") {
+			wantPlanners, wantRetries = 1, 0
+		}
+		if tc.name == "m4-capacity-fresh-worker-timeout" || strings.HasPrefix(tc.name, "m4-reframe-") {
+			wantPlanners = 2
+		}
+		if strings.HasPrefix(tc.name, "m4-support-") {
+			wantPlanners = 3
+			if tc.failure {
+				wantPlanners = 2
+			}
+		}
+		if plannerSessions != wantPlanners || retries != wantRetries {
+			t.Fatalf("M4 Planner sessions/retries=%d/%d, want %d/%d", plannerSessions, retries, wantPlanners, wantRetries)
+		}
+		if tc.failure {
+			if ref != (contract.Ref{}) || report.Failure == nil {
+				t.Fatal("M4 failure returned a successful planning state")
+			}
+			var failure *engine.Failure
+			if !errors.As(report.Failure, &failure) {
+				t.Fatalf("M4 lost typed root failure: %v", report.Failure)
+			}
+			deadlineAttempts := map[string]bool{}
+			for id, a := range report.Snapshot.Attempts {
+				if a.Failure != nil && a.Failure.Code == engine.TimedOut && a.Failure.Origin == engine.OriginAttemptDeadline {
+					deadlineAttempts[id] = true
+				}
+			}
+			if (tc.name == "m4-planner-later-user-cancel" || tc.name == "m4-planner-parent-deadline" || tc.name == "m4-planner-run-limit" || persistenceFault && strings.HasPrefix(tc.name, "m4-planner-")) && len(deadlineAttempts) != 1 {
+				t.Fatal("locked root outcome discarded the original failed attempt/accounting")
+			}
+			switch tc.name {
+			case "m4-mixed-committed-close-cleanup-fatal", "m4-mixed-committed-close-storage-fatal", "m4-mixed-committed-close-journal-fatal":
+				success := report.Snapshot.Attempts[barrier.attempts["w3"]]
+				primary := report.Snapshot.Attempts[barrier.attempts["w2"]]
+				want := engine.CleanupFailed
+				if strings.Contains(tc.name, "storage") {
+					want = engine.StorageFailed
+				}
+				if strings.Contains(tc.name, "journal") {
+					want = engine.JournalFailed
+				}
+				if failure.Code != want || success.State != engine.Succeeded || success.Output == nil || success.Failure != nil || primary.Failure == nil || primary.Failure.Code != engine.CompactionFailed || !barrier.proved {
+					t.Fatalf("committed sibling failure lost fatal classification or actual success/primary: %v", report.Failure)
+				}
+			case "m4-mixed-storage-fatal", "m4-mixed-journal-fatal", "m4-mixed-user-cancel", "m4-mixed-wait-fatal":
+				primary := report.Snapshot.Attempts[barrier.attempts["w2"]]
+				if primary.Failure == nil || primary.Failure.Code != engine.CompactionFailed || !barrier.proved {
+					t.Fatal("mixed fatal lost recoverable primary")
+				}
+				want := engine.StorageFailed
+				if tc.name == "m4-mixed-journal-fatal" {
+					want = engine.JournalFailed
+				}
+				if tc.name == "m4-mixed-user-cancel" {
+					want = engine.Cancelled
+				}
+				if tc.name != "m4-mixed-wait-fatal" && failure.Code != want {
+					t.Fatalf("mixed fatal classified as %s, want %s: %v", failure.Code, want, report.Failure)
+				}
+				if tc.name == "m4-mixed-user-cancel" && failure.Origin != engine.OriginControllerUser {
+					t.Fatal("sibling user cancellation changed to recoverable FailFastSibling")
+				}
+				if tc.name == "m4-mixed-wait-fatal" {
+					sibling := report.Snapshot.Attempts[barrier.attempts["w1"]]
+					found := false
+					for _, c := range report.Cleanup {
+						if c.Identity.HandleID == sibling.HandleID {
+							found = c.WaitError == "exit status 3" && c.WaitCompleted && c.ProcessExited && !c.ConfirmsLocalClose(c.Identity.SessionID)
+						}
+					}
+					failureHasWait := false
+					var walk func(error)
+					walk = func(err error) {
+						if f, ok := err.(*engine.Failure); ok && f.Cleanup != nil && f.Cleanup.Identity.HandleID == sibling.HandleID && f.Cleanup.WaitError == "exit status 3" {
+							failureHasWait = true
+						}
+						switch e := err.(type) {
+						case interface{ Unwrap() []error }:
+							for _, child := range e.Unwrap() {
+								walk(child)
+							}
+						case interface{ Unwrap() error }:
+							walk(e.Unwrap())
+						}
+					}
+					walk(report.Failure)
+					if !found || !failureHasWait {
+						t.Fatalf("nonzero sibling exit lost strict-close failure: %v; report=%v chain=%v", report.Failure, found, failureHasWait)
+					}
+				}
+			case "m4-reframe-no-inspection", "m4-reframe-stale-inspection", "m4-reframe-completed-inspection":
+				want := "two rounds without reported hypothesis progress require reframe"
+				if tc.name == "m4-reframe-completed-inspection" {
+					want = "recovery choice requires unresolved delivery, reason and evidence basis"
+				}
+				if failure.Code != engine.WorkflowFailed || len(deadlineAttempts) != 3 || !strings.Contains(report.Failure.Error(), want) {
+					t.Fatalf("old reframe or ordinary workers bypassed mandatory reframe: %v", report.Failure)
+				}
+			case "m4-allfail-blind-new-id":
+				if !strings.Contains(report.Failure.Error(), "unresolved remote work requires explicit safe continuation or inspection") {
+					t.Fatalf("new task ID bypassed unknown remote safety: %v", report.Failure)
+				}
+			case "m4-allfail-caller-bool":
+				if failure.Code != engine.ContractInvalid {
+					t.Fatalf("caller boolean bypassed safety contract: %v", report.Failure)
+				}
+			case "m4-delivery-id":
+				if !strings.Contains(report.Failure.Error(), "planner recovery differs from supplied delivery metadata") {
+					t.Fatalf("invented delivery ID accepted: %v", report.Failure)
+				}
+			case "m4-delivery-proposal", "m4-delivery-context":
+				if !strings.Contains(report.Failure.Error(), "delivery proposal/context mismatch") {
+					t.Fatalf("delivery owner mismatch accepted: %v", report.Failure)
+				}
+			case "m4-delivery-results":
+				if !strings.Contains(report.Failure.Error(), "worker delivery differs from accepted batch") {
+					t.Fatalf("dropped delivery results accepted: %v", report.Failure)
+				}
+			case "m4-nil-recovery-timeout":
+				if failure.Code != engine.TimedOut || failure.Origin != engine.OriginAttemptDeadline || len(report.Snapshot.Retries) != 0 {
+					t.Fatalf("nil policy changed original timeout classification: %v", report.Failure)
+				}
+			case "m4-planner-later-user-cancel":
+				if failure.Code != engine.Cancelled || failure.Origin != engine.OriginControllerUser {
+					t.Fatalf("old timeout downgraded later user cancellation: %v", report.Failure)
+				}
+			case "m4-planner-parent-deadline":
+				if failure.Code != engine.TimedOut || failure.Origin != engine.OriginRunDeadline {
+					t.Fatalf("old attempt timeout downgraded parent deadline: %v", report.Failure)
+				}
+			case "m4-planner-run-limit":
+				if failure.Code != engine.LimitExceeded || failure.LimitScope != "run" {
+					t.Fatalf("recovery swallowed run cap or original timeout: %v", report.Failure)
+				}
+			case "m4-planner-storage-fatal", "m4-planner-journal-fatal":
+				code := engine.StorageFailed
+				if tc.name == "m4-planner-journal-fatal" {
+					code = engine.JournalFailed
+				}
+				if failure.Code != code || report.Snapshot.StatePersisted {
+					t.Fatalf("recovery swallowed fatal persistence boundary or original cause: %v", report.Failure)
+				}
+			case "m4-mixed-cleanup-fatal":
+				if len(report.CleanupErrors) == 0 || !strings.Contains(report.Failure.Error(), "cleanup") {
+					t.Fatalf("M4 swallowed branch cleanup failure: %v", report.Failure)
+				}
+			case "m4-meta-identity", "m4-meta-attempt", "m4-meta-cleanup":
+				if !strings.Contains(report.Failure.Error(), "recovery failure differs from owned failed attempt/cleanup") {
+					t.Fatalf("wrong identity rejection: %v", report.Failure)
+				}
+			case "m4-meta-prefix":
+				if !strings.Contains(report.Failure.Error(), "recovery history prefix changed") {
+					t.Fatalf("wrong history rejection: %v", report.Failure)
+				}
+			case "m4-meta-diagnostic":
+				if !strings.Contains(report.Failure.Error(), "planner recovery differs from supplied delivery metadata") {
+					t.Fatalf("wrong metadata echo rejection: %v", report.Failure)
+				}
+			case "m4-support-unsafe-no-basis":
+				if failure.Code != engine.ContractInvalid {
+					t.Fatalf("empty safety basis bypassed schema minItems: %v", report.Failure)
+				}
+			case "m4-support-unsafe-no-reason":
+				if !strings.Contains(report.Failure.Error(), "recovery choice requires unresolved delivery, reason and evidence basis") {
+					t.Fatalf("wrong clearance rejection: %v", report.Failure)
+				}
+			case "m4-support-unsafe-owner":
+				if !strings.Contains(report.Failure.Error(), "investigation basis must name an exact input owner/file") {
+					t.Fatalf("wrong clearance owner rejection: %v", report.Failure)
+				}
+			case "m4-mixed-binding-fatal":
+				if failure.Code != engine.WorkflowFailed || !strings.Contains(report.Failure.Error(), "worker result acceptance") || !strings.Contains(report.Failure.Error(), "fixture compaction failed") {
+					t.Fatalf("M4 skipped sibling acceptance or lost original compaction chain: %v", report.Failure)
+				}
+			case "m4-planner-retry-exhausted":
+				causes := map[string]bool{}
+				var visit func(error)
+				visit = func(err error) {
+					if f, ok := err.(*engine.Failure); ok && f.Code == engine.TimedOut && f.Origin == engine.OriginAttemptDeadline && f.AttemptID != "" {
+						causes[f.AttemptID] = true
+					}
+					switch e := err.(type) {
+					case interface{ Unwrap() []error }:
+						for _, child := range e.Unwrap() {
+							visit(child)
+						}
+					case interface{ Unwrap() error }:
+						visit(e.Unwrap())
+					}
+				}
+				visit(report.Failure)
+				if failure.Code != engine.RetryExhausted || failedAttempts != 2 || !reflect.DeepEqual(causes, deadlineAttempts) || len(causes) != 2 {
+					t.Fatalf("M4 exhausted retry lost original deadline chain/accounting: causes=%v attempts=%v error=%v", causes, deadlineAttempts, report.Failure)
+				}
+			case "m4-planner-unknown-provider", "m4-mixed-provider-fatal":
+				if failure.Code != engine.ProviderFailed || failure.Origin != engine.OriginProvider || failedAttempts < 1 {
+					t.Fatalf("M4 invented recoverable overflow: %v", report.Failure)
+				}
+			case "m4-planner-user-cancel":
+				if failure.Code != engine.Cancelled || failure.Origin != engine.OriginControllerUser {
+					t.Fatalf("M4 swallowed user cancellation: %v", report.Failure)
+				}
+			case "m4-policy-echo", "m4-drop-recovery":
+				if !strings.Contains(report.Failure.Error(), "planner recovery differs from supplied delivery metadata") {
+					t.Fatalf("wrong recovery echo rejection: %v", report.Failure)
+				}
+			case "m4-cycle-echo":
+				if !strings.Contains(report.Failure.Error(), "recovery dispatch cycle differs from delivered history") {
+					t.Fatalf("wrong recovery cycle rejection: %v", report.Failure)
+				}
+			}
+			return
+		}
+		var accepted publication[PlannerState]
+		if err := protocol.ReadJSON(ref.Path, &accepted); err != nil || !reflect.DeepEqual(accepted.Data.Recovery, expected.Recovery) {
+			t.Fatal("M4 final state lost exact recovery delivery", err)
+		}
+		v := accepted.Data
+		if strings.HasPrefix(tc.name, "m4-allfail-") {
+			if v.Context != original.Context || len(v.WorkerResults) != 0 || v.Recovery == nil || len(v.Recovery.PlannerFailures) != 0 || len(v.Recovery.Deliveries) < 2 || v.Ledger.Round != 2 || failedAttempts != 2 {
+				t.Fatal("all-failed rounds fabricated results or changed context/accounting")
+			}
+			for _, d := range v.Recovery.Deliveries[:2] {
+				if d.Kind != "workers" || len(d.Results) != 0 || len(d.Failures) != 1 || d.Failures[0].Code != engine.TimedOut || d.Failures[0].Origin != engine.OriginAttemptDeadline {
+					t.Fatal("all-failed round lost typed delivery")
+				}
+			}
+			if tc.name == "m4-allfail-reframe-checkpoint" {
+				if len(v.Recovery.Deliveries) != 3 || v.Recovery.DispatchCycle != 3 || v.Recovery.Deliveries[2].Kind != "wiki" || len(v.WikiResults) != 1 || v.Ledger.NoProgress != 2 || v.Ledger.ReframeRound != 2 || v.Ledger.ReframeStreak != 2 || v.Checkpoint == nil || !v.Checkpoint.FullCheckpoint || v.Checkpoint.DispatchCycle != 3 || v.Checkpoint.CheckpointCycle != 3 || len(barrier.stats) != 3 {
+					t.Fatal("two explicit no-progress failed rounds did not reframe/checkpoint exactly once")
+				}
+				var proposal publication[PlannerState]
+				if err := protocol.ReadJSON(v.Recovery.Deliveries[2].Proposal.Path, &proposal); err != nil || proposal.Data.Ledger.Action != "reframe" || proposal.Data.Ledger.Reframe == nil || len(proposal.Data.Ledger.Changes) != 0 {
+					t.Fatal("reframe did not consume Agent's explicit no-progress declaration", err)
+				}
+			} else if len(v.Recovery.Deliveries) != 2 || v.Ledger.NoProgress != 0 || len(v.Ledger.Changes) != 1 || v.Hypotheses[0].Assessment != "Unverified; compare runtime evidence" {
+				t.Fatal("Controller substituted content comparison for Agent-reported progress")
+			}
+			return
+		}
+		if tc.name == "m4-reframe-timeout-inspection-resume" {
+			if v.Context != original.Context || v.Recovery == nil || len(v.Recovery.Deliveries) != 5 || v.Recovery.DispatchCycle != 5 || len(v.Recovery.PlannerFailures) != 0 || len(v.WorkerResults) != 1 || len(v.WikiResults) != 1 || failedAttempts != 3 || v.Ledger.Round != 3 || v.Ledger.NoProgress != 3 || v.Ledger.ReframeRound != 3 || v.Ledger.ReframeStreak != 3 || len(v.Ledger.Changes) != 0 || len(v.Ledger.ConsumedBatch) != 0 || v.Ledger.Action != "yield" {
+				t.Fatal("reframe timeout/inspection/resume lost actual rounds, boundary or failure accounting")
+			}
+			if v.Checkpoint == nil || v.Checkpoint.DispatchCycle != 5 || v.Checkpoint.CheckpointCycle != 3 || v.Checkpoint.FullCheckpoint || len(barrier.stats) != 5 {
+				t.Fatal("fresh reframe recovery reset checkpoint/dispatch accounting or repeated capacity sampling")
+			}
+			for _, d := range v.Recovery.Deliveries[:2] {
+				if d.Kind != "workers" || len(d.Results) != 0 || len(d.Failures) != 1 || d.Failures[0].Code != engine.TimedOut || d.Failures[0].Origin != engine.OriginAttemptDeadline {
+					t.Fatal("reframe did not follow two actual all-failed worker rounds")
+				}
+			}
+			failed, inspected, resumed := v.Recovery.Deliveries[2], v.Recovery.Deliveries[3], v.Recovery.Deliveries[4]
+			if inspected.Kind != "workers" || len(inspected.Results) != 1 || inspected.Results[0] != v.WorkerResults[0] || len(inspected.Failures) != 0 || resumed.Kind != "wiki" || len(resumed.Results) != 1 || resumed.Results[0] != v.WikiResults[0] || len(resumed.Failures) != 0 {
+				t.Fatal("read-only inspection and safe resume lost their exact delivered results")
+			}
+			var before, inspection, after publication[PlannerState]
+			if err := protocol.ReadJSON(failed.Proposal.Path, &before); err != nil {
+				t.Fatal(err)
+			}
+			if err := protocol.ReadJSON(inspected.Proposal.Path, &inspection); err != nil {
+				t.Fatal(err)
+			}
+			if err := protocol.ReadJSON(resumed.Proposal.Path, &after); err != nil {
+				t.Fatal(err)
+			}
+			if before.Data.Ledger.Action != "reframe" || before.Data.Ledger.Round != 2 || before.Data.Ledger.NoProgress != 2 || before.Data.Ledger.ReframeRound != 0 || before.Data.Ledger.ReframeStreak != 0 || !reflect.DeepEqual(before.Data.WikiTask, after.Data.WikiTask) || !reflect.DeepEqual(before.Data.Ledger.Reframe, after.Data.Ledger.Reframe) || after.Data.Ledger.Action != "reframe" {
+				t.Fatal("safe resume replaced the failed reframe task, terms, rationale or original ledger")
+			}
+			if len(inspection.Data.RecoveryChoices) != 1 || inspection.Data.RecoveryChoices[0].DeliveryID != failed.ID || inspection.Data.RecoveryChoices[0].Action != "inspect" || len(after.Data.RecoveryChoices) != 1 || after.Data.RecoveryChoices[0].DeliveryID != failed.ID || after.Data.RecoveryChoices[0].Action != "resume" || len(after.Data.RecoveryChoices[0].Basis) != 1 || after.Data.RecoveryChoices[0].Basis[0].Ref == nil || *after.Data.RecoveryChoices[0].Basis[0].Ref != v.WorkerResults[0] || after.Data.RecoveryChoices[0].Basis[0].FileID != "worker-raw" {
+				t.Fatal("safe resume lacks exact inspection evidence and failed-delivery authorization")
+			}
+			if report.Snapshot.Attempts[failed.Proposal.AttemptID].HandleID == report.Snapshot.Attempts[inspected.Proposal.AttemptID].HandleID {
+				t.Fatal("inspection Planner did not reconstruct the failed reframe across fresh handoff")
+			}
+			var wiki publication[WikiSearch]
+			if err := protocol.ReadJSON(v.WikiResults[0].Path, &wiki); err != nil || wiki.Data.Status != "partial" || wiki.Data.Task == nil || wiki.Data.Task.Proposal != resumed.Proposal || wiki.Data.Task.TaskID != before.Data.WikiTask.ID || wiki.Data.Intake != original.Intake || len(wiki.Data.Gaps) == 0 {
+				t.Fatal("resumed reframe lost partial status, actual owner or retained intake", err)
+			}
+			for _, gap := range wiki.Data.Gaps {
+				if !slices.Contains(v.Gaps, gap) {
+					t.Fatal("resumed reframe hid incomplete search gaps")
+				}
+			}
+			return
+		}
+		if tc.name == "m4-wiki-timeout-partial-resume" {
+			if v.Context != original.Context || len(v.Recovery.Deliveries) != 3 || v.Recovery.DispatchCycle != 3 || len(v.WikiResults) != 1 || len(v.WorkerResults) != 1 || v.Ledger.Round != 1 || failedAttempts != 1 {
+				t.Fatal("wiki safe resume changed context or invented a round/result")
+			}
+			failed, resumed := v.Recovery.Deliveries[0], v.Recovery.Deliveries[2]
+			if failed.Kind != "wiki" || len(failed.Results) != 0 || len(failed.Failures) != 1 || failed.Failures[0].Code != engine.TimedOut || resumed.Kind != "wiki" || len(resumed.Failures) != 0 || len(resumed.Results) != 1 || resumed.Results[0] != v.WikiResults[0] {
+				t.Fatal("partial wiki search was confused with execution failure")
+			}
+			var before, after publication[PlannerState]
+			var wiki publication[WikiSearch]
+			if err := protocol.ReadJSON(failed.Proposal.Path, &before); err != nil {
+				t.Fatal(err)
+			}
+			if err := protocol.ReadJSON(resumed.Proposal.Path, &after); err != nil || !reflect.DeepEqual(before.Data.WikiTask, after.Data.WikiTask) {
+				t.Fatal("wiki resume changed original task/terms/history", err)
+			}
+			if err := protocol.ReadJSON(v.WikiResults[0].Path, &wiki); err != nil || wiki.Data.Status != "partial" || wiki.Data.Task.Proposal != resumed.Proposal || wiki.Data.Intake != original.Intake || len(wiki.Data.Gaps) == 0 {
+				t.Fatal("wiki partial lost its actual owner and gap", err)
+			}
+			for _, gap := range wiki.Data.Gaps {
+				if !slices.Contains(v.Gaps, gap) {
+					t.Fatal("Planner dropped partial wiki gap")
+				}
+			}
+			return
+		}
+		if strings.HasPrefix(tc.name, "m4-support-") {
+			if v.Recovery == nil || len(v.Recovery.Deliveries) != 3 || v.Recovery.DispatchCycle != 3 || v.Ledger.Round != 1 || v.Ledger.NoProgress != 1 || failedAttempts != 1 || len(v.WorkerResults) != 1 {
+				t.Fatal("support failure/inspection/resume lost real dispatch/round accounting")
+			}
+			failed, inspected, resumed := v.Recovery.Deliveries[0], v.Recovery.Deliveries[1], v.Recovery.Deliveries[2]
+			if failed.Kind != "support" || failed.Support == nil || len(failed.Failures) != 1 || len(failed.Results) != 0 || (failed.Support.Intake != nil) != strings.HasPrefix(tc.name, "m4-support-update-") || failed.Context != original.Context || failed.Support.Proposal != failed.Proposal || failed.Support.Context != original.Context {
+				t.Fatal("partial support replaced context or lost old intake/original proposal")
+			}
+			phase := "wiki-resolution"
+			if strings.Contains(tc.name, "context-timeout") {
+				phase = "context-resolution"
+			}
+			if strings.HasPrefix(tc.name, "m4-support-update-") {
+				phase = strings.Replace(phase, "resolution", "revision", 1)
+			}
+			f := failed.Failures[0]
+			a := report.Snapshot.Attempts[f.AttemptID]
+			owner := report.Snapshot.Sessions[a.HandleID]
+			if failed.Support.FailedPhase != phase || f.Stage != phase || f.Code != engine.TimedOut || f.Origin != engine.OriginAttemptDeadline || a.Output != nil || a.Failure == nil || !sameIdentity(f.Identity, owner.Identity) || f.Cleanup == nil || !f.Cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
+				t.Fatal("support phase failure differs from actual timeout/cleanup")
+			}
+			if (failed.Support.Wiki != nil) != (strings.HasPrefix(phase, "context-")) {
+				t.Fatal("support lost or invented an accepted wiki phase")
+			}
+			if inspected.Kind != "workers" || len(inspected.Results) != 1 || inspected.Results[0] != v.WorkerResults[0] || len(inspected.Failures) != 0 || resumed.Kind != "support" || len(resumed.Results) != 1 || resumed.Results[0] != v.Context || len(resumed.Failures) != 0 || resumed.Support == nil || resumed.Support.Proposal != failed.Proposal || resumed.Support.Authorization == nil || *resumed.Support.Authorization != resumed.Proposal {
+				t.Fatal("safe support resume did not retain original task plus accepted authorization")
+			}
+			if strings.HasPrefix(phase, "context-") && (resumed.Support.Wiki == nil || *resumed.Support.Wiki != *failed.Support.Wiki) {
+				t.Fatal("resume repeated the already accepted wiki phase")
+			}
+			var updated publication[Context]
+			wantIntake := original.Intake
+			if strings.HasPrefix(tc.name, "m4-support-update-") {
+				if failed.Support.Intake == nil || resumed.Support.Intake == nil || *failed.Support.Intake != *resumed.Support.Intake || *failed.Support.Intake == original.Intake {
+					t.Fatal("update resume lost accepted intake or reacquired it")
+				}
+				wantIntake = *failed.Support.Intake
+			}
+			if err := protocol.ReadJSON(v.Context.Path, &updated); err != nil || v.Context == original.Context || updated.Data.Intake != wantIntake || updated.Data.Previous == nil || *updated.Data.Previous != original.Context {
+				t.Fatal("completed continuation lost original context/intake binding", err)
+			}
+			for _, d := range []RecoveryDelivery{inspected, resumed} {
+				var proposal publication[PlannerState]
+				if err := protocol.ReadJSON(d.Proposal.Path, &proposal); err != nil || len(proposal.Data.RecoveryChoices) != 1 {
+					t.Fatal("inspection/resume did not consume a committed choice", err)
+				}
+				choice := proposal.Data.RecoveryChoices[0]
+				want := "inspect"
+				if d.Kind == "support" {
+					want = "resume"
+				}
+				if choice.DeliveryID != failed.ID || choice.Action != want || choice.Reason == "" || len(choice.Basis) == 0 {
+					t.Fatal("continuation lost evidence-backed safety choice")
+				}
+			}
+			return
+		}
+		if v.Context != original.Context || v.Recovery == nil || v.Recovery.DispatchCycle != len(v.Recovery.Deliveries) {
+			t.Fatal("M4 changed context binding or dispatch accounting")
+		}
+		if tc.name == "m4-planner-first-timeout" || tc.name == "m4-planner-first-compaction" {
+			if len(v.Recovery.PlannerFailures) != 1 || len(v.Recovery.Deliveries) != 0 || v.Ledger.Round != 0 || failedAttempts != 1 {
+				t.Fatal("Planner retry invented dispatch/round or lost typed failure")
+			}
+		} else {
+			if len(v.Recovery.Deliveries) != 1 || v.Ledger.Round != 1 || v.Ledger.NoProgress != 1 {
+				t.Fatal("M4 batch was not counted exactly once with Agent-reported no progress")
+			}
+			d := v.Recovery.Deliveries[0]
+			if d.Kind != "workers" || d.Context != original.Context || v.Previous == nil || d.Proposal != *v.Previous || !slices.Equal(d.Results, v.Ledger.ConsumedBatch) {
+				t.Fatal("M4 delivery lost exact proposal/results binding")
+			}
+			if tc.name == "m4-success-batch" {
+				if len(d.Results) != 3 || len(d.Failures) != 0 || failedAttempts != 0 {
+					t.Fatal("M4 successful batch changed three-worker delivery")
+				}
+			} else if tc.name == "m4-mixed-three-failed" {
+				if len(d.Results) != 0 || len(d.Failures) != 3 || failedAttempts != 3 || len(v.WorkerResults) != 0 || len(v.Ledger.ConsumedBatch) != 0 || !barrier.proved || !slices.Equal(barrier.order, []string{"w2"}) {
+					t.Fatal("three failed workers invented results or changed single-delivery accounting")
+				}
+			} else if strings.HasPrefix(tc.name, "m4-mixed-") {
+				if len(d.Results) != 1 || len(d.Failures) != 2 || failedAttempts != 2 || !barrier.proved || !slices.Equal(barrier.order, []string{"w3", "w2"}) {
+					t.Fatal("mixed batch lost committed sibling or failure delivery")
+				}
+				var worker publication[WorkerResult]
+				if err := protocol.ReadJSON(d.Results[0].Path, &worker); err != nil || worker.Data.TaskID != "w3" || report.Snapshot.Attempts[d.Results[0].AttemptID].Output == nil {
+					t.Fatal("mixed batch promoted an uncommitted candidate or lost successful sibling", err)
+				}
+			} else if len(d.Results) != 0 || len(d.Failures) != 1 || failedAttempts != 1 || len(v.WorkerResults) != 0 {
+				t.Fatal("M4 all-failed batch invented worker output or discarded typed failure")
+			}
+		}
+		failures := slices.Clone(v.Recovery.PlannerFailures)
+		for _, d := range v.Recovery.Deliveries {
+			failures = append(failures, d.Failures...)
+		}
+		for _, f := range failures {
+			a, ok := report.Snapshot.Attempts[f.AttemptID]
+			owner := report.Snapshot.Sessions[f.Identity.HandleID]
+			wantCode, wantOrigin := engine.TimedOut, engine.OriginAttemptDeadline
+			if tc.name == "m4-planner-first-compaction" || (tc.name == "m4-mixed-compaction" || tc.name == "m4-mixed-committed-close-cancel" || tc.name == "m4-mixed-three-failed") && f.TaskID == "w2" {
+				wantCode, wantOrigin = engine.CompactionFailed, engine.OriginCompaction
+			}
+			if strings.HasPrefix(tc.name, "m4-mixed-") && (f.TaskID == "w1" || tc.name == "m4-mixed-three-failed" && f.TaskID == "w3") {
+				wantCode, wantOrigin = engine.Cancelled, engine.OriginFailFastSibling
+			}
+			if !ok || a.Failure == nil || a.Output != nil || f.Code != wantCode || f.Origin != wantOrigin || f.RunID != report.Snapshot.RunID || f.StepID != a.Identity.InvocationID || a.HandleID != f.Identity.HandleID || !sameIdentity(f.Identity, owner.Identity) || f.Cleanup == nil || !sameIdentity(f.Cleanup.Identity, owner.Identity) || !f.Cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
+				t.Fatalf("M4 recovery identity/failure differs from actual failed attempt: %+v", f)
+			}
+		}
+		if tc.name == "m4-capacity-fresh-worker-timeout" {
+			if len(barrier.stats) != 1 || v.Checkpoint == nil || v.Checkpoint.DispatchCycle != 1 || v.Checkpoint.FullCheckpoint {
+				t.Fatal("M4 capacity fresh introduced a second dispatch/checkpoint")
+			}
+			for _, s := range report.Snapshot.Sessions {
+				if s.Role.Name != "triage-planner" || s.Identity.HandleID == report.Snapshot.Attempts[v.Recovery.Deliveries[0].Proposal.AttemptID].HandleID {
+					continue
+				}
+				for _, a := range report.Snapshot.Attempts {
+					if a.HandleID == s.Identity.HandleID && a.LastSeq < report.Snapshot.Attempts[failures[0].AttemptID].LastSeq {
+						t.Fatal("fresh Planner unexpectedly ran a Step before worker failure")
+					}
+				}
+			}
+		} else if len(barrier.stats) != 0 || v.Checkpoint != nil {
+			t.Fatal("M4 nil capacity performed stats or acquired checkpoint policy")
+		}
+		return
+	}
 	if strings.HasPrefix(tc.name, "m3-") {
 		if report.Final != nil || len(report.Snapshot.Retries) != 0 || report.Snapshot.Policy.MaxLiveSessions != 4 || len(report.Snapshot.Attempts) != prompts || len(report.Snapshot.Sessions) != hellos || len(report.Cleanup) != hellos {
 			t.Fatal("M3 lost run accounting or invented retries/final")
@@ -2698,6 +3562,62 @@ type triageCase struct {
 }
 
 var triageCases = []triageCase{
+	{"m4-delivery-id", 6, true, false},
+	{"m4-delivery-proposal", 6, true, false},
+	{"m4-delivery-context", 6, true, false},
+	{"m4-delivery-results", 6, true, false},
+	{"m4-allfail-blind-new-id", 6, true, false},
+	{"m4-allfail-caller-bool", 6, true, false},
+	{"m4-nil-recovery-timeout", 4, true, false},
+	{"m4-planner-later-user-cancel", 5, true, false},
+	{"m4-planner-parent-deadline", 5, true, false},
+	{"m4-planner-run-limit", 4, true, false},
+	{"m4-planner-storage-fatal", 5, true, false},
+	{"m4-planner-journal-fatal", 5, true, false},
+	{"m4-mixed-cleanup-fatal", 7, true, false},
+	{"m4-mixed-storage-fatal", 7, true, false},
+	{"m4-mixed-journal-fatal", 7, true, false},
+	{"m4-mixed-user-cancel", 7, true, false},
+	{"m4-mixed-wait-fatal", 7, true, false},
+	{"m4-mixed-three-failed", 8, false, true},
+	{"m4-support-update-wiki-timeout", 12, false, true},
+	{"m4-support-update-context-timeout", 12, false, true},
+	{"m4-allfail-reframe-checkpoint", 10, false, true},
+	{"m4-reframe-timeout-inspection-resume", 14, false, true},
+	{"m4-reframe-no-inspection", 10, true, false},
+	{"m4-reframe-stale-inspection", 16, true, false},
+	{"m4-reframe-completed-inspection", 18, true, false},
+	{"m4-allfail-agent-progress", 8, false, true},
+	{"m4-wiki-timeout-partial-resume", 10, false, true},
+	{"m4-mixed-binding-fatal", 7, true, false},
+	{"m4-support-unsafe-no-basis", 8, true, false},
+	{"m4-support-unsafe-no-reason", 8, true, false},
+	{"m4-support-unsafe-owner", 8, true, false},
+	{"m4-meta-identity", 5, true, false},
+	{"m4-meta-attempt", 5, true, false},
+	{"m4-meta-cleanup", 5, true, false},
+	{"m4-meta-diagnostic", 5, true, false},
+	{"m4-meta-prefix", 6, true, false},
+	{"m4-planner-first-compaction", 5, false, true},
+	{"m4-mixed-timeout", 8, false, true},
+	{"m4-mixed-compaction", 8, false, true},
+	{"m4-mixed-committed-close-cancel", 8, false, true},
+	{"m4-mixed-committed-close-cleanup-fatal", 7, true, false},
+	{"m4-mixed-committed-close-storage-fatal", 7, true, false},
+	{"m4-mixed-committed-close-journal-fatal", 7, true, false},
+	{"m4-mixed-provider-fatal", 7, true, false},
+	{"m4-support-resolve-wiki-timeout", 11, false, true},
+	{"m4-support-resolve-context-timeout", 11, false, true},
+	{"m4-planner-first-timeout", 5, false, true},
+	{"m4-planner-retry-exhausted", 5, true, false},
+	{"m4-planner-unknown-provider", 4, true, false},
+	{"m4-planner-user-cancel", 4, true, false},
+	{"m4-worker-timeout", 6, false, true},
+	{"m4-capacity-fresh-worker-timeout", 6, false, true},
+	{"m4-success-batch", 8, false, true},
+	{"m4-policy-echo", 4, true, false},
+	{"m4-drop-recovery", 4, true, false},
+	{"m4-cycle-echo", 4, true, false},
 	{"m3-cycle-six", 19, false, true},
 	{"m3-capacity-zero", 6, false, true}, {"m3-capacity-at-plan", 7, false, true}, {"m3-policy-initial-echo", 4, true, false},
 	{"m3-retained-feedback-drop", 7, true, false}, {"m3-retained-feedback-change", 7, true, false}, {"m3-retained-feedback-reorder", 7, true, false},
@@ -3434,7 +4354,8 @@ func TestIntakeToContext(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m1 := strings.HasPrefix(tc.name, "m1-")
 			m3 := strings.HasPrefix(tc.name, "m3-")
-			m2 := strings.HasPrefix(tc.name, "m2-") || m3
+			m4 := strings.HasPrefix(tc.name, "m4-")
+			m2 := strings.HasPrefix(tc.name, "m2-") || m3 || m4
 			working := strings.HasPrefix(tc.name, "work-") || tc.name == "m1-support"
 			transitionProbe := slices.Contains([]string{"work-unproposed-transition", "work-skipped-context", "work-wrong-task", "work-resolve-changed-intake", "work-refresh-work-mismatch"}, tc.name)
 			workKind, workFixture := "update", "update-replace"
@@ -3456,14 +4377,14 @@ func TestIntakeToContext(t *testing.T) {
 			planning := strings.HasPrefix(tc.name, "planner-") || working || m1
 			updating := strings.HasPrefix(tc.name, "update-") || tc.name == "planner-history" || (working && workKind == "update") || tc.name == "work-wrong-task" || tc.name == "work-resolve-changed-intake"
 			revising := refreshing || updating
-			acquiring := (resolving && !supporting) || revising || strings.HasPrefix(tc.name, "http-")
+			acquiring := (resolving && !supporting) || revising || strings.HasPrefix(tc.name, "http-") || strings.HasPrefix(tc.name, "m4-support-")
 			mode := tc.name
 			if m2 {
 				mode = "complete"
 				if tc.name == "m2-wiki-support" {
 					mode = "time-unresolved"
 				}
-				if tc.name == "m3-cycle-six" || tc.name == "m3-support-no-sample" || tc.name == "m3-support-pending" {
+				if tc.name == "m3-cycle-six" || tc.name == "m3-support-no-sample" || tc.name == "m3-support-pending" || strings.HasPrefix(tc.name, "m4-support-") {
 					mode = "wiki-partial"
 				}
 			}
@@ -3545,6 +4466,9 @@ func TestIntakeToContext(t *testing.T) {
 			}
 			var requests, newRequests atomic.Int32
 			var revisionURL string
+			if strings.HasPrefix(tc.name, "m4-support-update-") {
+				revisionURL = updateHTTPFixture(t, "update-replace", func(*http.Request) { newRequests.Add(1) }).URL
+			}
 			var acquisition acquisitionOptions
 			if acquiring {
 				_, raw := intakeFixture("complete")
@@ -3676,6 +4600,9 @@ func TestIntakeToContext(t *testing.T) {
 					policy.MaxTotalAttempts = 5
 				}
 			}
+			if tc.name == "m4-planner-run-limit" {
+				policy.MaxTotalAttempts = 4
+			}
 			if tc.name == "attempt-cap" {
 				policy.MaxTotalAttempts = 1
 			}
@@ -3697,7 +4624,7 @@ func TestIntakeToContext(t *testing.T) {
 				t.Fatal(err)
 			}
 			statsControl := ""
-			if m3 {
+			if m3 || tc.name == "m4-capacity-fresh-worker-timeout" || tc.name == "m4-allfail-reframe-checkpoint" || strings.HasPrefix(tc.name, "m4-reframe-") {
 				statsControl = "1"
 			}
 			if tc.name == "m3-stats-timeout" {
@@ -4049,17 +4976,27 @@ func TestIntakeToContext(t *testing.T) {
 			}}
 			var transport runtime.Runtime = pi
 			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" || tc.name == "planner-timeout" || tc.name == "work-worker-timeout" || tc.name == "work-planner-timeout" || tc.name == "m1-worker-timeout" {
-				transport = deadlineRuntime{pi}
+				transport = deadlineRuntime{Runtime: pi}
 			}
-			if tc.name == "m2-branch-timeout" {
-				transport = deadlineRuntime{pi}
+			if tc.name == "m2-branch-timeout" || m4 {
+				transport = deadlineRuntime{Runtime: pi}
+				if tc.name == "m4-mixed-timeout" || tc.name == "m4-mixed-storage-fatal" || tc.name == "m4-mixed-journal-fatal" || tc.name == "m4-mixed-user-cancel" || tc.name == "m4-mixed-wait-fatal" || tc.name == "m4-mixed-three-failed" {
+					transport = deadlineRuntime{Runtime: pi, taskTimeouts: map[string]time.Duration{"w1": time.Minute}}
+				}
 			}
-			r, err = engine.New(ctx, def, engine.Input{Prompt: "CASE-17", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
+			runCtx := ctx
+			var cancelParent context.CancelCauseFunc
+			if tc.name == "m4-planner-parent-deadline" {
+				runCtx, cancelParent = context.WithCancelCause(ctx)
+				defer cancelParent(nil)
+			}
+			r, err = engine.New(runCtx, def, engine.Input{Prompt: "CASE-17", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
 			if err != nil {
 				t.Fatal(err)
 			}
 			go func() { report = r.Execute(); close(done) }()
 			count := 0
+			m4Phases := map[string]int{}
 			hellos := map[string]protocol.Control{}
 			var intake Intake
 			var wiki WikiSearch
@@ -4138,7 +5075,7 @@ func TestIntakeToContext(t *testing.T) {
 						hellos[e.Message.SessionID] = e.Message
 						continue
 					}
-					if m3 && e.Message.Type == "stats" {
+					if (m3 || m4) && e.Message.Type == "stats" {
 						snapshot := r.Snapshot()
 						var latest *engine.AttemptState
 						for _, a := range snapshot.Attempts {
@@ -4157,11 +5094,16 @@ func TestIntakeToContext(t *testing.T) {
 						var percent any
 						var tokens any
 						switch tc.name {
-						case "m3-capacity-below", "m3-cycle-six":
+						case "m3-capacity-below", "m3-cycle-six", "m4-allfail-reframe-checkpoint":
 							percent, tokens = 79.9, 79900
+						case "m4-reframe-timeout-inspection-resume", "m4-reframe-no-inspection", "m4-reframe-stale-inspection", "m4-reframe-completed-inspection":
+							percent, tokens = 79.9, 79900
+							if len(barrier.stats) == 3 {
+								percent, tokens = 80, 80000
+							}
 						case "m3-capacity-zero":
 							percent, tokens = 0, 0
-						case "m3-capacity-at", "m3-capacity-at-plan", "m3-stats-cleanup-failure":
+						case "m3-capacity-at", "m3-capacity-at-plan", "m3-stats-cleanup-failure", "m4-capacity-fresh-worker-timeout":
 							percent, tokens = 80, 80000
 						case "m3-capacity-above":
 							percent, tokens = 95, 95000
@@ -4212,6 +5154,37 @@ func TestIntakeToContext(t *testing.T) {
 						}
 						continue
 					}
+					if m4 && e.Message.Type == "abort" {
+						snapshot := r.Snapshot()
+						primary := snapshot.Attempts[barrier.attempts["w2"]]
+						sibling := snapshot.Sessions[snapshot.Attempts[barrier.attempts["w1"]].HandleID]
+						if primary.Failure == nil || primary.Failure.Code != engine.CompactionFailed || sibling.Identity.SessionID != e.Message.SessionID {
+							t.Fatal("fault did not occur in sibling after recoverable primary")
+						}
+						ack := "release-abort"
+						if tc.name == "m4-mixed-storage-fatal" || tc.name == "m4-mixed-journal-fatal" {
+							path := filepath.Join(r.Dir(), "run.json")
+							if tc.name == "m4-mixed-journal-fatal" {
+								path = filepath.Join(r.Dir(), "events.jsonl")
+							}
+							if err := os.Rename(path, path+".before-fault"); err != nil {
+								t.Fatal(err)
+							}
+							if err := os.Mkdir(path, 0700); err != nil {
+								t.Fatal(err)
+							}
+						}
+						if tc.name == "m4-mixed-user-cancel" {
+							r.Cancel(engine.OriginControllerUser)
+						}
+						if tc.name == "m4-mixed-wait-fatal" {
+							ack = "exit"
+						}
+						if err := e.Reply(protocol.Control{Type: ack}); err != nil {
+							t.Fatal(err)
+						}
+						continue
+					}
 					if m2 && e.Message.Type == "held" {
 						continue
 					}
@@ -4229,6 +5202,35 @@ func TestIntakeToContext(t *testing.T) {
 					var task stageTask
 					if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
 						t.Fatal(err)
+					}
+					if m4 {
+						model := runtime.ModelSpec{Provider: "fixture", ID: "analysis", Thinking: "high"}
+						if task.Stage == "intake" || task.Stage == "intake-update" || task.Stage == "intake-revision" {
+							model = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: "high"}
+						}
+						if task.Stage == "planner" {
+							model.ID = "planner"
+						}
+						if req.Output.SchemaID == WorkerSchema {
+							var request workerRequest
+							if err := json.Unmarshal([]byte(req.Prompt), &request); err != nil {
+								t.Fatal(err)
+							}
+							if request.Task.Responsibility != "analysis" {
+								model = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: "high"}
+							}
+						}
+						m4Phases[task.Stage]++
+						snapshot := r.Snapshot()
+						session := snapshot.Sessions[snapshot.Attempts[req.Identity.AttemptID].HandleID]
+						if session.Role.Name != "triage-"+task.Stage || session.Role.Model != model {
+							t.Fatalf("M4 %s invocation %d model/role=%+v, want %+v", task.Stage, m4Phases[task.Stage], session.Role, model)
+						}
+						if strings.HasPrefix(tc.name, "m4-support-") && task.Stage != "intake" {
+							if requests.Load() == 0 || requests.Load() != acquiredRequests {
+								t.Fatal("support continuation reacquired Jira or skipped initial HTTP acquisition")
+							}
+						}
 					}
 					if req.Output.SchemaID == ContextSchema && !strings.Contains(task.Requirements, supportingResolutionRequirements) {
 						t.Fatalf("supporting requirements missing from %s task", task.Stage)
@@ -4269,12 +5271,25 @@ func TestIntakeToContext(t *testing.T) {
 					var files map[string][]byte
 					if m2 && count > 3 {
 						switch req.Output.SchemaID {
+						case IntakeSchema:
+							if !strings.HasPrefix(tc.name, "m4-support-update-") || task.Stage != "intake-update" || m4Phases[task.Stage] != 1 {
+								t.Fatal("unexpected or replayed M4 intake update")
+							}
+							var fetched int32
+							intake, files, fetched = refreshIntakeFixture(t, ctx, "update-replace", count, req.Inputs, task, revisionURL)
+							if fetched != 3 || newRequests.Load() != fetched {
+								t.Fatal("update did not fetch issue/link/attachment exactly once")
+							}
+							data = intake
 						case PlannerSchema:
 							plannerSteps++
 							expectedPlanner = m2PlannerFixture(t, tc.name, req, task, plannerSteps)
 							data = m2PlannerData(t, expectedPlanner)
+							if tc.name == "m4-allfail-caller-bool" && plannerSteps == 2 {
+								data.(map[string]any)["remote_job_safe"] = true
+							}
 						case WikiSchema:
-							if m3 && task.SupportingProposal != nil {
+							if (m3 || m4) && task.SupportingProposal != nil {
 								wiki, files = wikiFixture("complete", req.Inputs[0])
 								data = wiki
 							} else {
@@ -4297,6 +5312,12 @@ func TestIntakeToContext(t *testing.T) {
 								fixtureName = "m1-incomplete-no-gap"
 							}
 							v, raw := workerFixture(fixtureName, request, req.Inputs)
+							if m4 && request.Task.ID == "inspection" {
+								raw["worker-raw"] = testJSON(map[string]any{"job_id": "anonymous-read", "status": "completed", "resubmitted": false, "safe_next_phase": "read the already available result"})
+							}
+							if tc.name == "m4-mixed-binding-fatal" && request.Task.ID == "w3" {
+								v.TaskID = "not-dispatched"
+							}
 							if tc.name == "m2-files-not-progress" {
 								raw["additional-raw"] = []byte("another anonymous document")
 								v.Evidence = append(v.Evidence, Evidence{FileID: "additional-raw"})
@@ -4310,21 +5331,29 @@ func TestIntakeToContext(t *testing.T) {
 								}
 							}
 							data, files = v, raw
-							if (slices.Contains([]string{"m2-parallel-batches-yield", "m2-batch-consumed-order", "m2-batch-results-order", "m2-batch-foreign-ref"}, tc.name) || strings.HasPrefix(tc.name, "m2-branch-")) && slices.Contains([]string{"w1", "w2", "w3"}, request.Task.ID) {
+							if (slices.Contains([]string{"m2-parallel-batches-yield", "m2-batch-consumed-order", "m2-batch-results-order", "m2-batch-foreign-ref"}, tc.name) || strings.HasPrefix(tc.name, "m2-branch-") || strings.HasPrefix(tc.name, "m4-mixed-")) && slices.Contains([]string{"w1", "w2", "w3"}, request.Task.ID) {
 								barrier.held[request.Task.ID], barrier.attempts[request.Task.ID] = e, req.Identity.AttemptID
 							}
 						case ContextSchema:
-							if (!m3 && tc.name != "m2-wiki-support") || task.SupportingProposal == nil {
+							if (!m3 && !m4 && tc.name != "m2-wiki-support") || task.SupportingProposal == nil {
 								t.Fatal("unexpected M2 supporting task")
 							}
-							if !m3 {
+							if !m3 && !m4 {
 								m2AssertWikiOwners(t, req.Inputs)
 							}
 							var prior publication[Context]
 							if err := protocol.ReadJSON(req.Inputs[2].Path, &prior); err != nil {
 								t.Fatal(err)
 							}
-							data, files = resolutionFixture("resolve-time", "time-unresolved", scope, req.Inputs, intake, wiki, prior.Data)
+							resolved, raw := resolutionFixture("resolve-time", "time-unresolved", scope, req.Inputs, intake, wiki, prior.Data)
+							if strings.HasPrefix(tc.name, "m4-support-update-") {
+								for n := len(prior.Data.Attempts); n < len(resolved.Attempts); n++ {
+									if resolved.Attempts[n].Kind == "time" {
+										resolved.Attempts[n].Evidence = []Evidence{{FileID: "remediation"}}
+									}
+								}
+							}
+							data, files = resolved, raw
 						default:
 							t.Fatal("unexpected M2 schema")
 						}
@@ -4619,6 +5648,82 @@ func TestIntakeToContext(t *testing.T) {
 						}
 					}
 					ack := "settle"
+					if m4 {
+						if strings.HasPrefix(tc.name, "m4-meta-") && task.Stage == "planner" && plannerSteps == 1 || strings.HasPrefix(tc.name, "m4-allfail-") && req.Output.SchemaID == WorkerSchema || (strings.HasPrefix(tc.name, "m4-support-unsafe-") && task.Stage == "wiki-resolution" || tc.name == "m4-wiki-timeout-partial-resume" && task.Stage == "wiki-investigation") && m4Phases[task.Stage] == 1 {
+							ack = "hold"
+						}
+						switch tc.name {
+						case "m4-reframe-timeout-inspection-resume", "m4-reframe-no-inspection", "m4-reframe-stale-inspection", "m4-reframe-completed-inspection":
+							if req.Output.SchemaID == WorkerSchema && m4Phases[task.Stage] <= 2 || task.Stage == "wiki-investigation" && m4Phases[task.Stage] == 1 {
+								ack = "hold"
+							}
+						case "m4-support-update-wiki-timeout":
+							if task.Stage == "wiki-revision" && m4Phases[task.Stage] == 1 {
+								ack = "hold"
+							}
+						case "m4-support-update-context-timeout":
+							if task.Stage == "context-revision" && m4Phases[task.Stage] == 1 {
+								ack = "hold"
+							}
+						case "m4-support-resolve-wiki-timeout":
+							if task.Stage == "wiki-resolution" && m4Phases[task.Stage] == 1 {
+								ack = "hold"
+							}
+						case "m4-support-resolve-context-timeout":
+							if task.Stage == "context-resolution" && m4Phases[task.Stage] == 1 {
+								ack = "hold"
+							}
+						case "m4-nil-recovery-timeout", "m4-planner-later-user-cancel", "m4-planner-parent-deadline", "m4-planner-run-limit", "m4-planner-storage-fatal", "m4-planner-journal-fatal":
+							if task.Stage == "planner" && plannerSteps == 1 {
+								ack = "hold"
+							} else if task.Stage == "planner" && plannerSteps == 2 {
+								switch tc.name {
+								case "m4-planner-later-user-cancel":
+									ack = "hold"
+									r.Cancel(engine.OriginControllerUser)
+								case "m4-planner-parent-deadline":
+									ack = "hold"
+									cancelParent(context.DeadlineExceeded)
+								case "m4-planner-storage-fatal", "m4-planner-journal-fatal":
+									path := filepath.Join(r.Dir(), "run.json")
+									if tc.name == "m4-planner-journal-fatal" {
+										path = filepath.Join(r.Dir(), "events.jsonl")
+									}
+									if err := os.Rename(path, path+".before-fault"); err != nil {
+										t.Fatal(err)
+									}
+									if err := os.Mkdir(path, 0700); err != nil {
+										t.Fatal(err)
+									}
+								}
+							}
+						case "m4-planner-first-compaction":
+							if task.Stage == "planner" && plannerSteps == 1 {
+								ack = "compaction-error"
+							}
+						case "m4-planner-first-timeout":
+							if task.Stage == "planner" && plannerSteps == 1 {
+								ack = "hold"
+							}
+						case "m4-planner-retry-exhausted":
+							if task.Stage == "planner" {
+								ack = "hold"
+							}
+						case "m4-planner-unknown-provider":
+							if task.Stage == "planner" {
+								ack = "provider-error"
+							}
+						case "m4-planner-user-cancel":
+							if task.Stage == "planner" {
+								ack = "hold"
+								r.Cancel(engine.OriginControllerUser)
+							}
+						case "m4-worker-timeout", "m4-capacity-fresh-worker-timeout":
+							if req.Output.SchemaID == WorkerSchema {
+								ack = "hold"
+							}
+						}
+					}
 					if tc.name == "m2-planner-provider-failure" && plannerSteps == 2 {
 						ack = "provider-error"
 					}
@@ -4696,6 +5801,11 @@ func TestIntakeToContext(t *testing.T) {
 					}
 				}
 			}
+			if tc.name == "m4-reframe-timeout-inspection-resume" && report.ExitCode == 0 {
+				if m4Phases["intake"] != 1 || m4Phases["wiki"] != 1 || m4Phases["context"] != 1 || m4Phases["wiki-investigation"] != 2 || plannerSteps != 6 {
+					t.Fatalf("reframe recovery repeated acquisition or skipped continuation: phases=%v", m4Phases)
+				}
+			}
 			if count != tc.stages || (report.ExitCode != 0) != tc.failure {
 				t.Fatalf("stages=%d outcome=%s failure=%v", count, report.Outcome, report.Failure)
 			}
@@ -4709,6 +5819,62 @@ func TestIntakeToContext(t *testing.T) {
 			}
 			if report.Final != nil {
 				t.Fatal("slice invented final report")
+			}
+			if strings.HasPrefix(tc.name, "m4-support-") && !tc.failure {
+				wantWiki, wantContext := 2, 1
+				if strings.Contains(tc.name, "context-timeout") {
+					wantWiki, wantContext = 1, 2
+				}
+				wikiPhase, contextPhase := "wiki-resolution", "context-resolution"
+				if strings.HasPrefix(tc.name, "m4-support-update-") {
+					wikiPhase, contextPhase = "wiki-revision", "context-revision"
+					if m4Phases["intake-update"] != 1 || newRequests.Load() != 3 {
+						t.Fatal("support update resume repeated Jira acquisition")
+					}
+				}
+				if m4Phases["intake"] != 1 || m4Phases[wikiPhase] != wantWiki || m4Phases[contextPhase] != wantContext || requests.Load() == 0 || requests.Load() != acquiredRequests {
+					t.Fatalf("support repeated acquisition/completed phases: phases=%v HTTP=%d initial=%d", m4Phases, requests.Load(), acquiredRequests)
+				}
+			}
+			if m4 && !tc.failure {
+				journal, err := os.Open(filepath.Join(r.Dir(), "events.jsonl"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				decoder := json.NewDecoder(journal)
+				decisions := map[contract.Ref]uint64{}
+				for {
+					var event struct {
+						Kind    string
+						Seq     uint64
+						Details struct {
+							Reason string
+							Refs   []contract.Ref
+						}
+					}
+					if err := decoder.Decode(&event); err != nil {
+						if err != io.EOF {
+							t.Error(err)
+						}
+						break
+					}
+					if event.Kind == "Decision" && strings.HasPrefix(event.Details.Reason, "Worker delivery accepted for Planner interpretation") {
+						for _, ref := range event.Details.Refs {
+							if ref.SchemaID == WorkerSchema {
+								decisions[ref] = event.Seq
+							}
+						}
+					}
+				}
+				if err := journal.Close(); err != nil {
+					t.Fatal(err)
+				}
+				for _, ref := range expectedPlanner.WorkerResults {
+					attempt := report.Snapshot.Attempts[ref.AttemptID]
+					if attempt.State != engine.Succeeded || attempt.Output == nil || *attempt.Output != ref || decisions[ref] <= attempt.LastSeq || decisions[ref] >= report.Snapshot.Attempts[plannerRef.AttemptID].LastSeq {
+						t.Fatalf("worker %s was delivered without committed output then acceptance Decision before Planner", ref.AttemptID)
+					}
+				}
 			}
 			if m2 {
 				m2AssertOutcome(t, tc, report, plannerRef, result, expectedPlanner, barrier, count, len(hellos))

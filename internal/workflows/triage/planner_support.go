@@ -132,6 +132,18 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 	if work == nil {
 		return nil, fmt.Errorf("supporting dispatch requires structured supporting_work, not pending text")
 	}
+	var continuation *supportContinuation
+	proposal := p.last
+	if p.recovery != nil {
+		continuation, err = supportResume(state.Data, *p.last)
+		if err != nil {
+			return nil, err
+		}
+		if continuation == nil {
+			continuation = &supportContinuation{Proposal: *p.last, Context: h.ref, Work: *work}
+		}
+		proposal = &continuation.Proposal
+	}
 	sources := map[contract.Ref][]file{}
 	for _, record := range records {
 		maps.Copy(sources, record.sources)
@@ -151,12 +163,23 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 	var after ContextResult
 	switch work.Kind {
 	case "resolve":
-		after, err = resolveWithProposal(ctx, p.r, p.scope, models, before, p.last, sources)
+		after, err = resolveWithProposal(ctx, p.r, p.scope, models, before, proposal, sources, continuation)
 	case "refresh", "update":
-		after, err = reviseSlice(ctx, p.r, p.scope, models, before, work.Sources, work.Kind == "update", p.last, sources)
+		after, err = reviseSlice(ctx, p.r, p.scope, models, before, work.Sources, work.Kind == "update", proposal, sources, continuation)
 	}
 	if err != nil {
-		return nil, err
+		if p.recovery == nil {
+			return nil, err
+		}
+		failure, recoveryErr := confirmRecovery(ctx, p.r, err, false)
+		if recoveryErr != nil {
+			return nil, recoveryErr
+		}
+		delivery := newDelivery("support", p)
+		delivery.Failures, delivery.Support = []RecoveryFailure{failure}, continuation
+		p.recovery.Deliveries = append(p.recovery.Deliveries, delivery)
+		p.recoveryErrors = append(p.recoveryErrors, err)
+		return p.reopen(ctx, before.Context)
 	}
 	afterAcceptance := newAcceptance(ctx, p.r)
 	next, err := afterAcceptance.loadContextHistory(p.scope, after.Context)
@@ -168,6 +191,13 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 	}
 	if err := p.r.Root().Decision(ctx, key+"-recorded", "Supporting result accepted for Planner reassessment, not a verified claim or final report", []contract.Ref{*p.last, before.Context, after.Context}); err != nil {
 		return nil, err
+	}
+	if p.recovery != nil {
+		continuation.FailedPhase = ""
+		delivery := newDelivery("support", p)
+		delivery.Results = []contract.Ref{after.Context}
+		delivery.Support = continuation
+		p.recovery.Deliveries = append(p.recovery.Deliveries, delivery)
 	}
 	return p.reopen(ctx, after.Context)
 }
