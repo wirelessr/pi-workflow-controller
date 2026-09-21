@@ -29,14 +29,15 @@ type ReportClaim struct {
 }
 
 type InvestigationReport struct {
-	State        contract.Ref  `json:"state"`
-	Context      contract.Ref  `json:"context"`
-	Claims       []ReportClaim `json:"claims"`
-	Completeness string        `json:"completeness"`
-	Closure      string        `json:"closure"`
-	Gaps         []string      `json:"gaps"`
-	NextSteps    []string      `json:"next_steps"`
-	ReportFile   string        `json:"report_file"`
+	State        contract.Ref    `json:"state"`
+	Context      contract.Ref    `json:"context"`
+	Claims       []ReportClaim   `json:"claims"`
+	Completeness string          `json:"completeness"`
+	Closure      string          `json:"closure"`
+	Gaps         []string        `json:"gaps"`
+	NextSteps    []string        `json:"next_steps"`
+	ReportFile   string          `json:"report_file"`
+	M6           *ReportMetadata `json:"m6,omitempty"`
 }
 
 type reportOwner struct {
@@ -49,13 +50,14 @@ type reportOwner struct {
 }
 
 type reportTask struct {
-	Stage        string        `json:"stage"`
-	State        contract.Ref  `json:"state"`
-	Context      contract.Ref  `json:"context"`
-	Assessments  []ReportClaim `json:"assessments"`
-	Owners       []reportOwner `json:"owners"`
-	Renderer     string        `json:"renderer"`
-	Requirements string        `json:"requirements"`
+	Stage        string              `json:"stage"`
+	State        contract.Ref        `json:"state"`
+	Context      contract.Ref        `json:"context"`
+	Assessments  []ReportClaim       `json:"assessments"`
+	Owners       []reportOwner       `json:"owners"`
+	Renderer     string              `json:"renderer"`
+	Requirements string              `json:"requirements"`
+	M6           *reportContinuation `json:"m6,omitempty"`
 }
 
 // reportInputs follows committed lineage, not directory order or session memory.
@@ -87,6 +89,21 @@ func (p *plannerCaller) reportInputs(a *acceptance) (reportTask, []contract.Ref,
 		inputs = appendSourceInputs(inputs, h.sources)
 		inputs = appendUniqueRefs(inputs, state.Data.WorkerResults...)
 		inputs = appendUniqueRefs(inputs, state.Data.WikiResults...)
+		if p.reporting != nil {
+			sources, err := a.recoverySources(p.scope, h.sources, state.Data.Recovery)
+			if err != nil {
+				return task, nil, err
+			}
+			inputs = appendSourceInputs(inputs, sources)
+			if state.Data.Recovery != nil {
+				for _, delivery := range state.Data.Recovery.Deliveries {
+					inputs = appendUniqueRefs(inputs, delivery.Proposal, delivery.Context)
+					if delivery.Support != nil {
+						inputs = appendUniqueRefs(inputs, delivery.Support.refs()...)
+					}
+				}
+			}
+		}
 		if review := state.Data.VerificationReview; review != nil {
 			task.Assessments = append(task.Assessments, ReportClaim{review.Claim, review.DeliveryID, *ref})
 		}
@@ -110,6 +127,11 @@ func (p *plannerCaller) reportInputs(a *acceptance) (reportTask, []contract.Ref,
 		}
 		ref = state.Data.Previous
 	}
+	var err error
+	task.M6, err = p.reportContinuation(a)
+	if err != nil {
+		return task, nil, err
+	}
 	snapshot := p.r.Snapshot()
 	for _, ref := range inputs {
 		if _, err := readAccepted[json.RawMessage](a, ref, ref.SchemaID); err != nil {
@@ -125,6 +147,10 @@ func (p *plannerCaller) reportInputs(a *acceptance) (reportTask, []contract.Ref,
 // report is a normal Step on the existing Planner. It does not yield, reserve
 // budget, retry, close the session, or change the state-only M5 continuation.
 func (p *plannerCaller) report(ctx context.Context, renderer string) (contract.Ref, error) {
+	return p.reportInScope(ctx, p.r.Root(), renderer)
+}
+
+func (p *plannerCaller) reportInScope(ctx context.Context, executionScope *engine.Scope, renderer string) (contract.Ref, error) {
 	if p.stopped || p.last == nil {
 		return contract.Ref{}, fmt.Errorf("report requires an accepted state and usable Planner")
 	}
@@ -138,6 +164,10 @@ func (p *plannerCaller) report(ctx context.Context, renderer string) (contract.R
 	}
 	task.Renderer = renderer
 	task.Requirements = "You are the existing investigation Planner, producing a report, not a new claim. Read the supplied exact accepted state/context, historical assessment owners, claims, deliveries, allowed evidence and original producers. Select claims only by exact entries in assessments. Do not rewrite statement, premises, support, disputes or measurement conditions; a new or changed claim must return to independent verification. Declare completeness (complete/incomplete), closure reason, retained gaps and concrete next_steps. No claim is legitimate only as incomplete. Missing evidence is not disproof; preserve execution failures and unavailable roles. Write triage.report.v1 candidate with state/context exactly supplied and report_file triage-report, then run python3 -B with renderer and the absolute request.json and candidate.json paths. The fixed renderer appends the artifact entry; do not create that entry beforehand. No acquisition, external publication, wiki write-back or final selection."
+	if task.M6 != nil {
+		task.Requirements += "\nM6 finalization: reconstruct every supplied historical owner and pending recovery/verification/controller feedback, including failures for claims you do not select. Supply m6.dispositions for every exact item in m6.failures once, without changing owner, delivery, claim, role, index or failure. Declare action unresolved (retain incomplete and no results), handled (cite subsequent supplied results of the same failed work: the actual Planner/claim retry key and claim parent; the original worker task or wiki task through an explicit resume proposal; or the successful support delivery retaining original proposal/context/work, accepted phases and resume authorization; verification retains the exact claim version and role. A receiving Planner snapshot or an unrelated result is not a worker/wiki/support completion. If this continuation cannot be shown, use unresolved or evidence-backed redirect), or redirect (explain why no longer needed using nonempty supplied evidence basis, without claiming success). Include reason, results and basis arrays for each. Necessity and applicability are your judgments; do not infer confirmation from support text, source schemas or votes. Echo m6.report_failures and m6.budget exactly. These report retry failures remain history even when this report succeeds. A nonnull budget requires resource-limited incomplete closure using the last accepted state, not a new ledger yield or a new claim. A handled disposition does not alter any historical diagnostic or assessment. No extra planning, acquisition or verification is authorized by this report task."
+		p.reporting.pending.Inputs = slices.Clone(inputs)
+	}
 	prompt, err := json.Marshal(task)
 	if err != nil {
 		return contract.Ref{}, err
@@ -147,7 +177,16 @@ func (p *plannerCaller) report(ctx context.Context, renderer string) (contract.R
 		return contract.Ref{}, err
 	}
 	key := "report-" + p.last.AttemptID
-	out, err := p.r.Root().Step(ctx, engine.StepSpec{Key: key, Session: p.handle, Prompt: string(prompt), Inputs: inputs, Output: contract.Spec{SchemaID: ReportSchema}, Timeout: 30 * time.Minute})
+	out, err := executionScope.Step(ctx, engine.StepSpec{Key: key, Session: p.handle, Prompt: string(prompt), Inputs: inputs, Output: contract.Spec{SchemaID: ReportSchema}, Timeout: 30 * time.Minute})
+	if p.reporting != nil {
+		if out.Output != (contract.Ref{}) {
+			p.reporting.pending.Report = &out.Output
+			p.reporting.pending.Boundary = "step-committed"
+		} else if err != nil {
+			p.stopped = true
+			return contract.Ref{}, &taskFailure{cause: err, handle: p.handle, identity: identity, stage: "report", attempt: out.AttemptID}
+		}
+	}
 	if err == nil && out.Execution.SessionID != identity.SessionID {
 		err = fmt.Errorf("report execution identity mismatch")
 	}
@@ -155,11 +194,17 @@ func (p *plannerCaller) report(ctx context.Context, renderer string) (contract.R
 		err = p.checkReport(ctx, out.Output, task, inputs)
 	}
 	if err == nil {
-		err = p.r.Root().Decision(ctx, key+"-recorded", "Report projection and exact bindings accepted; support and closure remain Planner judgments", appendUniqueRefs(inputs, out.Output))
+		if p.reporting != nil {
+			p.reporting.pending.Boundary = "validated"
+		}
+		err = executionScope.Decision(ctx, key+"-recorded", "Report projection and exact bindings accepted; support and closure remain Planner judgments", appendUniqueRefs(inputs, out.Output))
 	}
 	if err != nil {
 		p.stopped = true
 		return contract.Ref{}, err
+	}
+	if p.reporting != nil {
+		p.reporting.pending.Boundary = "decision-recorded"
 	}
 	p.session = out.Execution.SessionID
 	return out.Output, nil
@@ -218,12 +263,15 @@ func (p *plannerCaller) checkReport(ctx context.Context, ref contract.Ref, task 
 			return fmt.Errorf("report assessment owner/version mismatch")
 		}
 	}
+	if err := p.checkReportMetadata(a, v, task, inputs); err != nil {
+		return err
+	}
 	// Reconstruct after the Step: a cached pre-dispatch projection is not authority.
 	current, currentInputs, err := p.reportInputs(a)
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(current.Assessments, task.Assessments) || !reflect.DeepEqual(current.Owners, task.Owners) || !slices.Equal(currentInputs, inputs) {
+	if !reflect.DeepEqual(current.M6, task.M6) || !reflect.DeepEqual(current.Assessments, task.Assessments) || !reflect.DeepEqual(current.Owners, task.Owners) || !slices.Equal(currentInputs, inputs) {
 		return fmt.Errorf("report input owners changed")
 	}
 	var meta struct {

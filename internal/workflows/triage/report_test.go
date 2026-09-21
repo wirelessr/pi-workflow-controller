@@ -103,6 +103,45 @@ func TestTriageReportProjection(t *testing.T) {
 	if !bytes.Contains(first, []byte("`````````text")) {
 		t.Fatal("embedded fences were not escaped")
 	}
+	for _, action := range []string{"unresolved", "handled", "redirect", "budget"} {
+		t.Run("M6-"+action, func(t *testing.T) {
+			p := projection
+			failure := RecoveryFailure{Stage: "verify-con", Diagnostic: "preserved original diagnostic"}
+			disposition := ReportDisposition{Item: ReportFailure{Owner: assessmentRef, Kind: "verification", DeliveryID: "old-delivery", Claim: &claimRef, Role: "con", Failure: failure}, Action: action, Reason: special, Results: []contract.Ref{}, Basis: basis}
+			if action == "handled" {
+				disposition.Results = []contract.Ref{resultRef}
+			}
+			p.Data.M6 = &ReportMetadata{Dispositions: []ReportDisposition{disposition}, ReportFailures: []RecoveryFailure{{Stage: "report", Diagnostic: "preserved report retry diagnostic"}}}
+			if action == "budget" {
+				p.Data.M6.Dispositions[0].Action = "unresolved"
+				p.Data.M6.Budget = &ReportBudget{Policy: ReportPolicy{ReportRetries: 2, ReserveSessions: 2, ReserveAttempts: 3}, MaxSessions: 19, MaxAttempts: 29, MaxLive: 4, UsedSessions: 13, UsedAttempts: 23, LiveSessions: 1, Action: "verify", Rejected: investigationCost{Sessions: 6, Attempts: 8, Live: 3}, Reason: "resource-limited projection fixture"}
+			}
+			before := testJSON(p)
+			got, err := renderReport(context.Background(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := renderReport(context.Background(), p)
+			if err != nil || !bytes.Equal(got, again) || !bytes.Equal(before, testJSON(p)) {
+				t.Fatalf("M6 projection changed input or output: %v", err)
+			}
+			for _, value := range []string{"preserved original diagnostic", "preserved report retry diagnostic", "old-delivery", "Planner 處置", "處置依據", "最初接收此項目的歷史 owner"} {
+				if !bytes.Contains(got, []byte(value)) {
+					t.Errorf("M6 projection omitted %s", value)
+				}
+			}
+			if action == "handled" && !bytes.Contains(got, []byte("後續成功結果")) {
+				t.Fatal("handled projection omitted result Ref")
+			}
+			if action == "budget" {
+				for _, value := range []string{"調查容量限制", "reserve_sessions", "reserve_attempts", "additional_live", "非原子 reservation"} {
+					if !bytes.Contains(got, []byte(value)) {
+						t.Errorf("budget projection omitted %s", value)
+					}
+				}
+			}
+		})
+	}
 }
 
 func TestTriageReportOutputBoundary(t *testing.T) {
@@ -218,7 +257,7 @@ func TestTriageReportHostOutputLimit(t *testing.T) {
 }
 
 func TestTriageReportRendererFailures(t *testing.T) {
-	for _, name := range []string{"cancel", "missing-executable", "missing-document"} {
+	for _, name := range []string{"cancel", "missing-executable", "missing-document", "native-deadline"} {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(nil)
@@ -229,9 +268,17 @@ func TestTriageReportRendererFailures(t *testing.T) {
 			if name == "missing-executable" {
 				t.Setenv("PATH", t.TempDir())
 			}
+			if name == "native-deadline" {
+				deadline, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				defer stop()
+				ctx = deadline
+			}
 			out, err := renderReport(ctx, reportProjection{})
 			if err == nil || out != nil {
 				t.Fatal("renderer failure became a report")
+			}
+			if name == "native-deadline" && (!errors.Is(err, context.DeadlineExceeded) || err != context.Cause(ctx)) {
+				t.Fatalf("lost original standard deadline cause: %v", err)
 			}
 			if name == "cancel" && !errors.Is(err, cause) {
 				t.Fatalf("lost cancellation: %v", err)
@@ -244,6 +291,58 @@ func TestTriageReportRendererFailures(t *testing.T) {
 				if !errors.As(err, &exit) || !exit.ProcessState.Exited() {
 					t.Fatalf("lost waited renderer exit: %v", err)
 				}
+			}
+		})
+	}
+}
+
+// These arithmetic checks do not claim engine admission or verification authority.
+func TestM6SupplementRetryArithmetic(t *testing.T) {
+	max := int(^uint(0) >> 1)
+	for _, role := range []string{"pro", "con", "cross"} {
+		for _, delta := range []int{0, 1, 5} {
+			t.Run(fmt.Sprintf("%s-max-minus-%d", role, delta), func(t *testing.T) {
+				p := &plannerCaller{recovery: &PlannerRecovery{}, verification: &PlannerVerification{}}
+				roles := map[string]*VerifierPolicy{"pro": &p.verification.Policy.Pro, "con": &p.verification.Policy.Con, "cross": &p.verification.Policy.Cross}
+				roles[role].Retries = max - delta
+				state := PlannerState{Ledger: &InvestigationLedger{Action: "verify"}, VerificationRequest: &VerificationRequest{Candidate: &ClaimCandidate{}}}
+				cost, err := p.investigationCost(context.Background(), state)
+				if delta < 5 {
+					if err == nil || !strings.Contains(err.Error(), "cost overflow") {
+						t.Fatalf("wrapped retry arithmetic: %+v %v", cost, err)
+					}
+				} else if err != nil || cost != (investigationCost{Sessions: max - 2, Attempts: max, Live: 3}) {
+					t.Fatalf("exact int boundary: %+v %v", cost, err)
+				}
+			})
+		}
+	}
+	for mask := 0; mask < 8; mask++ {
+		t.Run(fmt.Sprintf("retained-%03b", mask), func(t *testing.T) {
+			claim := contract.Ref{AttemptID: "claim"}
+			p := &plannerCaller{recovery: &PlannerRecovery{Policy: RecoveryPolicy{PlannerRetries: 2}}, verification: &PlannerVerification{}}
+			d := VerificationDelivery{Claim: claim}
+			want := investigationCost{Sessions: 2, Attempts: 3}
+			for i, role := range []string{"pro", "con", "cross"} {
+				r := VerificationRoleDelivery{Role: role}
+				roles := []*VerifierPolicy{&p.verification.Policy.Pro, &p.verification.Policy.Con, &p.verification.Policy.Cross}
+				if mask&(1<<i) != 0 {
+					ref := contract.Ref{AttemptID: role}
+					r.Result = &ref
+					roles[i].Retries = max
+				} else {
+					roles[i].Retries = i + 1
+					want.Sessions += i + 2
+					want.Attempts += i + 2
+					want.Live++
+				}
+				d.Roles = append(d.Roles, r)
+			}
+			p.verification.Deliveries = []VerificationDelivery{d}
+			state := PlannerState{Ledger: &InvestigationLedger{Action: "verify"}, VerificationRequest: &VerificationRequest{Claim: &claim}}
+			got, err := p.investigationCost(context.Background(), state)
+			if err != nil || got != want {
+				t.Fatalf("retained roles charged or pending role omitted: %+v want %+v: %v", got, want, err)
 			}
 		})
 	}

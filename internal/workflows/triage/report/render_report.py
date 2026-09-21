@@ -148,6 +148,38 @@ def render(meta, data, documents):
                 text("Verifier role", result["role"])
                 evidence("Verifier allowed evidence", result["allowed_evidence"])
                 assessment(result["assessment"])
+    continuation = data.get("m6")
+    if continuation is not None:
+        sections.append("## 執行失敗與 Planner 處置\n")
+        for disposition in continuation["dispositions"]:
+            item = disposition["item"]
+            reference("最初接收此項目的歷史 owner", item["owner"])
+            reference("原 Claim 版本", item["claim"])
+            for key in ("kind", "delivery_id", "role", "index"):
+                text("歷史項目 " + key, item[key])
+            failure = item["failure"]
+            for key in ("stage", "task_id", "code", "origin", "dispatch", "run_id", "step_id", "attempt_id", "diagnostic"):
+                text("原執行失敗 " + key, failure.get(key))
+            for key in ("HandleID", "SessionID"):
+                text("原 owner " + key, failure["identity"].get(key))
+            text("Planner 處置", disposition["action"])
+            text("Planner 處置理由", disposition["reason"])
+            for result in disposition["results"]:
+                reference("後續成功結果", result)
+            evidence("處置依據", disposition["basis"])
+        for failure in continuation["report_failures"]:
+            for key in ("stage", "code", "origin", "dispatch", "run_id", "step_id", "attempt_id", "diagnostic"):
+                text("報告有限恢復歷史 " + key, failure.get(key))
+        budget = continuation["budget"]
+        if budget is not None:
+            sections.append("## 調查容量限制\n")
+            for key in ("reason", "action", "max_sessions", "max_attempts", "max_live", "used_sessions", "used_attempts", "live_sessions"):
+                text(key, budget[key])
+            for key in ("report_retries", "reserve_sessions", "reserve_attempts"):
+                text("Caller policy " + key, budget["policy"][key])
+            for key in ("sessions", "attempts", "additional_live"):
+                text("未派送整段的最壞上界 " + key, budget["rejected"][key])
+            text("預留範圍", "唯一調查 dispatcher 的 sessions/attempts admission，非原子 reservation，不保證 bytes、disk、deadline 或其他派工。")
     sections.append("## 缺口與下一步\n")
     for gap in data["gaps"]:
         text("缺口", gap)

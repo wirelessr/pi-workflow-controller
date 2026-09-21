@@ -169,6 +169,8 @@ func (p *plannerCaller) reopen(ctx context.Context, contextRef contract.Ref) (*p
 	next.recovery = p.recoveryTask()
 	next.verification = p.verificationTask()
 	next.recoveryErrors = slices.Clone(p.recoveryErrors)
+	next.nativeFailures = slices.Clone(p.nativeFailures)
+	next.reporting = p.reporting
 	return next, nil
 }
 

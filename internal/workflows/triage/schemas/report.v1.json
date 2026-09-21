@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": ["state", "context", "claims", "completeness", "closure", "gaps", "next_steps", "report_file"],
   "properties": {
+    "m6": {"$ref": "#/$defs/metadata"},
     "state": {"$ref": "common.v1.json#/$defs/ref"},
     "context": {"$ref": "common.v1.json#/$defs/ref"},
     "claims": {
@@ -27,5 +28,72 @@
     "gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
     "next_steps": {"type": "array", "items": {"type": "string", "minLength": 1}},
     "report_file": {"const": "triage-report"}
+  },
+  "$defs": {
+    "metadata": {
+      "type": "object", "additionalProperties": false,
+      "required": ["dispositions", "report_failures", "budget"],
+      "properties": {
+        "dispositions": {"type": "array", "items": {"$ref": "#/$defs/disposition"}},
+        "report_failures": {"type": "array", "items": {"$ref": "planner.v1.json#/$defs/recoveryFailure"}},
+        "budget": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/budget"}]}
+      }
+    },
+    "failure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["owner", "kind", "delivery_id", "claim", "role", "index", "failure"],
+      "properties": {
+        "owner": {"$ref": "common.v1.json#/$defs/ref"},
+        "kind": {"enum": ["planner", "workers", "wiki", "support", "verification"]},
+        "delivery_id": {"type": "string"},
+        "claim": {"anyOf": [{"type": "null"}, {"$ref": "common.v1.json#/$defs/ref"}]},
+        "role": {"type": "string"},
+        "index": {"type": "integer", "minimum": 0},
+        "failure": {"$ref": "planner.v1.json#/$defs/recoveryFailure"}
+      }
+    },
+    "disposition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["item", "action", "reason", "results", "basis"],
+      "properties": {
+        "item": {"$ref": "#/$defs/failure"},
+        "action": {"enum": ["unresolved", "handled", "redirect"]},
+        "reason": {"type": "string", "minLength": 1},
+        "results": {"type": "array", "uniqueItems": true, "items": {"$ref": "common.v1.json#/$defs/ref"}},
+        "basis": {"type": "array", "items": {"$ref": "common.v1.json#/$defs/evidence"}}
+      }
+    },
+    "budget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["policy", "max_sessions", "max_attempts", "max_live", "used_sessions", "used_attempts", "live_sessions", "action", "rejected", "reason"],
+      "properties": {
+        "policy": {
+          "type": "object", "additionalProperties": false,
+          "required": ["report_retries", "reserve_sessions", "reserve_attempts"],
+          "properties": {
+            "report_retries": {"type": "integer", "minimum": 0},
+            "reserve_sessions": {"type": "integer", "minimum": 0},
+            "reserve_attempts": {"type": "integer", "minimum": 1}
+          }
+        },
+        "max_sessions": {"type": "integer", "minimum": 1},
+        "max_attempts": {"type": "integer", "minimum": 1},
+        "max_live": {"type": "integer", "minimum": 1},
+        "used_sessions": {"type": "integer", "minimum": 0},
+        "used_attempts": {"type": "integer", "minimum": 0},
+        "live_sessions": {"type": "integer", "minimum": 0},
+        "action": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "rejected": {
+          "type": "object", "additionalProperties": false,
+          "required": ["sessions", "attempts", "additional_live"],
+          "properties": {
+            "sessions": {"type": "integer", "minimum": 0},
+            "attempts": {"type": "integer", "minimum": 0},
+            "additional_live": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    }
   }
 }

@@ -1470,7 +1470,7 @@ func corruptInputEvidence(ref contract.Ref) error {
 	return os.WriteFile(filepath.Join(filepath.Dir(ref.Path), p.Files[0].Path), []byte("changed after acceptance"), 0600)
 }
 
-func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stageTask, step int) PlannerState {
+func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stageTask, step int, reporting ...bool) PlannerState {
 	t.Helper()
 	if strings.HasPrefix(name, "r5-") {
 		if name == "r5-incomplete" {
@@ -1713,6 +1713,10 @@ func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stag
 		if delivered.Checkpoint == nil || !strings.HasPrefix(task.Requirements, plannerRequirements+"\n\n"+adaptiveRequirements+"\n\nCopy the supplied checkpoint object exactly") {
 			t.Fatal("M3 entry omitted checkpoint or requirements")
 		}
+	} else if len(reporting) > 0 && reporting[0] {
+		if delivered.Recovery == nil || !strings.Contains(task.Requirements, recoveryRequirements) || delivered.Checkpoint != nil {
+			t.Fatal("M6 omitted explicit recovery or invented capacity")
+		}
 	} else if task.Requirements != plannerRequirements+"\n\n"+adaptiveRequirements || delivered.Checkpoint != nil {
 		t.Fatal("adaptive Planner lost its requirements or nil policy gained checkpoint requirements")
 	}
@@ -1794,6 +1798,7 @@ func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stag
 		}
 	}
 	switch {
+	case name == "m2-yield":
 	case slices.Contains([]string{"m2-parallel-batches-yield", "m2-batch-consumed-order", "m2-batch-results-order", "m2-batch-foreign-ref"}, name) || strings.HasPrefix(name, "m2-branch-"):
 		if step == 1 {
 			workers("w1", "w2", "w3", "w4", "w5")
@@ -2313,17 +2318,35 @@ func m2WikiFixture(t *testing.T, name string, req contract.Request) (WikiSearch,
 // All barriers use the existing Host events and the real engine snapshot. Only
 // the event-loop goroutine owns these maps; the workflow never mutates them.
 type m2Barrier struct {
-	held     map[string]protocol.Event
-	attempts map[string]string
-	order    []string
-	waiting  string
-	proved   bool
-	faulted  bool
-	stats    []contract.Ref
+	reportFailureAttempt string
+	held                 map[string]protocol.Event
+	attempts             map[string]string
+	order                []string
+	waiting              string
+	proved               bool
+	faulted              bool
+	stats                []contract.Ref
 }
 
 func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 	t.Helper()
+	if b.reportFailureAttempt != "" {
+		if b.faulted || len(b.held) != 2 {
+			return
+		}
+		snapshot := r.Snapshot()
+		a := snapshot.Attempts[b.reportFailureAttempt]
+		if a.State != engine.Failed || snapshot.Sessions[a.HandleID].State != "Closed" {
+			return
+		}
+		for _, role := range []string{"pro", "cross"} {
+			if err := b.held[role].Reply(protocol.Control{Type: "settle"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		b.proved, b.faulted = true, true
+		return
+	}
 	if strings.HasPrefix(name, "m5-supplement-exhausted-") {
 		if len(b.held) != 1 || b.faulted {
 			return
@@ -2684,6 +2707,10 @@ func r5RenderCandidate(t *testing.T, ctx context.Context, r *engine.Run, name st
 		envelope.Files[0].Kind = "evidence"
 	case "r5-file-path":
 		envelope.Files[0].Path = "artifacts/missing.md"
+	case "m6-file-hardcap":
+		if err := os.WriteFile(reportPath, bytes.Repeat([]byte("x"), (64<<10)+1), 0600); err != nil {
+			t.Fatal(err)
+		}
 	case "r5-body-tamper":
 		if err := os.WriteFile(reportPath, []byte("# Forged report\n"), 0600); err != nil {
 			t.Fatal(err)
@@ -2701,7 +2728,7 @@ func r5RenderCandidate(t *testing.T, ctx context.Context, r *engine.Run, name st
 	return true
 }
 
-func r5AssertOutcome(t *testing.T, tc triageCase, report engine.Report, stateRef, reportRef contract.Ref, count int) {
+func r5AssertOutcome(t *testing.T, tc triageCase, report engine.Report, stateRef, reportRef contract.Ref, count int, runDir string) {
 	t.Helper()
 	if (report.Failure != nil) != tc.failure {
 		t.Fatalf("failure=%v, want %v", report.Failure, tc.failure)
@@ -2761,6 +2788,12 @@ func r5AssertOutcome(t *testing.T, tc triageCase, report engine.Report, stateRef
 	}
 	if tc.name != "r5-incomplete" && (len(accepted.Data.Claims) != wantClaims || accepted.Data.Claims[0].AssessmentOwner == stateRef) {
 		t.Fatal("historical assessment was rebound to yield state")
+	}
+	var persisted struct {
+		Final *engine.FinalDelivery `json:"final"`
+	}
+	if err := protocol.ReadJSON(filepath.Join(runDir, "result.json"), &persisted); err != nil || !reflect.DeepEqual(persisted.Final, report.Final) {
+		t.Fatalf("legacy persisted final mismatch: %v", err)
 	}
 	body, err := os.ReadFile(report.Final.ArtifactPath)
 	if err != nil || !bytes.Contains(body, []byte("Missing runtime evidence")) || !bytes.Contains(body, []byte(stateRef.SHA256)) || bytes.Contains(body, []byte("\"handle_id\"")) {
@@ -5551,12 +5584,169 @@ func TestTriageValidation(t *testing.T) {
 	}
 }
 
+// M6 cases reuse the existing RPC producer and fault scenarios, not a second driver.
+type m6Case struct {
+	base                                   string
+	stages                                 int
+	failure, final                         bool
+	fault, disposition, boundary, contains string
+	sessions, attempts                     int
+	live                                   int
+	plannerRetries                         int
+	cost                                   investigationCost
+}
+
+var m6Cases = map[string]m6Case{
+	"m6-review-worker-resume":                            {base: "m4-worker-timeout", stages: 9, final: true, plannerRetries: 1, fault: "worker-resume", disposition: "handled"},
+	"m6-review-worker-wrong-task":                        {base: "m4-worker-timeout", stages: 9, failure: true, plannerRetries: 1, fault: "worker-resume-wrong-task", disposition: "handled", boundary: "step-committed", contains: "handled result does not continue failed work"},
+	"m6-review-worker-wrong-proposal":                    {base: "m4-worker-timeout", stages: 9, failure: true, plannerRetries: 1, fault: "worker-resume-wrong-proposal", disposition: "handled", boundary: "step-committed", contains: "handled result does not continue failed work"},
+	"m6-review-worker-redirect":                          {base: "m4-worker-timeout", stages: 7, final: true, plannerRetries: 1, disposition: "redirect"},
+	"m6-review-wiki-resume":                              {base: "m4-wiki-timeout-partial-resume", stages: 11, final: true, plannerRetries: 1, disposition: "handled"},
+	"m6-review-wiki-wrong-role":                          {base: "m4-wiki-timeout-partial-resume", stages: 11, failure: true, plannerRetries: 1, disposition: "handled", fault: "wiki-worker-result", boundary: "step-committed", contains: "handled result does not continue failed work"},
+	"m6-review-planner-retry":                            {base: "m4-planner-first-compaction", stages: 6, final: true, plannerRetries: 1, disposition: "handled"},
+	"m6-review-planner-arbitrary-state":                  {base: "m4-planner-first-compaction", stages: 7, failure: true, plannerRetries: 1, disposition: "handled", fault: "planner-arbitrary-state", boundary: "step-committed", contains: "handled result does not continue failed work"},
+	"m6-review-claim-retry":                              {base: "m5-claim-timeout-retry", stages: 11, final: true, plannerRetries: 1, disposition: "handled"},
+	"m6-review-claim-planner-state":                      {base: "m5-claim-timeout-retry", stages: 11, failure: true, plannerRetries: 1, disposition: "handled", fault: "claim-planner-state", boundary: "step-committed", contains: "handled result does not continue failed work"},
+	"m6-review-support-resolve-wiki":                     {base: "m4-support-resolve-wiki-timeout", stages: 12, final: true, plannerRetries: 1, disposition: "handled"},
+	"m6-review-support-resolve-context":                  {base: "m4-support-resolve-context-timeout", stages: 12, final: true, plannerRetries: 1, disposition: "handled"},
+	"m6-review-support-revise-wiki":                      {base: "m4-support-update-wiki-timeout", stages: 13, final: true, plannerRetries: 1, disposition: "handled"},
+	"m6-review-support-revise-context":                   {base: "m4-support-update-context-timeout", stages: 13, final: true, plannerRetries: 1, disposition: "handled"},
+	"m6-review-support-wrong-phase":                      {base: "m4-support-update-wiki-timeout", stages: 13, failure: true, plannerRetries: 1, disposition: "handled", fault: "support-wiki-result", boundary: "step-committed", contains: "handled result does not continue failed work"},
+	"m6-review-worker-owner-handled":                     {base: "m4-worker-timeout", stages: 7, failure: true, plannerRetries: 1, fault: "worker-owner-handled", boundary: "step-committed", contains: "handled result does not continue failed work"},
+	"m6-supplement-resolve-wiki-resume-attempt-exact":    {base: "m4-support-resolve-wiki-timeout", stages: 12, final: true, plannerRetries: 1, attempts: 14},
+	"m6-supplement-resolve-context-resume-attempt-exact": {base: "m4-support-resolve-context-timeout", stages: 12, final: true, plannerRetries: 1, attempts: 15},
+	"m6-supplement-revise-wiki-resume-attempt-exact":     {base: "m4-support-update-wiki-timeout", stages: 13, final: true, plannerRetries: 1, attempts: 16},
+	"m6-supplement-revise-context-resume-attempt-exact":  {base: "m4-support-update-context-timeout", stages: 13, final: true, plannerRetries: 1, attempts: 17},
+	"m6-supplement-resolve-wiki-resume-session-short":    {base: "m4-support-resolve-wiki-timeout", stages: 9, failure: true, final: true, plannerRetries: 1, sessions: 11, cost: investigationCost{Sessions: 4, Attempts: 4}},
+	"m6-supplement-resolve-context-resume-session-short": {base: "m4-support-resolve-context-timeout", stages: 10, failure: true, final: true, plannerRetries: 1, sessions: 12, cost: investigationCost{Sessions: 4, Attempts: 4}},
+	"m6-supplement-revise-wiki-resume-session-short":     {base: "m4-support-update-wiki-timeout", stages: 10, failure: true, final: true, plannerRetries: 1, sessions: 13, cost: investigationCost{Sessions: 5, Attempts: 5}},
+	"m6-supplement-revise-context-resume-session-short":  {base: "m4-support-update-context-timeout", stages: 11, failure: true, final: true, plannerRetries: 1, sessions: 14, cost: investigationCost{Sessions: 5, Attempts: 5}},
+	"m6-supplement-resolve-wiki-resume-session-exact":    {base: "m4-support-resolve-wiki-timeout", stages: 12, final: true, plannerRetries: 1, sessions: 12},
+	"m6-supplement-resolve-context-resume-session-exact": {base: "m4-support-resolve-context-timeout", stages: 12, final: true, plannerRetries: 1, sessions: 13},
+	"m6-supplement-revise-wiki-resume-session-exact":     {base: "m4-support-update-wiki-timeout", stages: 13, final: true, plannerRetries: 1, sessions: 14},
+	"m6-supplement-revise-context-resume-session-exact":  {base: "m4-support-update-context-timeout", stages: 13, final: true, plannerRetries: 1, sessions: 15},
+	"m6-supplement-wrong-result-role":                    {base: "m5-same-version-missing-only", stages: 13, failure: true, disposition: "handled", fault: "wrong-result-role", boundary: "step-committed", contains: "exact claim version and role"},
+	"m6-supplement-overflow-pro":                         {base: "m5-three-fresh-yield", stages: 4, failure: true, fault: "overflow-pro", contains: "cost overflow"},
+	"m6-supplement-overflow-con":                         {base: "m5-three-fresh-yield", stages: 4, failure: true, fault: "overflow-con", contains: "cost overflow"},
+	"m6-supplement-overflow-cross":                       {base: "m5-three-fresh-yield", stages: 4, failure: true, fault: "overflow-cross", contains: "cost overflow"},
+	"m6-supplement-verifier-live-short":                  {base: "m5-three-fresh-yield", stages: 5, failure: true, final: true, live: 3, cost: investigationCost{Sessions: 6, Attempts: 8, Live: 3}},
+	"m6-supplement-verifier-live-exact":                  {base: "m5-three-fresh-yield", stages: 10, final: true, live: 4},
+	"m6-supplement-resolve-wiki-resume-reserve":          {base: "m4-support-resolve-wiki-timeout", stages: 9, failure: true, final: true, plannerRetries: 1, attempts: 13, cost: investigationCost{Sessions: 4, Attempts: 4}},
+	"m6-supplement-resolve-context-resume-reserve":       {base: "m4-support-resolve-context-timeout", stages: 10, failure: true, final: true, plannerRetries: 1, attempts: 14, cost: investigationCost{Sessions: 4, Attempts: 4}},
+	"m6-supplement-revise-wiki-resume-reserve":           {base: "m4-support-update-wiki-timeout", stages: 10, failure: true, final: true, plannerRetries: 1, attempts: 15, cost: investigationCost{Sessions: 5, Attempts: 5}},
+	"m6-supplement-revise-context-resume-reserve":        {base: "m4-support-update-context-timeout", stages: 11, failure: true, final: true, plannerRetries: 1, attempts: 16, cost: investigationCost{Sessions: 5, Attempts: 5}},
+	"m6-supplement-decision-journal":                     {base: "m2-yield", stages: 5, failure: true, fault: "journal-decision", boundary: "validated", contains: "journal append/Sync failed"},
+	"m6-supplement-host-lookup":                          {base: "m2-yield", stages: 5, failure: true, fault: "host-lookup", boundary: "step-committed", contains: "executable file not found"},
+	"m6-supplement-retry-finished-seam":                  {base: "m2-yield", stages: 5, failure: true, fault: "seam-retry-finished", contains: "journal append/Sync failed"},
+	"m6-supplement-foreign-producer-seam":                {base: "m2-yield", stages: 5, failure: true, fault: "seam-foreign-producer", contains: "exact Planner producer"},
+	"m6-supplement-parent-owner-seam":                    {base: "m2-yield", stages: 5, failure: true, fault: "seam-parent-owner", contains: "report input owners changed"},
+	"m6-history-cross-handled":                           {base: "m5-same-version-missing-only", stages: 13, final: true, disposition: "handled", fault: "cross-missing"},
+	"m6-verifiers-reverse-completion":                    {base: "m5-reverse-completion", stages: 10, final: true, attempts: 14, sessions: 11},
+	"m6-report-file-hardcap":                             {base: "m2-yield", stages: 5, failure: true, fault: "m6-file-hardcap", boundary: "prepared", contains: "file exceeds byte limit"},
+	"m6-policy-zero-invalid":                             {base: "m2-yield", stages: 3, failure: true, fault: "policy-zero", contains: "explicit report reserves"},
+	"m6-policy-zero-retry-valid":                         {base: "m2-yield", stages: 5, final: true, fault: "policy-zero-retry"},
+	"m6-policy-negative-retry":                           {base: "m2-yield", stages: 3, failure: true, fault: "policy-negative-retry", contains: "explicit report reserves"},
+	"m6-policy-negative-session":                         {base: "m2-yield", stages: 3, failure: true, fault: "policy-negative-session", contains: "explicit report reserves"},
+	"m6-policy-negative-attempt":                         {base: "m2-yield", stages: 3, failure: true, fault: "policy-negative-attempt", contains: "explicit report reserves"},
+	"m6-policy-overflow":                                 {base: "m2-yield", stages: 3, failure: true, fault: "policy-overflow", contains: "explicit report reserves"},
+	"m6-policy-retry-session-short":                      {base: "m2-yield", stages: 3, failure: true, fault: "policy-session-short", contains: "explicit report reserves"},
+	"m6-policy-retry-attempt-short":                      {base: "m2-yield", stages: 3, failure: true, fault: "policy-attempt-short", contains: "explicit report reserves"},
+	"m6-policy-no-recovery":                              {base: "m2-yield", stages: 3, failure: true, fault: "policy-no-recovery", contains: "explicit finite Planner recovery"},
+	"m6-policy-recovery-overflow":                        {base: "m2-yield", stages: 3, failure: true, fault: "policy-recovery-overflow", contains: "explicit finite Planner recovery"},
+	"m6-policy-wrong-renderer":                           {base: "m2-yield", stages: 3, failure: true, fault: "policy-wrong-renderer", contains: "extracted run resources"},
+	"m6-report-journal-fatal":                            {base: "m2-yield", stages: 5, failure: true, fault: "journal"},
+	"m6-report-storage-fatal":                            {base: "m2-yield", stages: 5, failure: true, fault: "storage"},
+	"m6-report-unknown-provider":                         {base: "m2-yield", stages: 5, failure: true, fault: "provider", contains: "terminal failure without proven retry recovery"},
+	"m6-report-failures-echo":                            {base: "m2-yield", stages: 6, failure: true, fault: "retry-echo", boundary: "step-committed", contains: "complete M6 history"},
+	"m6-workers-feedback-retry-reserve":                  {base: "m2-parallel-batches-yield", stages: 5, failure: true, final: true, plannerRetries: 1, attempts: 10, cost: investigationCost{Sessions: 4, Attempts: 5, Live: 3}},
+	"m6-claim-and-role-retry-reserve":                    {base: "m5-three-fresh-yield", stages: 5, failure: true, final: true, plannerRetries: 1, attempts: 15, cost: investigationCost{Sessions: 8, Attempts: 10, Live: 3}},
+	"m6-capacity-unknown":                                {base: "m3-unknown", stages: 7, final: true},
+	"m6-capacity-handoff":                                {base: "m3-capacity-at", stages: 7, final: true},
+	"m6-capacity-reserve-short":                          {base: "m3-capacity-at", stages: 5, failure: true, final: true, sessions: 6, cost: investigationCost{Sessions: 2, Attempts: 2, Live: 1}},
+	"m6-history-workers":                                 {base: "m4-mixed-three-failed", stages: 9, final: true, plannerRetries: 1},
+	"m6-history-worker-unresolved":                       {base: "m4-worker-timeout", stages: 7, failure: true, final: true, plannerRetries: 1, disposition: "unresolved", contains: "unresolved execution"},
+	"m6-history-wiki-resume":                             {base: "m4-wiki-timeout-partial-resume", stages: 11, final: true, plannerRetries: 1},
+	"m6-support-resolve-resume":                          {base: "m4-support-resolve-context-timeout", stages: 12, final: true, plannerRetries: 1},
+	"m6-support-revise-resume":                           {base: "m4-support-update-context-timeout", stages: 13, final: true, plannerRetries: 1},
+	"m6-support-resolve-reserve":                         {base: "m4-support-resolve-context-timeout", stages: 5, failure: true, final: true, plannerRetries: 1, attempts: 9, cost: investigationCost{Sessions: 4, Attempts: 4, Live: 0}},
+	"m6-support-revise-reserve":                          {base: "m4-support-update-context-timeout", stages: 5, failure: true, final: true, plannerRetries: 1, attempts: 10, cost: investigationCost{Sessions: 5, Attempts: 5, Live: 0}},
+	"m6-reframe-wiki":                                    {base: "m5-supplement-reframe-wiki", stages: 18, final: true},
+	"m6-ordinary-cancel-no-report":                       {base: "m4-planner-user-cancel", stages: 4, failure: true, plannerRetries: 1},
+	"m6-ordinary-schema-no-report":                       {base: "m5-feedback-missing", stages: 9, failure: true, contains: "verification"},
+	"m6-ordinary-fatal-no-report":                        {base: "m4-mixed-storage-fatal", stages: 7, failure: true, plannerRetries: 1},
+	"m6-bootstrap-existing-cap":                          {base: "m4-planner-run-limit", stages: 3, failure: true, plannerRetries: 1, contains: "bootstrap"},
+	"m6-true-hardcap-no-report":                          {base: "m2-yield", stages: 2, failure: true, attempts: 2},
+	"m6-history-retry-full-inputs":                       {base: "m5-verifier-unavailable", stages: 12, failure: true, final: true, disposition: "unresolved", fault: "compaction-once", contains: "unresolved execution"},
+	"m6-mandatory-reframe-inspection":                    {base: "m5-supplement-reframe-inspection-resume", stages: 22, final: true},
+	"m6-ordinary-cleanup-priority":                       {base: "m4-mixed-committed-close-cleanup-fatal", stages: 7, failure: true, plannerRetries: 1},
+	"m6-ordinary-journal-priority":                       {base: "m4-mixed-journal-fatal", stages: 7, failure: true, plannerRetries: 1},
+	"m6-report-postcommit-evidence":                      {base: "m2-yield", stages: 5, failure: true, fault: "r5-evidence-tamper", boundary: "step-committed"},
+	"m6-workers-first-segment-sessions-exact":            {base: "m2-parallel-batches-yield", stages: 9, failure: true, final: true, sessions: 8, cost: investigationCost{Sessions: 2, Attempts: 3, Live: 2}},
+	"m6-support-inspection-reserve":                      {base: "m4-support-resolve-context-timeout", stages: 8, failure: true, final: true, plannerRetries: 1, attempts: 10, cost: investigationCost{Sessions: 2, Attempts: 3, Live: 1}},
+	"m6-yield":                                           {base: "m2-yield", stages: 5, final: true},
+	"m6-verified-yield":                                  {base: "m5-three-fresh-yield", stages: 10, final: true},
+	"m6-report-timeout-retry":                            {base: "m2-yield", stages: 6, final: true, fault: "timeout-once"},
+	"m6-report-compaction-retry":                         {base: "m2-yield", stages: 6, final: true, fault: "compaction-once"},
+	"m6-report-timeout-exhausted":                        {base: "m2-yield", stages: 6, failure: true, fault: "timeout-always", boundary: "prepared", contains: "RetryExhausted"},
+	"m6-report-compaction-exhausted":                     {base: "m2-yield", stages: 6, failure: true, fault: "compaction-always", boundary: "prepared", contains: "RetryExhausted"},
+	"m6-report-postcommit-binding":                       {base: "m2-yield", stages: 5, failure: true, fault: "r5-state-binding", boundary: "step-committed", contains: "binding mismatch"},
+	"m6-report-postcommit-render":                        {base: "m2-yield", stages: 5, failure: true, fault: "r5-body-tamper", boundary: "step-committed", contains: "deterministic accepted projection"},
+	"m6-report-close-failure":                            {base: "m2-yield", stages: 5, failure: true, fault: "cleanup", boundary: "retry-finished", contains: "cleanup"},
+	"m6-report-cancel":                                   {base: "m2-yield", stages: 5, failure: true, fault: "r5-cancel"},
+	"m6-report-schema":                                   {base: "m2-yield", stages: 5, failure: true, fault: "schema"},
+	"m6-metadata-missing":                                {base: "m2-yield", stages: 5, failure: true, fault: "metadata-missing", boundary: "step-committed", contains: "complete M6 history"},
+	"m6-budget-echo":                                     {base: "m2-parallel-batches-yield", stages: 5, failure: true, fault: "budget-echo", attempts: 9, boundary: "step-committed", contains: "exact budget"},
+	"m6-bootstrap-attempts-short":                        {base: "m2-yield", stages: 3, failure: true, attempts: 5, contains: "bootstrap"},
+	"m6-bootstrap-sessions-short":                        {base: "m2-yield", stages: 3, failure: true, sessions: 4, contains: "bootstrap"},
+	"m6-bootstrap-exact":                                 {base: "m2-yield", stages: 5, final: true, sessions: 5, attempts: 6},
+	"m6-workers-reserve-attempts-short":                  {base: "m2-parallel-batches-yield", stages: 5, failure: true, final: true, attempts: 9, cost: investigationCost{Sessions: 3, Attempts: 4, Live: 3}},
+	"m6-workers-reserve-sessions-short":                  {base: "m2-parallel-batches-yield", stages: 5, failure: true, final: true, sessions: 7, cost: investigationCost{Sessions: 3, Attempts: 4, Live: 3}},
+	"m6-workers-first-segment-exact":                     {base: "m2-parallel-batches-yield", stages: 9, failure: true, final: true, attempts: 10, cost: investigationCost{Sessions: 2, Attempts: 3, Live: 2}},
+	"m6-workers-all-segments":                            {base: "m2-parallel-batches-yield", stages: 12, final: true},
+	"m6-verifiers-reserve-short":                         {base: "m5-three-fresh-yield", stages: 5, failure: true, final: true, attempts: 13, cost: investigationCost{Sessions: 6, Attempts: 8, Live: 3}},
+	"m6-verifiers-reserve-exact":                         {base: "m5-three-fresh-yield", stages: 10, final: true, attempts: 14, sessions: 11},
+	"m6-history-unresolved":                              {base: "m5-verifier-unavailable", stages: 11, failure: true, final: true, disposition: "unresolved", contains: "unresolved execution"},
+	"m6-history-unselected-claim":                        {base: "m5-verifier-unavailable", stages: 11, failure: true, final: true, disposition: "unresolved", fault: "unselected", contains: "unresolved execution"},
+	"m6-history-redirect":                                {base: "m5-verifier-unavailable", stages: 11, final: true},
+	"m6-history-same-version-handled":                    {base: "m5-same-version-missing-only", stages: 13, final: true, disposition: "handled"},
+	"m6-history-retained-role":                           {base: "m5-verifier-compaction-retry", stages: 11, final: true, disposition: "handled"},
+	"m6-history-missing-item":                            {base: "m5-verifier-unavailable", stages: 11, failure: true, fault: "missing-item", boundary: "step-committed", contains: "complete M6 history"},
+	"m6-history-duplicate-item":                          {base: "m5-verifier-unavailable", stages: 11, failure: true, fault: "duplicate-item", boundary: "step-committed", contains: "exact distinct historical"},
+	"m6-history-wrong-owner":                             {base: "m5-verifier-unavailable", stages: 11, failure: true, fault: "wrong-owner", boundary: "step-committed", contains: "exact distinct historical"},
+	"m6-history-no-basis":                                {base: "m5-verifier-unavailable", stages: 11, failure: true, fault: "no-basis", boundary: "step-committed", contains: "redirect requires evidence"},
+	"m6-history-uncommitted-result":                      {base: "m5-same-version-missing-only", stages: 13, failure: true, disposition: "handled", fault: "uncommitted-result", boundary: "step-committed", contains: "supplied committed Ref"},
+	"m6-history-wrong-version":                           {base: "m5-same-version-missing-only", stages: 13, failure: true, disposition: "handled", fault: "wrong-version", boundary: "step-committed", contains: "exact distinct historical"},
+	"m6-planner-history-reopen":                          {base: "m4-planner-first-compaction", stages: 6, final: true, plannerRetries: 1},
+	"m6-claim-history-reopen":                            {base: "m5-claim-timeout-retry", stages: 11, final: true, plannerRetries: 1},
+}
+
 func TestIntakeToContext(t *testing.T) {
-	for _, tc := range triageCases {
+	cases := slices.Clone(triageCases)
+	var names []string
+	for name := range m6Cases {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		v := m6Cases[name]
+		cases = append(cases, triageCase{name, v.stages, v.failure, true})
+	}
+	for _, tc := range cases {
 		if validationStage(tc.name) != "" {
 			continue
 		}
 		t.Run(tc.name, func(t *testing.T) {
+			m6Name := tc.name
+			m6Spec, m6 := m6Cases[tc.name]
+			if m6 {
+				tc.name = m6Spec.base
+			}
+			var m6Result engine.Result
+			var m6Err error
+			var m6SeamRef contract.Ref
+			var m6SeamPlanner string
+			var m6Tasks []reportTask
+			var m6Requests []contract.Request
 			lateAbort := tc.name == "m4-mixed-journal-fatal-late-abort"
 			if lateAbort {
 				// Keep the original fault path and all of its outcome assertions.
@@ -5837,6 +6027,20 @@ func TestIntakeToContext(t *testing.T) {
 				policy.MaxTotalSessions = 4
 				policy.MaxLiveSessions = 4
 			}
+			if m6 {
+				if m6Spec.fault == "m6-file-hardcap" {
+					policy.MaxFileBytes = 64 << 10
+				}
+				if m6Spec.live != 0 {
+					policy.MaxLiveSessions = m6Spec.live
+				}
+				if m6Spec.sessions != 0 {
+					policy.MaxTotalSessions = m6Spec.sessions
+				}
+				if m6Spec.attempts != 0 {
+					policy.MaxTotalAttempts = m6Spec.attempts
+				}
+			}
 			exe, err := os.Executable()
 			if err != nil {
 				t.Fatal(err)
@@ -5860,6 +6064,117 @@ func TestIntakeToContext(t *testing.T) {
 				var err error
 				models := sliceModels{FetchThinking: "high", Analysis: runtime.ModelSpec{Provider: "fixture", ID: "analysis", Thinking: "high"}}
 				result, err = executeSlice(ctx, run, scope, models)
+				if err == nil && m6 {
+					renderer, extractErr := ExtractReport(run.Dir())
+					if extractErr != nil {
+						return engine.Result{}, extractErr
+					}
+					var verification *VerificationPolicy
+					if m5 {
+						verification = &VerificationPolicy{
+							Pro:   VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "pro", Thinking: "high"}, Retries: 1},
+							Con:   VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "con", Thinking: "medium"}, Retries: 1},
+							Cross: VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "cross", Thinking: "low"}, Retries: 1},
+						}
+					}
+					if strings.HasPrefix(m6Spec.fault, "overflow-") {
+						roles := map[string]*VerifierPolicy{"overflow-pro": &verification.Pro, "overflow-con": &verification.Con, "overflow-cross": &verification.Cross}
+						roles[m6Spec.fault].Retries = int(^uint(0) >> 1)
+					}
+					var capacity *PlannerCapacityPolicy
+					if m3 || tc.name == "m4-capacity-fresh-worker-timeout" || strings.HasPrefix(tc.name, "m4-reframe-") {
+						capacity = &PlannerCapacityPolicy{HandoffPercent: 80}
+					}
+					recovery := &RecoveryPolicy{PlannerRetries: m6Spec.plannerRetries}
+					reportPolicy := ReportPolicy{ReportRetries: 1, ReserveSessions: 1, ReserveAttempts: 2}
+					switch m6Spec.fault {
+					case "policy-zero":
+						reportPolicy = ReportPolicy{}
+					case "policy-zero-retry":
+						reportPolicy = ReportPolicy{ReserveAttempts: 1}
+					case "policy-negative-retry":
+						reportPolicy.ReportRetries = -1
+					case "policy-negative-session":
+						reportPolicy.ReserveSessions = -1
+					case "policy-negative-attempt":
+						reportPolicy.ReserveAttempts = -1
+					case "policy-overflow":
+						reportPolicy.ReportRetries = int(^uint(0) >> 1)
+					case "policy-session-short":
+						reportPolicy.ReserveSessions = 0
+					case "policy-attempt-short":
+						reportPolicy.ReserveAttempts = 1
+					case "policy-no-recovery":
+						recovery = nil
+					case "policy-recovery-overflow":
+						recovery.PlannerRetries = int(^uint(0) >> 1)
+					case "policy-wrong-renderer":
+						renderer = filepath.Join(run.Dir(), "other.py")
+					}
+					if strings.HasPrefix(m6Spec.fault, "seam-") {
+						p, err := initializeInvestigation(ctx, run, scope, runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}, result.Context, capacity, recovery, verification)
+						if err != nil {
+							return engine.Result{}, err
+						}
+						p.reporting = &investigationReporting{policy: reportPolicy, renderer: renderer, pending: &PendingReportError{}}
+						if _, err = p.planningStep(ctx); err != nil {
+							return engine.Result{}, err
+						}
+						p.reporting.pending.State = *p.last
+						m6SeamPlanner = p.identity.HandleID
+						if m6Spec.fault == "seam-retry-finished" {
+							_, _, m6Err = retryPlannerInputs(ctx, run, run.Root(), "report-seam", "report", 1, func(ctx context.Context, s *engine.Scope) (contract.Ref, error) {
+								ref, err := p.reportInScope(ctx, s, renderer)
+								if err != nil {
+									return ref, err
+								}
+								m6SeamRef = ref
+								return ref, os.Rename(filepath.Join(run.Dir(), "events.jsonl"), filepath.Join(run.Dir(), "events.jsonl.before-fault"))
+							}, nil)
+						} else {
+							task, inputs, err := p.reportInputs(newAcceptance(ctx, run))
+							if err != nil {
+								return engine.Result{}, err
+							}
+							task.Renderer = renderer
+							if m6Spec.fault == "seam-foreign-producer" {
+								if err := p.close(ctx); err != nil {
+									return engine.Result{}, err
+								}
+								foreign, err := startPlanner(ctx, run, scope, p.model, result.Context)
+								if err != nil {
+									return engine.Result{}, err
+								}
+								out, err := run.Root().Step(ctx, engine.StepSpec{Key: "report-" + p.last.AttemptID, Session: foreign.handle, Prompt: string(testJSON(task)), Inputs: inputs, Output: contract.Spec{SchemaID: ReportSchema}, Timeout: time.Minute})
+								if err != nil {
+									return engine.Result{}, err
+								}
+								m6SeamRef = out.Output
+							} else {
+								m6SeamRef, err = p.reportInScope(ctx, run.Root(), renderer)
+								if err != nil {
+									return engine.Result{}, err
+								}
+								changed := false
+								for i := range task.Owners {
+									if strings.Contains(task.Owners[i].Scope, "/") {
+										task.Owners[i].Scope = task.Owners[i].Scope[:strings.LastIndex(task.Owners[i].Scope, "/")]
+										changed = true
+										break
+									}
+								}
+								if !changed {
+									t.Error("fixture has no child-scope owner to forge")
+								}
+							}
+							m6Err = p.checkReport(ctx, m6SeamRef, task, inputs)
+						}
+						return engine.Result{}, m6Err
+					}
+					m6Result, m6Err = executeInvestigationReport(ctx, run, scope, runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}, models, result.Context, capacity, recovery, verification, reportPolicy, renderer)
+					plannerRef, reportRef = m6Result.Outputs["state"], m6Result.Outputs["report"]
+					return m6Result, m6Err
+				}
 				if err == nil && r5 {
 					plannerRef, reportRef, err = r5Run(t, ctx, run, scope, result.Context, tc.name)
 				}
@@ -6203,7 +6518,7 @@ func TestIntakeToContext(t *testing.T) {
 			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" || tc.name == "planner-timeout" || tc.name == "work-worker-timeout" || tc.name == "work-planner-timeout" || tc.name == "m1-worker-timeout" {
 				transport = deadlineRuntime{Runtime: pi}
 			}
-			if tc.name == "m2-branch-timeout" || m4 || m5 {
+			if tc.name == "m2-branch-timeout" || m4 || m5 || m6 {
 				transport = deadlineRuntime{Runtime: pi}
 				if tc.name == "m4-mixed-timeout" || tc.name == "m4-mixed-storage-fatal" || tc.name == "m4-mixed-journal-fatal" || tc.name == "m4-mixed-user-cancel" || tc.name == "m4-mixed-wait-fatal" || tc.name == "m4-mixed-three-failed" {
 					transport = deadlineRuntime{Runtime: pi, taskTimeouts: map[string]time.Duration{"w1": time.Minute}}
@@ -6477,7 +6792,7 @@ func TestIntakeToContext(t *testing.T) {
 					if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
 						t.Fatal(err)
 					}
-					if m4 {
+					if m4 && req.Output.SchemaID != ReportSchema {
 						model := runtime.ModelSpec{Provider: "fixture", ID: "analysis", Thinking: "high"}
 						if task.Stage == "intake" || task.Stage == "intake-update" || task.Stage == "intake-revision" {
 							model = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: "high"}
@@ -6512,7 +6827,7 @@ func TestIntakeToContext(t *testing.T) {
 					if m5 {
 						m4Phases[task.Stage]++
 					}
-					pureVerification := m5 && (req.Output.SchemaID == ReportSchema || req.Output.SchemaID == ClaimSchema || req.Output.SchemaID == VerificationSchema || task.Stage == "m5-supplement-publication")
+					pureVerification := m6 && req.Output.SchemaID == ReportSchema || m5 && (req.Output.SchemaID == ReportSchema || req.Output.SchemaID == ClaimSchema || req.Output.SchemaID == VerificationSchema || task.Stage == "m5-supplement-publication")
 					if !pureVerification && !reflect.DeepEqual(task.Scope, scope) {
 						t.Fatal("scope not in prompt")
 					}
@@ -6569,6 +6884,130 @@ func TestIntakeToContext(t *testing.T) {
 								}
 								selected := append([]ReportClaim{}, reportTask.Assessments...)
 								data = InvestigationReport{State: reportTask.State, Context: reportTask.Context, Claims: selected, Completeness: "incomplete", Closure: "Missing runtime evidence, not disproof", Gaps: append([]string{}, state.Data.Gaps...), NextSteps: []string{"Obtain authorized runtime measurements"}, ReportFile: ReportFileID}
+								if m6 {
+									m6Tasks = append(m6Tasks, reportTask)
+									m6Requests = append(m6Requests, req)
+									v := data.(InvestigationReport)
+									v.Claims = []ReportClaim{}
+									seen := map[contract.Ref]bool{}
+									for _, claim := range selected {
+										if !seen[claim.Claim] {
+											v.Claims = append(v.Claims, claim)
+											seen[claim.Claim] = true
+										}
+									}
+									v.M6 = &ReportMetadata{Dispositions: []ReportDisposition{}, ReportFailures: append([]RecoveryFailure{}, reportTask.M6.ReportFailures...), Budget: reportTask.M6.Budget}
+									for _, item := range reportTask.M6.Failures {
+										action := m6Spec.disposition
+										if action == "" {
+											action = "redirect"
+										}
+										d := ReportDisposition{Item: item, Action: action, Reason: "Fixture Planner explicitly accounts for this historical work", Results: []contract.Ref{}, Basis: slices.Clone(state.Data.Hypotheses[0].Evidence)}
+										if action == "handled" {
+											d.Basis = []Evidence{}
+											for _, ref := range req.Inputs {
+												switch item.Kind {
+												case "verification":
+													if ref.SchemaID != VerificationSchema {
+														continue
+													}
+													var result publication[VerificationResult]
+													if err := protocol.ReadJSON(ref.Path, &result); err != nil {
+														t.Fatal(err)
+													}
+													if result.Data.Claim == *item.Claim && result.Data.Role == item.Role {
+														d.Results = append(d.Results, ref)
+													}
+												case "planner":
+													if (ref.SchemaID == PlannerSchema || ref.SchemaID == ClaimSchema) && r.Snapshot().Attempts[ref.AttemptID].Key == r.Snapshot().Attempts[item.Failure.AttemptID].Key {
+														d.Results = append(d.Results, ref)
+													}
+												default:
+													for _, delivery := range state.Data.Recovery.Deliveries {
+														if delivery.Kind == item.Kind && slices.Contains(delivery.Results, ref) {
+															d.Results = append(d.Results, ref)
+														}
+													}
+												}
+											}
+											if len(d.Results) == 0 {
+												if item.Kind == "verification" {
+													t.Fatal("handled fixture has no same-version role result")
+												}
+												t.Fatal("handled fixture has no accepted continuation result")
+											}
+										}
+										v.M6.Dispositions = append(v.M6.Dispositions, d)
+									}
+									switch m6Spec.fault {
+									case "claim-planner-state", "planner-arbitrary-state":
+										v.M6.Dispositions[0].Results = []contract.Ref{reportTask.State}
+									case "wiki-worker-result", "support-wiki-result":
+										d := &v.M6.Dispositions[0]
+										schema := WorkerSchema
+										if m6Spec.fault == "support-wiki-result" {
+											schema = WikiSchema
+										}
+										d.Results = nil
+										for _, ref := range req.Inputs {
+											if ref.SchemaID == schema && r.Snapshot().Attempts[ref.AttemptID].LastSeq > r.Snapshot().Attempts[d.Item.Failure.AttemptID].LastSeq {
+												d.Results = []contract.Ref{ref}
+												break
+											}
+										}
+										if len(d.Results) == 0 {
+											t.Fatal("fixture requires a real subsequent wrong-role/phase result")
+										}
+									case "worker-owner-handled":
+										d := &v.M6.Dispositions[0]
+										if d.Item.Kind != "workers" || d.Item.Failure.AttemptID == "" {
+											t.Fatal("fixture requires an actual failed worker attempt")
+										}
+										d.Action, d.Results, d.Basis = "handled", []contract.Ref{d.Item.Owner}, []Evidence{}
+									case "metadata-missing":
+										v.M6 = nil
+									case "missing-item":
+										v.M6.Dispositions = v.M6.Dispositions[1:]
+									case "duplicate-item":
+										v.M6.Dispositions[1] = v.M6.Dispositions[0]
+									case "wrong-result-role":
+										d := &v.M6.Dispositions[0]
+										found := false
+										for _, ref := range req.Inputs {
+											if ref.SchemaID != VerificationSchema {
+												continue
+											}
+											var result publication[VerificationResult]
+											if err := protocol.ReadJSON(ref.Path, &result); err != nil {
+												t.Fatal(err)
+											}
+											if result.Data.Claim == *d.Item.Claim && result.Data.Role != d.Item.Role && r.Snapshot().Attempts[ref.AttemptID].LastSeq > r.Snapshot().Attempts[d.Item.Failure.AttemptID].LastSeq {
+												d.Results, found = []contract.Ref{ref}, true
+												break
+											}
+										}
+										if !found {
+											t.Fatal("fixture has no subsequent same-claim wrong-role result")
+										}
+									case "wrong-owner":
+										v.M6.Dispositions[0].Item.Owner = reportTask.Context
+									case "wrong-version":
+										v.M6.Dispositions[0].Item.Claim = &reportTask.Context
+									case "no-basis":
+										v.M6.Dispositions[0].Basis = []Evidence{}
+									case "uncommitted-result":
+										v.M6.Dispositions[0].Results[0].Path = filepath.Join(filepath.Dir(v.M6.Dispositions[0].Results[0].Path), "candidate.json")
+									case "unselected":
+										v.Claims = []ReportClaim{}
+									case "budget-echo":
+										b := *v.M6.Budget
+										b.UsedAttempts++
+										v.M6.Budget = &b
+									case "retry-echo":
+										v.M6.ReportFailures = []RecoveryFailure{}
+									}
+									data = v
+								}
 							case ClaimSchema:
 								var claimTask struct {
 									Projection PureClaim `json:"projection"`
@@ -6669,6 +7108,13 @@ func TestIntakeToContext(t *testing.T) {
 										barrier.held[fatal], barrier.attempts[fatal] = e, req.Identity.AttemptID
 									}
 								}
+								if m6 && m6Spec.fault == "wrong-result-role" {
+									if verificationTask.Role == "con" && m4Phases[task.Stage] == 1 {
+										barrier.reportFailureAttempt = req.Identity.AttemptID
+									} else if verificationTask.Role != "con" {
+										barrier.held[verificationTask.Role], barrier.attempts[verificationTask.Role] = e, req.Identity.AttemptID
+									}
+								}
 								if tc.name == "m5-reverse-completion" || strings.HasPrefix(tc.name, "m5-partial-") {
 									barrier.held[verificationTask.Role], barrier.attempts[verificationTask.Role] = e, req.Identity.AttemptID
 								}
@@ -6684,8 +7130,42 @@ func TestIntakeToContext(t *testing.T) {
 								data = intake
 							case PlannerSchema:
 								plannerSteps++
-								expectedPlanner = m2PlannerFixture(t, tc.name, req, task, plannerSteps)
+								expectedPlanner = m2PlannerFixture(t, tc.name, req, task, plannerSteps, m6)
+								if m6 && strings.HasPrefix(m6Spec.fault, "worker-resume") && len(expectedPlanner.Recovery.Deliveries) == 1 {
+									d := expectedPlanner.Recovery.Deliveries[0]
+									var original publication[PlannerState]
+									if err := protocol.ReadJSON(d.Proposal.Path, &original); err != nil {
+										t.Fatal(err)
+									}
+									expectedPlanner.WorkerTasks = slices.Clone(original.Data.WorkerTasks)
+									expectedPlanner.Ledger.Action = "workers"
+									expectedPlanner.RecoveryChoices = []RecoveryChoice{{DeliveryID: d.ID, Action: "resume", Reason: "Anonymous evidence authorizes completion of the original task", Basis: slices.Clone(expectedPlanner.Hypotheses[0].Evidence)}}
+									if m6Spec.fault == "worker-resume-wrong-task" {
+										expectedPlanner.WorkerTasks[0].ID = "different-task"
+									}
+									if m6Spec.fault == "worker-resume-wrong-proposal" {
+										expectedPlanner.RecoveryChoices[0].Action = "redirect"
+									}
+								}
+								if m6 && strings.HasPrefix(m6Spec.fault, "worker-resume") && len(expectedPlanner.Recovery.Deliveries) > 1 {
+									expectedPlanner.Gaps = append(expectedPlanner.Gaps, "Completed work does not resolve the remaining investigation gaps")
+								}
+								if m6Spec.fault == "planner-arbitrary-state" && plannerSteps == 2 {
+									expectedPlanner.Ledger.Action = "plan"
+								}
+								if m6 && !m4 && !m5 {
+									var delivered struct {
+										Recovery *PlannerRecovery `json:"recovery"`
+									}
+									if err := json.Unmarshal([]byte(req.Prompt), &delivered); err != nil {
+										t.Fatal(err)
+									}
+									expectedPlanner.Recovery = delivered.Recovery
+								}
 								data = m2PlannerData(t, expectedPlanner)
+								if m6 && strings.HasPrefix(m6Spec.fault, "overflow-") {
+									data.(map[string]any)["verification"] = expectedPlanner.Verification
+								}
 								if tc.name == "m4-allfail-caller-bool" && plannerSteps == 2 {
 									data.(map[string]any)["remote_job_safe"] = true
 								}
@@ -7041,8 +7521,12 @@ func TestIntakeToContext(t *testing.T) {
 					} else {
 						writeCandidate(t, e.Message, req, data, files, tc.name == "file-escape")
 					}
-					if r5 && req.Output.SchemaID == ReportSchema {
-						if !r5RenderCandidate(t, ctx, r, tc.name, e.Message, req) {
+					if (r5 || m6) && req.Output.SchemaID == ReportSchema {
+						renderCase := tc.name
+						if m6 {
+							renderCase = m6Spec.fault
+						}
+						if !r5RenderCandidate(t, ctx, r, renderCase, e.Message, req) {
 							if err := e.Reply(protocol.Control{Type: "compaction-error"}); err != nil {
 								t.Fatal(err)
 							}
@@ -7058,6 +7542,55 @@ func TestIntakeToContext(t *testing.T) {
 						}
 					}
 					ack := "settle"
+					if m6 && req.Output.SchemaID == ReportSchema {
+						if strings.HasPrefix(m6Spec.fault, "timeout-") && (len(m6Tasks) == 1 || strings.HasSuffix(m6Spec.fault, "always")) {
+							ack = "hold"
+						}
+						if strings.HasPrefix(m6Spec.fault, "compaction-") && (len(m6Tasks) == 1 || strings.HasSuffix(m6Spec.fault, "always")) {
+							ack = "compaction-error"
+						}
+						if m6Spec.fault == "provider" {
+							ack = "provider-error"
+						}
+						if m6Spec.fault == "retry-echo" && len(m6Tasks) == 1 {
+							ack = "compaction-error"
+						}
+						if m6Spec.fault == "journal" || m6Spec.fault == "storage" {
+							path := filepath.Join(r.Dir(), "run.json")
+							if m6Spec.fault == "journal" {
+								path = filepath.Join(r.Dir(), "events.jsonl")
+							}
+							if err := os.Rename(path, path+".before-fault"); err != nil {
+								t.Fatal(err)
+							}
+							if err := os.Mkdir(path, 0700); err != nil {
+								t.Fatal(err)
+							}
+						}
+						if m6Spec.fault == "journal-decision" || m6Spec.fault == "host-lookup" {
+							python, err := exec.LookPath("python3")
+							if err != nil {
+								t.Fatal(err)
+							}
+							dir := t.TempDir()
+							if m6Spec.fault == "journal-decision" {
+								program := fmt.Sprintf("#!%s\nimport os,subprocess,sys\nr=subprocess.run([%q,*sys.argv[1:]])\nif r.returncode == 0:\n os.rename(%q,%q)\nsys.exit(r.returncode)\n", python, python, filepath.Join(r.Dir(), "events.jsonl"), filepath.Join(r.Dir(), "events.jsonl.before-fault"))
+								if err := os.WriteFile(filepath.Join(dir, "python3"), []byte(program), 0700); err != nil {
+									t.Fatal(err)
+								}
+							}
+							t.Setenv("PATH", dir)
+						}
+						if m6Spec.fault == "schema" {
+							writeEnvelope(t, e.Message, req, map[string]any{}, []file{})
+						}
+						if m6Spec.fault == "cleanup" {
+							sid := r.Snapshot().Sessions[r.Snapshot().Attempts[req.Identity.AttemptID].HandleID].Identity.SessionID
+							if err := os.Rename(filepath.Join(bridge, sid+".json"), filepath.Join(bridge, sid+".json.recovering")); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
 					if m5 {
 						if strings.HasPrefix(tc.name, "m5-supplement-exhausted-") {
 							exhausted := "pro"
@@ -7074,7 +7607,7 @@ func TestIntakeToContext(t *testing.T) {
 						if tc.name == "m5-supplement-reframe-inspection-resume" && task.Stage == "wiki-investigation" && m4Phases[task.Stage] == 1 {
 							ack = "hold"
 						}
-						if task.Stage == "verify-con" {
+						if task.Stage == "verify-con" && (!m6 || m6Spec.fault != "cross-missing") || m6 && m6Spec.fault == "cross-missing" && task.Stage == "verify-cross" {
 							n := m4Phases[task.Stage]
 							if tc.name == "m5-verifier-timeout-retry" && n == 1 || (tc.name == "m5-verifier-unavailable" || tc.name == "m5-same-version-missing-only") && n <= 2 {
 								ack = "hold"
@@ -7082,6 +7615,9 @@ func TestIntakeToContext(t *testing.T) {
 							if tc.name == "m5-verifier-compaction-retry" && n == 1 {
 								ack = "compaction-error"
 							}
+						}
+						if m6 && m6Spec.fault == "wrong-result-role" && task.Stage == "verify-con" && m4Phases[task.Stage] <= 2 {
+							ack = "compaction-error"
 						}
 						if (tc.name == "m5-claim-timeout-retry" && m4Phases[task.Stage] == 1 || tc.name == "m5-claim-retry-exhausted") && task.Stage == "planner-claim" {
 							ack = "hold"
@@ -7161,7 +7697,7 @@ func TestIntakeToContext(t *testing.T) {
 								r.Cancel(engine.OriginControllerUser)
 							}
 						case "m4-worker-timeout", "m4-capacity-fresh-worker-timeout":
-							if req.Output.SchemaID == WorkerSchema {
+							if req.Output.SchemaID == WorkerSchema && (!m6 || !strings.HasPrefix(m6Spec.fault, "worker-resume") || m4Phases[task.Stage] == 1) {
 								ack = "hold"
 							}
 						}
@@ -7270,6 +7806,9 @@ func TestIntakeToContext(t *testing.T) {
 					t.Fatalf("reframe recovery repeated acquisition or skipped continuation: phases=%v", m4Phases)
 				}
 			}
+			if m6Name == "m6-review-worker-owner-handled" {
+				t.Logf("worker failure with receiving Planner owner, empty basis: Final=%v native-error=%v", report.Final != nil, m6Err)
+			}
 			limitBeforePrompt := tc.name == "m5-verifier-attempt-limit" || tc.name == "m5-verifier-live-limit"
 			if count != tc.stages && !limitBeforePrompt || (report.ExitCode != 0) != tc.failure {
 				t.Fatalf("stages=%d outcome=%s failure=%v", count, report.Outcome, report.Failure)
@@ -7282,7 +7821,7 @@ func TestIntakeToContext(t *testing.T) {
 			if tc.name == "update-wrong-task" && !strings.Contains(fmt.Sprint(report.Failure), "intake revision changed dispatched task/work/previous") {
 				t.Fatalf("wrong task was not rejected at dispatch binding: %v", report.Failure)
 			}
-			if report.Final != nil && !r5 {
+			if report.Final != nil && !r5 && !m6 {
 				t.Fatal("slice invented final report")
 			}
 			if strings.HasPrefix(tc.name, "m4-support-") && !tc.failure {
@@ -7301,7 +7840,7 @@ func TestIntakeToContext(t *testing.T) {
 					t.Fatalf("support repeated acquisition/completed phases: phases=%v HTTP=%d initial=%d", m4Phases, requests.Load(), acquiredRequests)
 				}
 			}
-			if m4 && !tc.failure {
+			if m4 && !tc.failure && !m6 {
 				journal, err := os.Open(filepath.Join(r.Dir(), "events.jsonl"))
 				if err != nil {
 					t.Fatal(err)
@@ -7341,8 +7880,443 @@ func TestIntakeToContext(t *testing.T) {
 					}
 				}
 			}
+			if m6 {
+				if count != m6Spec.stages || (report.Failure != nil) != m6Spec.failure || (report.Final != nil) != m6Spec.final {
+					t.Fatalf("%s stages=%d want=%d failure=%v final=%v, want failure=%v final=%v", m6Name, count, m6Spec.stages, report.Failure, report.Final, m6Spec.failure, m6Spec.final)
+				}
+				if (report.ExitCode != 0) != m6Spec.failure {
+					t.Fatalf("exit=%d failure=%v", report.ExitCode, report.Failure)
+				}
+				wantCode := map[string]engine.Code{"m6-report-journal-fatal": engine.JournalFailed, "m6-report-storage-fatal": engine.StorageFailed, "m6-ordinary-journal-priority": engine.JournalFailed, "m6-ordinary-fatal-no-report": engine.StorageFailed, "m6-report-close-failure": engine.CleanupFailed, "m6-ordinary-cleanup-priority": engine.CleanupFailed, "m6-report-cancel": engine.Cancelled, "m6-ordinary-cancel-no-report": engine.Cancelled, "m6-true-hardcap-no-report": engine.LimitExceeded, "m6-report-schema": engine.ContractInvalid}[m6Name]
+				if m6Name == "m6-report-file-hardcap" {
+					wantCode = engine.LimitExceeded
+				}
+				if wantCode != "" {
+					var f *engine.Failure
+					if !errors.As(report.Failure, &f) || f.Code != wantCode {
+						t.Fatalf("lost priority %s: %v", wantCode, report.Failure)
+					}
+				}
+				if strings.Contains(m6Name, "no-report") && len(m6Tasks) != 0 {
+					t.Fatal("fatal/cancel/hardcap forced a report")
+				}
+				if m6Spec.contains != "" && !strings.Contains(fmt.Sprint(m6Err), m6Spec.contains) {
+					t.Fatalf("wrong cause: %v, want %s", m6Err, m6Spec.contains)
+				}
+				if strings.HasPrefix(m6Name, "m6-supplement-") && strings.Contains(m6Name, "-resume-") {
+					last := m6Tasks[len(m6Tasks)-1]
+					if last.M6.Recovery == nil {
+						t.Fatal("resume report lost recovery")
+					}
+					found := false
+					for _, delivery := range last.M6.Recovery.Deliveries {
+						if delivery.Support == nil || len(delivery.Failures) == 0 {
+							continue
+						}
+						c := delivery.Support
+						found = true
+						phase := "wiki"
+						if strings.Contains(m6Name, "-context-") {
+							phase = "context"
+						}
+						suffix := "-resolution"
+						if strings.Contains(m6Name, "-revise-") {
+							suffix = "-revision"
+						}
+						if c.FailedPhase != phase+suffix || (c.Intake != nil) != strings.Contains(m6Name, "-revise-") || (c.Wiki != nil) != (phase == "context") {
+							t.Fatalf("wrong retained support phase: phase=%s intake=%t wiki=%t", c.FailedPhase, c.Intake != nil, c.Wiki != nil)
+						}
+						for _, ref := range c.refs() {
+							if !slices.Contains(m6Requests[len(m6Requests)-1].Inputs, ref) {
+								t.Fatal("support phase owner omitted from report")
+							}
+						}
+					}
+					if !found {
+						t.Fatal("resume report never retained a support delivery")
+					}
+					suffix := "-resolution"
+					if strings.Contains(m6Name, "-revise-") {
+						suffix = "-revision"
+						if m4Phases["intake-update"] != 1 {
+							t.Fatal("resume replayed accepted intake")
+						}
+					}
+					wikiSteps, contextSteps := 1, 0
+					if strings.Contains(m6Name, "-context-") {
+						contextSteps = 1
+					}
+					if m6Spec.cost == (investigationCost{}) {
+						contextSteps++
+						if strings.Contains(m6Name, "-wiki-") {
+							wikiSteps++
+						}
+					}
+					if m4Phases["wiki"+suffix] != wikiSteps || m4Phases["context"+suffix] != contextSteps {
+						t.Fatal("resume replayed or omitted a supporting phase")
+					}
+					if m6Spec.cost != (investigationCost{}) {
+						budget := last.M6.Budget
+						if budget == nil || budget.Action != "support" {
+							t.Fatal("rejected inspection instead of support resume")
+						}
+						if m6Spec.attempts != 0 && budget.MaxAttempts-budget.UsedAttempts-budget.Policy.ReserveAttempts != budget.Rejected.Attempts-1 {
+							t.Fatal("resume attempt cap was not exactly one short")
+						}
+						if m6Spec.sessions != 0 && budget.MaxSessions-budget.UsedSessions-budget.Policy.ReserveSessions != budget.Rejected.Sessions-1 {
+							t.Fatal("resume session cap was not exactly one short")
+						}
+					} else if last.M6.Budget != nil {
+						t.Fatal("exact resume capacity was rejected")
+					}
+				}
+				if m6Spec.fault == "wrong-result-role" && !barrier.proved {
+					t.Fatal("wrong-role result was not ordered after native failure")
+				}
+				if strings.HasPrefix(m6Spec.fault, "seam-") {
+					a := report.Snapshot.Attempts[m6SeamRef.AttemptID]
+					if (a.HandleID != m6SeamPlanner) != (m6Spec.fault == "seam-foreign-producer") {
+						t.Fatal("producer seam did not isolate the intended owner")
+					}
+					if m6SeamRef == (contract.Ref{}) || a.Output == nil || *a.Output != m6SeamRef || a.State != engine.Succeeded || len(m6Tasks) != 1 {
+						t.Fatal("consumer seam lost single committed report")
+					}
+				}
+				if m6Spec.fault == "journal-decision" || m6Spec.fault == "seam-retry-finished" {
+					phase := "Decision"
+					if m6Spec.fault == "seam-retry-finished" {
+						phase = "RetryFinished"
+					}
+					var f *engine.Failure
+					var pathErr *os.PathError
+					if !errors.As(m6Err, &f) || f.Code != engine.JournalFailed || f.Phase != phase || !errors.Is(m6Err, os.ErrNotExist) || !errors.As(m6Err, &pathErr) || filepath.Base(pathErr.Path) != "events.jsonl" {
+						t.Fatalf("lost exact %s filesystem cause: %v", phase, m6Err)
+					}
+					raw, err := os.ReadFile(filepath.Join(r.Dir(), "events.jsonl.before-fault"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					decision := false
+					for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
+						var event engine.Event
+						if err := json.Unmarshal(line, &event); err != nil {
+							t.Fatal(err)
+						}
+						if event.Kind == "Decision" && strings.HasPrefix(event.Details.(map[string]any)["name"].(string), "report-") {
+							decision = true
+						}
+					}
+					if decision != (phase == "RetryFinished") {
+						t.Fatal("fault did not bracket report Decision")
+					}
+				}
+				if m6Spec.fault == "host-lookup" {
+					var lookup *exec.Error
+					if !errors.Is(m6Err, exec.ErrNotFound) || !errors.As(m6Err, &lookup) {
+						t.Fatalf("lost native executable lookup: %v", m6Err)
+					}
+				}
+				for i, task := range m6Tasks {
+					req := m6Requests[i]
+					attempt := report.Snapshot.Attempts[req.Identity.AttemptID]
+					owner := report.Snapshot.Sessions[attempt.HandleID]
+					if strings.HasPrefix(m6Name, "m6-supplement-") {
+						if !strings.HasPrefix(m6Spec.fault, "seam-") && !strings.HasSuffix(attempt.Scope, "/report-recovery-"+task.State.AttemptID) {
+							t.Fatal("report escaped its retry scope")
+						}
+						closed := false
+						for _, cleanup := range report.Cleanup {
+							if cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
+								closed = true
+							}
+						}
+						if !closed {
+							t.Fatal("supplement report owner lacks confirmed process Wait/cleanup")
+						}
+					}
+					if owner.Role.Name != "triage-planner" || owner.Role.Model != (runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}) || owner.State != "Closed" && m6Spec.fault != "journal" && m6Spec.fault != "journal-decision" && m6Spec.fault != "seam-retry-finished" {
+						t.Fatalf("report producer/close: %+v", owner)
+					}
+					if !slices.Contains(req.Inputs, task.State) || !slices.Contains(req.Inputs, task.Context) || len(req.Inputs) != len(task.Owners) {
+						t.Fatal("report omitted exact owners/Inputs")
+					}
+					for _, input := range req.Inputs {
+						a := report.Snapshot.Attempts[input.AttemptID]
+						if a.Output == nil || *a.Output != input || a.State != engine.Succeeded {
+							t.Fatal("report received uncommitted input")
+						}
+					}
+					for _, source := range task.Owners {
+						a := report.Snapshot.Attempts[source.Ref.AttemptID]
+						session := report.Snapshot.Sessions[a.HandleID]
+						if source.HandleID != a.HandleID || source.Scope != a.Scope || source.Step != a.Key || source.Role != session.Role.Name || source.Model != session.Role.Model {
+							t.Fatal("report relabelled a source producer or parent scope")
+						}
+					}
+					if m6Spec.fault != "r5-evidence-tamper" {
+						var chain []struct {
+							ref   contract.Ref
+							state PlannerState
+						}
+						for ref := &task.State; ref != nil; {
+							var source publication[PlannerState]
+							if err := protocol.ReadJSON(ref.Path, &source); err != nil {
+								t.Fatal(err)
+							}
+							chain = append(chain, struct {
+								ref   contract.Ref
+								state PlannerState
+							}{*ref, source.Data})
+							ref = source.Data.Previous
+						}
+						slices.Reverse(chain)
+						want := []ReportFailure{}
+						deliveries, verifications := map[string]bool{}, map[string]bool{}
+						plannerFailures := 0
+						for _, source := range chain {
+							if v := source.state.Recovery; v != nil {
+								for n, failure := range v.PlannerFailures {
+									if n >= plannerFailures {
+										want = append(want, ReportFailure{Owner: source.ref, Kind: "planner", Index: n, Failure: failure})
+									}
+								}
+								plannerFailures = len(v.PlannerFailures)
+								for _, d := range v.Deliveries {
+									if deliveries[d.ID] {
+										continue
+									}
+									deliveries[d.ID] = true
+									for n, failure := range d.Failures {
+										want = append(want, ReportFailure{Owner: source.ref, Kind: d.Kind, DeliveryID: d.ID, Index: n, Failure: failure})
+									}
+								}
+							}
+							if v := source.state.Verification; v != nil {
+								for _, d := range v.Deliveries {
+									if verifications[d.ID] {
+										continue
+									}
+									verifications[d.ID] = true
+									for _, role := range d.Roles {
+										for n, failure := range role.Failures {
+											claim := d.Claim
+											want = append(want, ReportFailure{Owner: source.ref, Kind: "verification", DeliveryID: d.ID, Claim: &claim, Role: role.Role, Index: n, Failure: failure})
+										}
+									}
+								}
+							}
+						}
+						if !reflect.DeepEqual(task.M6.Failures, want) {
+							t.Fatal("report omitted or rebound actual historical failure sources")
+						}
+					}
+					if i > 0 {
+						previous := report.Snapshot.Attempts[m6Requests[i-1].Identity.AttemptID]
+						if previous.HandleID == attempt.HandleID || task.State != m6Tasks[0].State || len(task.M6.ReportFailures) != i || !slices.Equal(req.Inputs, m6Requests[0].Inputs) {
+							t.Fatal("report retry lost fresh owner/exact history")
+						}
+					}
+				}
+				if m6Spec.boundary != "" {
+					var pending *PendingReportError
+					if !errors.As(m6Err, &pending) || pending.Boundary != m6Spec.boundary || pending.State != m6Tasks[0].State || !slices.Equal(pending.Inputs, m6Requests[len(m6Requests)-1].Inputs) {
+						t.Fatalf("pending lost boundary/Inputs: %v", m6Err)
+					}
+					if !errors.Is(m6Err, errors.Unwrap(pending)) {
+						t.Fatal("pending lost native unwrap")
+					}
+					lastTask := m6Tasks[len(m6Tasks)-1]
+					if !bytes.Equal(testJSON(pending.Recovery), testJSON(lastTask.M6.Recovery)) || !bytes.Equal(testJSON(pending.Verification), testJSON(lastTask.M6.Verification)) || !slices.EqualFunc(pending.ControllerFeedback, lastTask.M6.ControllerFeedback, func(a, b PlannerFeedback) bool { return reflect.DeepEqual(a, b) }) {
+						t.Fatal("pending lost recovery/verification/controller history")
+					}
+					if strings.HasSuffix(m6Spec.fault, "always") && len(pending.ReportFailures) != 2 {
+						t.Fatal("exhaustion omitted report retry failures")
+					}
+					if m6Spec.boundary != "prepared" {
+						if pending.Report == nil {
+							t.Fatal("committed pending lost Ref")
+						}
+						a := report.Snapshot.Attempts[pending.Report.AttemptID]
+						if a.Output == nil || *a.Output != *pending.Report || a.State != engine.Succeeded {
+							t.Fatal("pending fabricated committed Ref")
+						}
+					} else if pending.Report != nil {
+						t.Fatal("uncommitted report acquired Ref")
+					}
+					if len(m6Tasks) != 1 && !strings.HasSuffix(m6Spec.fault, "always") && m6Spec.fault != "retry-echo" {
+						t.Fatal("postcommit error was retried")
+					}
+				}
+				if strings.HasPrefix(m6Name, "m6-review-") {
+					ref := m6Result.Outputs["report"]
+					if !m6Spec.final {
+						var pending *PendingReportError
+						if !errors.As(m6Err, &pending) || pending.Report == nil {
+							t.Fatal("lineage rejection lost committed report")
+						}
+						ref = *pending.Report
+					}
+					var actual publication[InvestigationReport]
+					if err := protocol.ReadJSON(ref.Path, &actual); err != nil {
+						t.Fatal(err)
+					}
+					if len(actual.Data.M6.Dispositions) == 0 {
+						t.Fatal("lineage fixture did not produce a historical failure")
+					}
+					for _, d := range actual.Data.M6.Dispositions {
+						if d.Action == "redirect" {
+							if len(d.Basis) == 0 || len(d.Results) != 0 {
+								t.Fatal("redirect fixture lost evidence basis")
+							}
+							continue
+						}
+						if d.Action != "handled" || len(d.Basis) != 0 || len(d.Results) != 1 {
+							t.Fatal("lineage fixture must exercise one handled result with empty basis")
+						}
+						result := d.Results[0]
+						failed, succeeded := report.Snapshot.Attempts[d.Item.Failure.AttemptID], report.Snapshot.Attempts[result.AttemptID]
+						if failed.Failure == nil || succeeded.State != engine.Succeeded || succeeded.Output == nil || *succeeded.Output != result || succeeded.LastSeq <= failed.LastSeq || !slices.Contains(m6Requests[0].Inputs, result) {
+							t.Fatal("lineage fixture needs an actual later supplied successful result")
+						}
+						switch m6Name {
+						case "m6-review-worker-owner-handled", "m6-review-planner-retry":
+							if result != d.Item.Owner {
+								t.Fatal("fixture must cite the first receiving Planner snapshot")
+							}
+						case "m6-review-planner-arbitrary-state", "m6-review-claim-planner-state":
+							if result.SchemaID != PlannerSchema || succeeded.Key == failed.Key {
+								t.Fatal("fixture must cite another Planner work item")
+							}
+						case "m6-review-claim-retry":
+							var claim publication[PureClaim]
+							if err := protocol.ReadJSON(result.Path, &claim); err != nil {
+								t.Fatal(err)
+							}
+							if result.SchemaID != ClaimSchema || succeeded.Key != failed.Key || failed.Key != "claim-"+claim.Data.ParentState.AttemptID || d.Item.Failure.Stage != "planner" {
+								t.Fatal("claim retry did not preserve actual parent/key despite planner stage")
+							}
+						case "m6-review-worker-resume", "m6-review-worker-wrong-task", "m6-review-worker-wrong-proposal":
+							var worker publication[WorkerResult]
+							if err := protocol.ReadJSON(result.Path, &worker); err != nil {
+								t.Fatal(err)
+							}
+							if (worker.Data.TaskID != d.Item.Failure.TaskID) != (m6Name == "m6-review-worker-wrong-task") {
+								t.Fatal("worker task identity fixture drifted")
+							}
+							var proposal publication[PlannerState]
+							if err := protocol.ReadJSON(worker.Data.Proposal.Path, &proposal); err != nil {
+								t.Fatal(err)
+							}
+							action := "resume"
+							if m6Name == "m6-review-worker-wrong-proposal" {
+								action = "redirect"
+							}
+							if !slices.ContainsFunc(proposal.Data.RecoveryChoices, func(c RecoveryChoice) bool { return c.DeliveryID == d.Item.DeliveryID && c.Action == action }) {
+								t.Fatal("worker fixture did not exercise its exact recovery proposal")
+							}
+						case "m6-review-wiki-wrong-role":
+							if report.Snapshot.Sessions[succeeded.HandleID].Role.Name == report.Snapshot.Sessions[failed.HandleID].Role.Name {
+								t.Fatal("wrong-role fixture did not change actual producer role")
+							}
+						case "m6-review-support-wrong-phase":
+							if result.SchemaID != WikiSchema {
+								t.Fatal("wrong-phase fixture must cite intermediate wiki, not completed support")
+							}
+						}
+						if strings.HasPrefix(m6Name, "m6-review-support-") && m6Spec.final && succeeded.Key == failed.Key {
+							t.Fatal("support resume must exercise a changed execution key")
+						}
+					}
+				}
+				if m6Spec.final {
+					if tc.name == "m5-reverse-completion" && (!barrier.proved || !slices.Equal(barrier.order, []string{"cross", "con", "pro"})) {
+						t.Fatal("M6 did not execute reverse verifier completion")
+					}
+					if tc.name == "m2-parallel-batches-yield" && count > 5 && (!barrier.proved || !slices.Equal(barrier.order, []string{"w3", "w2", "w1"})) {
+						t.Fatal("M6 did not execute reverse worker completion")
+					}
+					if m6Spec.fault == "cross-missing" {
+						for _, item := range m6Tasks[len(m6Tasks)-1].M6.Failures {
+							if item.Role != "cross" {
+								t.Fatal("same-version supplement did not exercise cross")
+							}
+						}
+					}
+					if report.Final.Ref != reportRef || report.Final.Output != "report" || report.Final.Step != "report-"+plannerRef.AttemptID {
+						t.Fatal("final selection lost exact producer")
+					}
+					producer := report.Snapshot.Sessions[report.Final.HandleID]
+					closed := false
+					for _, cleanup := range report.Cleanup {
+						if cleanup.ConfirmsLocalClose(producer.Identity.SessionID) {
+							closed = true
+						}
+					}
+					if !closed {
+						t.Fatal("final preceded confirmed local close/Wait")
+					}
+					if len(report.Snapshot.Attempts) != count || len(report.Snapshot.Attempts) > policy.MaxTotalAttempts || len(report.Snapshot.Sessions) > policy.MaxTotalSessions {
+						t.Fatal("M6 reset or exceeded run accounting")
+					}
+					var persisted struct {
+						Final *engine.FinalDelivery `json:"final"`
+					}
+					if err := protocol.ReadJSON(filepath.Join(r.Dir(), "result.json"), &persisted); err != nil || !reflect.DeepEqual(persisted.Final, report.Final) {
+						t.Fatalf("persisted final mismatch: %v", err)
+					}
+					var accepted publication[InvestigationReport]
+					if err := protocol.ReadJSON(reportRef.Path, &accepted); err != nil {
+						t.Fatal(err)
+					}
+					last := m6Tasks[len(m6Tasks)-1]
+					if accepted.Data.M6 == nil || len(accepted.Data.M6.Dispositions) != len(last.M6.Failures) || !reflect.DeepEqual(accepted.Data.M6.Budget, last.M6.Budget) {
+						t.Fatal("report lost failure/budget echo")
+					}
+					body, err := os.ReadFile(report.Final.ArtifactPath)
+					if err != nil || !bytes.Contains(body, []byte(plannerRef.SHA256)) {
+						t.Fatalf("true producer artifact: %v", err)
+					}
+					for _, item := range last.M6.Failures {
+						if !bytes.Contains(body, []byte(item.Failure.Diagnostic)) {
+							t.Fatal("report erased original failure")
+						}
+					}
+					if m6Spec.cost != (investigationCost{}) {
+						if last.M6.Budget == nil || last.M6.Budget.Rejected != m6Spec.cost || accepted.Data.Completeness != "incomplete" {
+							t.Fatalf("reserve cost mismatch: %+v", last.M6.Budget)
+						}
+						var state publication[PlannerState]
+						if err := protocol.ReadJSON(plannerRef.Path, &state); err != nil {
+							t.Fatal(err)
+						}
+						if state.Data.Ledger.Action == "yield" {
+							t.Fatal("reserve forged ledger yield")
+						}
+					}
+					if m6Spec.disposition == "unresolved" {
+						queue, retained := []error{m6Err}, false
+						for len(queue) > 0 {
+							err := queue[0]
+							queue = queue[1:]
+							if native, ok := err.(*runtime.Failure); ok && native.Code == runtime.TimedOut && native.Origin == runtime.AttemptDeadline {
+								var typed *engine.Failure
+								retained = errors.Is(m6Err, native) && errors.As(err, &typed) && typed == native
+							}
+							if joined, ok := err.(interface{ Unwrap() []error }); ok {
+								queue = append(queue, joined.Unwrap()...)
+							} else if next := errors.Unwrap(err); next != nil {
+								queue = append(queue, next)
+							}
+						}
+						if !retained {
+							t.Fatalf("unresolved lost native typed cause: %v", m6Err)
+						}
+					}
+				}
+				return
+			}
 			if r5 {
-				r5AssertOutcome(t, tc, report, plannerRef, reportRef, count)
+				r5AssertOutcome(t, tc, report, plannerRef, reportRef, count, r.Dir())
 				return
 			}
 			if m2 {

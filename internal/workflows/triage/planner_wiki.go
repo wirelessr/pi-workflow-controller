@@ -202,6 +202,7 @@ func (p *plannerCaller) searchWiki(ctx context.Context, models sliceModels) (con
 		delivery.Failures = []RecoveryFailure{failure}
 		p.recovery.Deliveries = append(p.recovery.Deliveries, delivery)
 		p.recoveryErrors = append(p.recoveryErrors, err)
+		p.nativeFailures = append(p.nativeFailures, nativeRecoveryFailure{failure, err})
 		p.stopped = false
 		return contract.Ref{}, nil
 	}

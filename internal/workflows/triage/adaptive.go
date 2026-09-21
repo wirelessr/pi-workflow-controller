@@ -236,20 +236,7 @@ func (p *plannerCaller) workReady(ctx context.Context, models sliceModels) (int,
 	if err := a.checkPlannerWithWorkers(*p.last, p.history, state.Data.Previous, records); err != nil {
 		return 0, err
 	}
-	completed := map[string]bool{}
-	for _, record := range records {
-		completed[record.value.TaskID] = true
-	}
-	var ready []WorkerTask
-	for _, task := range state.Data.WorkerTasks {
-		if completed[task.ID] || slices.ContainsFunc(task.DependsOn, func(id string) bool { return !completed[id] }) {
-			continue
-		}
-		ready = append(ready, task)
-		if len(ready) == 3 {
-			break
-		}
-	}
+	ready := readyWorkerTasks(state.Data, records)
 	prepared := make([]preparedWorker, len(ready))
 	branches := make([]engine.Branch, len(ready))
 	for i, task := range ready {
@@ -293,28 +280,54 @@ func (p *plannerCaller) workReady(ctx context.Context, models sliceModels) (int,
 	return len(joined), nil
 }
 
+func readyWorkerTasks(state PlannerState, records map[contract.Ref]workerRecord) []WorkerTask {
+	completed := map[string]bool{}
+	for _, record := range records {
+		completed[record.value.TaskID] = true
+	}
+	var ready []WorkerTask
+	for _, task := range state.WorkerTasks {
+		if completed[task.ID] || slices.ContainsFunc(task.DependsOn, func(id string) bool { return !completed[id] }) {
+			continue
+		}
+		ready = append(ready, task)
+		if len(ready) == 3 {
+			break
+		}
+	}
+	return ready
+}
+
 // The returned Ref is investigation state only. Capacity and recovery require
 // explicit caller policies; final delivery remains a separate milestone.
 func executeInvestigation(ctx context.Context, r *engine.Run, scope Scope, plannerModel runtime.ModelSpec, models sliceModels, contextRef contract.Ref, capacity *PlannerCapacityPolicy, recovery *RecoveryPolicy, verification *VerificationPolicy) (contract.Ref, error) {
+	p, err := initializeInvestigation(ctx, r, scope, plannerModel, contextRef, capacity, recovery, verification)
+	if err != nil {
+		return contract.Ref{}, err
+	}
+	return p.adapt(ctx, models)
+}
+
+func initializeInvestigation(ctx context.Context, r *engine.Run, scope Scope, plannerModel runtime.ModelSpec, contextRef contract.Ref, capacity *PlannerCapacityPolicy, recovery *RecoveryPolicy, verification *VerificationPolicy) (*plannerCaller, error) {
 	if recovery != nil && recovery.PlannerRetries < 0 {
-		return contract.Ref{}, fmt.Errorf("explicit nonnegative planner retry budget required")
+		return nil, fmt.Errorf("explicit nonnegative planner retry budget required")
 	}
 	if capacity != nil {
 		if err := capacity.check(); err != nil {
-			return contract.Ref{}, err
+			return nil, err
 		}
 	}
 	if verification != nil {
 		if err := verification.check(); err != nil {
-			return contract.Ref{}, err
+			return nil, err
 		}
 		if recovery == nil {
-			return contract.Ref{}, fmt.Errorf("verification requires an explicit Planner recovery policy")
+			return nil, fmt.Errorf("verification requires an explicit Planner recovery policy")
 		}
 	}
 	p, err := startPlanner(ctx, r, scope, plannerModel, contextRef)
 	if err != nil {
-		return contract.Ref{}, err
+		return nil, err
 	}
 	p.adaptive = true
 	if capacity != nil {
@@ -325,18 +338,18 @@ func executeInvestigation(ctx context.Context, r *engine.Run, scope Scope, plann
 		p.recovery = &PlannerRecovery{Policy: *recovery, Deliveries: []RecoveryDelivery{}, PlannerFailures: []RecoveryFailure{}}
 		p.identity, err = r.SessionIdentity(ctx, p.handle)
 		if err != nil {
-			return contract.Ref{}, err
+			return nil, err
 		}
 	}
 	if verification != nil {
 		p.verification = &PlannerVerification{Policy: *verification, Claims: []contract.Ref{}, Deliveries: []VerificationDelivery{}}
 	}
-	return p.adapt(ctx, models)
+	return p, nil
 }
 
 func (p *plannerCaller) adapt(ctx context.Context, models sliceModels) (result contract.Ref, retErr error) {
 	defer func() {
-		if retErr != nil && p.recovery != nil && len(p.recoveryErrors) > 0 {
+		if retErr != nil && p.recovery != nil && len(p.recoveryErrors) > 0 && (p.reporting == nil || p.reporting.result.Final == nil) {
 			retErr = recoveryError(retErr, p.recoveryErrors...)
 		}
 	}()
@@ -352,6 +365,20 @@ func (p *plannerCaller) adapt(ctx context.Context, models sliceModels) (result c
 			return contract.Ref{}, err
 		}
 		p.adaptiveNote = ""
+		if p.reporting != nil && state.Data.Ledger.Action != "yield" {
+			cost, err := p.investigationCost(ctx, state.Data)
+			if err != nil {
+				return contract.Ref{}, err
+			}
+			budget, err := reportAdmission(ctx, p.r, p.reporting.policy, state.Data.Ledger.Action, cost)
+			if err != nil {
+				return contract.Ref{}, err
+			}
+			if budget != nil {
+				p.reporting.budget = budget
+				return ref, p.finishReport(ctx)
+			}
+		}
 		// These actions already close the Planner. Sampling would add an
 		// unnecessary failure boundary or a second fresh session.
 		if state.Data.Ledger.Action != "support" && state.Data.Ledger.Action != "yield" {
@@ -382,6 +409,9 @@ func (p *plannerCaller) adapt(ctx context.Context, models sliceModels) (result c
 		case "wiki", "reframe":
 			_, err = p.searchWiki(ctx, models)
 		case "yield":
+			if p.reporting != nil {
+				return ref, p.finishReport(ctx)
+			}
 			if err := p.close(ctx); err != nil {
 				return contract.Ref{}, err
 			}

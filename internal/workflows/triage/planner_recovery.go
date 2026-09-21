@@ -450,8 +450,9 @@ func (p *plannerCaller) planningStep(ctx context.Context) (contract.Ref, error) 
 	return ref, err
 }
 
-func (p *plannerCaller) continuePlannerInputs(ctx context.Context, failure RecoveryFailure, again bool) error {
+func (p *plannerCaller) continuePlannerInputs(ctx context.Context, failure RecoveryFailure, cause error, again bool) error {
 	p.recovery.PlannerFailures = append(p.recovery.PlannerFailures, failure)
+	p.nativeFailures = append(p.nativeFailures, nativeRecoveryFailure{failure, cause})
 	if again {
 		next, err := p.reopen(ctx, p.history.ref)
 		if err != nil {
@@ -464,7 +465,7 @@ func (p *plannerCaller) continuePlannerInputs(ctx context.Context, failure Recov
 
 // Only supplied-input work may use this seam. Recovery never authorizes a
 // remote operation, and RetryState feedback is not an input to the next task.
-func retryPlannerInputs(ctx context.Context, r *engine.Run, scope *engine.Scope, key, output string, retries int, run func(context.Context, *engine.Scope) (contract.Ref, error), recovered func(context.Context, RecoveryFailure, bool) error) (contract.Ref, []RecoveryFailure, error) {
+func retryPlannerInputs(ctx context.Context, r *engine.Run, scope *engine.Scope, key, output string, retries int, run func(context.Context, *engine.Scope) (contract.Ref, error), recovered func(context.Context, RecoveryFailure, error, bool) error) (contract.Ref, []RecoveryFailure, error) {
 	var ref contract.Ref
 	var failures []RecoveryFailure
 	var causes []error
@@ -477,11 +478,13 @@ func retryPlannerInputs(ctx context.Context, r *engine.Run, scope *engine.Scope,
 		causes = append(causes, err)
 		failure, e := confirmRecovery(ctx, r, err, false)
 		if e != nil {
+			causes = append(causes, e)
 			return engine.RetryAction{}, e
 		}
 		failures = append(failures, failure)
 		if recovered != nil {
-			if e := recovered(ctx, failure, state.RetryCount < state.MaxRetries); e != nil {
+			if e := recovered(ctx, failure, err, state.RetryCount < state.MaxRetries); e != nil {
+				causes = append(causes, e)
 				return engine.RetryAction{}, recoveryError(e, err)
 			}
 		}
@@ -535,6 +538,7 @@ func (p *plannerCaller) receiveWorkers(ctx context.Context, prepared []preparedW
 		failure.TaskID = prepared[i].request.Task.ID
 		delivery.Failures = append(delivery.Failures, failure)
 		p.recoveryErrors = append(p.recoveryErrors, branch.Err)
+		p.nativeFailures = append(p.nativeFailures, nativeRecoveryFailure{failure, branch.Err})
 		if failure.Origin != engine.OriginFailFastSibling {
 			primary = true
 		}

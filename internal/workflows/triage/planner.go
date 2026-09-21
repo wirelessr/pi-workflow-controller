@@ -77,6 +77,8 @@ type plannerCaller struct {
 	recovery        *PlannerRecovery
 	recoveryErrors  []error
 	verification    *PlannerVerification
+	nativeFailures  []nativeRecoveryFailure
+	reporting       *investigationReporting
 }
 
 func startPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime.ModelSpec, contextRef contract.Ref) (*plannerCaller, error) {

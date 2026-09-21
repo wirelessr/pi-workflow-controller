@@ -120,7 +120,7 @@ Triage 已有可呼叫的 `plannerCaller.report`，以既有 Planner 的正常 S
 
 Triage producer 每個 Ref 用局部 ExitStack，讀完即關閉；candidate/request 保留原生命週期。Host CommandContext／Run／WaitDelay 保有錯誤與 Wait，named buffer 強制 stdout 64 MiB／stderr 64 KiB 限額，不透過 promoted ReaderFrom 繞過。這不是 Python RSS 上限、filesystem sandbox、兩檔 atomic 或 live 容量承諾；write/close 的所有 EIO 與替換競態未窮舉。
 
-R5 提供真 report 操作及 shared consumer；M6 才接 adaptive yield、歷史 failure 處置、預留額度與最終 outcome，舊 M5 state-only 出口未改。以下保留 R5 完成要求：
+R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入口接 adaptive yield、歷史 failure 處置、預留額度與最終 outcome，舊 M5 state-only 出口未改。以下保留 R5 完成要求：
 
 **完成出口：** 原 review 仍能使用同一機械能力，triage 報告也實際接入；模板、Pin／claim、verdict及追溯資料保持各自 contracts。保留 exclusive output、大小／路徑／identity檢查與已提交 Ref 驗收。沒有第二 consumer 時保持延後，不建立 renderer plugins、installer 或新 final registry。
 
@@ -140,13 +140,19 @@ R1–R4 的匿名驗收與 consumer 遷移完成後才啟動 M1，不因某個 h
 
 M1 已接入 `plannerCaller.work` 的單項明列 worker 派工與 Planner 結果交接；`taskStepRecovery` 供既有 slice adapter 與 worker 共用（M4 前為 `taskStep`，無 caller 的轉送 wrapper 已移除），原 session/Step/strict-close 語義不另造。`worker_results` 明交 exact refs 及真正 owners，fresh handoff／support 改版不重綁歷史結果；原 query checker/schema 等義共用。這不是自動批次、產品入口或 live 驗收，具體 contracts 見 [Jira triage](JIRA-TRIAGE.md)。逐次 review/gates/commit 狀態仍在外部工程紀錄。
 
-M2 已以 `executeInvestigation`／`adapt` 接明列 action，`workReady` 先限制最多三個 ready tasks 再使用真 Parallel，live Planner 另計。Ledger 只依 Agent 明報 changes 及 exact batch Refs 計數，不由 Go 比較領域內容。Reframe wiki 是獨立 committed Ref，沿原 WikiSearch/completeness，歷史 context binding 不重寫；模型由 caller 分別明示，不能將 Planner 默綁一般分析模型。單項 worker 及 supporting/fresh handoff 舊 callers 沿用共同執行機械。M6+／產品入口／live 尚未完成。
+M2 已以 `executeInvestigation`／`adapt` 接明列 action，`workReady` 先限制最多三個 ready tasks 再使用真 Parallel，live Planner 另計。Ledger 只依 Agent 明報 changes 及 exact batch Refs 計數，不由 Go 比較領域內容。Reframe wiki 是獨立 committed Ref，沿原 WikiSearch/completeness，歷史 context binding 不重寫；模型由 caller 分別明示，不能將 Planner 默綁一般分析模型。單項 worker 及 supporting/fresh handoff 舊 callers 沿用共同執行機械。M7／產品入口／live 尚未完成。
 
 M3 已在既有 Planner snapshot 增加 exact checkpoint/counter/Controller feedback，三個 dispatch cycles 標記同份完整 snapshot，不新增抄寫 Step 或 journal。一次 workers batch／完整 support／wiki 交付各一 cycle，與 M2 hypothesis round 分開。`executeInvestigation` 非 nil 的明示容量政策沿原 adapt/step/handoff；unknown 記錄續作，達門檻 strict-close 後明交歷史及 pending feedback，不重派同 action。真 stats error 不吞，nil 保留舊 caller；沒有 live threshold 預設或週期 polling。
 
 M4 已以明示 RecoveryPolicy 沿既有 Scope.Retry 接 Planner 有限 fresh 恢復，worker/wiki/support 以 exact typed delivery 回 Planner，由 Agent 提出具 basis 的 inspection/resume/redirect。全敗worker batch亦計一輪，進展仍Agent明報；未完成的當前reframe可先做安全inspection，不重置streak或讓舊reframe繞規則。Support重用原pipeline續接已驗收phase，原intake/wiki/context provenance不重綁，pending中間Refs不升格checkpoint。SessionIdentity提供dispatch前known owner，所有replacement仍strict close/Wait，不改普通Close語義或造重試會計。取消/fatal/cleanup/unknownProviderFailed不吞，M5 verifier恢復待角色出現才接。
 
-M5 已接純claim producing Step與reference-linked state、fresh pro/con/cross、同版安全補角及Planner feedback；每角model/retry由caller明示。Planner/claim/verifier共用由M4抽出的retryPlannerInputs、Scope.Retry與原identity/strict-close，不加driver/engine多output/inputjournal。新verifier只claim/allowed evidence，不注入Planner敘事或舊verdict；同版Refs有序驗收、換版全fresh、pending partial不當checkpoint。完整verification delivery也算一輪，progress與支持程度由既有Planner判讀，Go不投票或按schema認列因果。M6 adaptive報告收尾及M7產品/live仍未接；R5獨立report操作見上節。
+M5 已接純claim producing Step與reference-linked state、fresh pro/con/cross、同版安全補角及Planner feedback；每角model/retry由caller明示。Planner/claim/verifier共用由M4抽出的retryPlannerInputs、Scope.Retry與原identity/strict-close，不加driver/engine多output/inputjournal。新verifier只claim/allowed evidence，不注入Planner敘事或舊verdict；同版Refs有序驗收、換版全fresh、pending partial不當checkpoint。完整verification delivery也算一輪，progress與支持程度由既有Planner判讀，Go不投票或按schema認列因果。M7產品/live仍未接；M6報告與R5操作見本文件。
+
+M6 新入口 `executeInvestigationReport` 沿共用初始化/adapt，在 yield 或純會計 admission 拒絕時呼叫現有 Planner 的 scope-aware report Step。Caller 明示 `ReportPolicy`，原 `executeInvestigation`／R5 操作保持 state-only／單項行為。Report/Planner/claim/verifier 共用 `retryPlannerInputs` 與 Scope.Retry、identity/strict-close/reopen，原 native errors 經 branch-local 收集及 join 後合併；不從診斷字串重造 cause。Step/check/Decision/RetryFinished/close 未完成的真 report Ref 只在 PendingReportError 明交，不是假 Final、不重試已 committed 產物；成功才沿 Result/FinalSelection。
+
+Report m6 metadata 明列全部合法 recoverable 歷史項目，包括未選 claim。Agent 宣告 unresolved、handled 或具 basis 的 redirect；Go 驗 first owner/版本/完整對應，handled 必須沿 task/role/proposal/phase 的真正後續成功工作，不接受任意較晚 Planner snapshot。Planner retry 的成功接收 state 可合法處理原失敗；claim、worker、wiki、support 沿原 binding／resume lineage 驗收，support key 改變不等於失去原 lineage。這不是按 schema／support 字串認列因果，原診斷不刪；未解 error 或提早 resource-limited 都保持非零，fatal/cancel/非法產物/cleanup 不改標成功。
+
+Admission 由唯一同步 dispatcher 一次計入普通 action 的全分支、有限 retry/fresh、support phases/reopen、下一 Planner update/retries 及容量 handoff 的保守上界，使用實際 Run.Snapshot policy/counts。不足便用 last accepted state 收尾，不新增停止用 Planner Step 或偽造 ledger yield。沒有 token 帳本、scheduler 或 engine 業務政策；Snapshot 不是對其他 dispatcher 的原子 reservation，bytes/disk/deadline/真正 hard cap 後沒有報告承諾，無 accepted state 也不保證 report。產品模型／數值與 live 仍是 M7 的獨立 gate。
 
 M3 保存當時已有的工作結果／feedback；M5 新增 verifier 時，同步擴充可重建 state 與恢復驗收。不得把尚未存在的角色填成占位資料就宣稱完成，也不得要求 M4 先完成 M5 才能提供的 verifier，形成相依循環。
 

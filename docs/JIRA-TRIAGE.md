@@ -131,7 +131,7 @@ Private `startPlanner` 從 exact committed supporting context（ready 或 needs-
 - Fresh session 明列上一份完整 Planner state、supporting context 及所有歷史 evidence owners，不靠舊對話、目錄掃描或複製 raw files。成功驗收及 Decision 持久化後才替換 caller 的 last state。無效 contract 或執行失敗使該 caller 停止，不交出失敗 candidate，也不自動 recovery；原始 fatal／取消／限額／cleanup 錯誤仍返回。
 - 匿名 RPC fixtures 覆蓋同 session 多 Step、fresh handoff、revised intake 歷史 owner、supporting query inputs、ready／incomplete、非法 Ref／schema／scope、失敗與會計。這不是正常 Pi 技能操作或指定 GLM live 驗證。
 
-`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；一般 worker 與自動批次／reframe 接線見下節；容量訊號、週期 checkpoint、明示政策的 recovery 與三方驗證接線見下節；自動報告收尾仍未接，R5 獨立報告操作亦見下節。
+`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；一般 worker 與自動批次／reframe 接線見下節；容量訊號、週期 checkpoint、明示政策的 recovery、三方驗證與 M6 報告收尾接線見下節；產品入口及 live 尚未完成。
 
 ### Planner proposal → 既有 supporting 任務 → 新 Planner state
 
@@ -175,7 +175,7 @@ Private `executeInvestigation` 明示獨立 Planner model 與 worker models，�
 
 調查期 wiki task 綁定 proposal/context/task ID/inputs，沿原 WikiSearch/completeness，保存 terms、previous_terms、理由及真正 evidence owners。新搜尋以獨立 `wiki_results` Ref 明交 Planner／worker／support／fresh handoff，不塞進 ready context 的舊 resolve、不重抓 intake、不改寫舊 `Context.Wiki`。歷史搜尋按自己的 intake/binding 重驗；新 partial/unavailable/not-run gaps 不得用旧 context 的 complete 遮蔽，runtime worker 仍受必要 wiki 完整性前提限制。Terms echo／明列變更是任務驗收，不證明搜尋詞語義不同或 wiki pattern 能支持本次根因。
 
-匿名同一 RPC driver 覆蓋三 worker 加 Planner、逆序完成／有序交付、依賴批次、no-ready feedback、明報進展／兩輪 reframe、wiki partial 與歷史 owners、獨立模型、support/handoff、branch 失敗／取消／cleanup／半提交與會計。沒有新 driver、scheduler、任意總輪數／查詢次數 cap 或 crash resume；M6+ 與真模型／技能／產品入口驗收仍未完成。歷史 validation 的 raw evidence 重讀成本尚未完成容量量測，不能把匿名情境通過當作高負載保證。
+匿名同一 RPC driver 覆蓋三 worker 加 Planner、逆序完成／有序交付、依賴批次、no-ready feedback、明報進展／兩輪 reframe、wiki partial 與歷史 owners、獨立模型、support/handoff、branch 失敗／取消／cleanup／半提交與會計。沒有新 driver、scheduler、任意總輪數／查詢次數 cap 或 crash resume；M7 與真模型／技能／產品入口驗收仍未完成。歷史 validation 的 raw evidence 重讀成本尚未完成容量量測，不能把匿名情境通過當作高負載保證。
 
 ### 完整 checkpoint 與容量 handoff
 
@@ -227,7 +227,7 @@ Claim Ref 與 evidence 集合固定版本；改 candidate 或 allowed evidence �
 
 ### 獨立報告操作與共用 renderer 機械
 
-R5 已提供 `ExtractReport`、`triage.report.v1`／`ReportFileID`、`InvestigationReport`／`ReportClaim` 與可呼叫的 `plannerCaller.report(ctx, renderer)`。它使用現有 Planner handle 的正常 Step，不新增 writer，不更新原 Planner state-only `last`，也不自行 yield、reserve、retry 或 close。M6 的 adaptive 收尾／歷史 failure 處置／報告額度與產品入口仍未接，不能將此操作當作完整調查已能自動交付報告。
+R5 已提供 `ExtractReport`、`triage.report.v1`／`ReportFileID`、`InvestigationReport`／`ReportClaim` 與可呼叫的 `plannerCaller.report(ctx, renderer)`。它使用現有 Planner handle 的正常 Step，不新增 writer，不更新原 Planner state-only `last`，也不自行 yield、reserve、retry 或 close。R5 操作本身不接 adaptive 收尾；下節 M6 新入口另接歷史 failure 處置／報告額度及自動交付，產品入口仍未接。
 
 Report 明列 accepted state/context、選中的 exact claim/delivery/assessment owner、Planner 宣告的 completeness/closure/gaps/next_steps。沿 previous lineage 重驗真歷史，assessment 不是任取最後一個 state；新版 claim 不重用舊驗證，也不在 report 重寫 statement/premises/支持判讀。沒有 claim 只能宣告 incomplete；Go 驗來源、版本、producer、必填與既有 gaps，不按 support 字串、schema 或模型共識推定因果。
 
@@ -238,6 +238,28 @@ Agent 在該 attempt 執行固定 renderer，exclusive 寫 artifact 及 candidat
 Extraction 與 Python file/JSON/candidate 機械使用 `contract/reportresource`，review 原 consumer 同步遷移；review 的 Pin/roster/template/appendix 驗收保持原義。Triage producer 各 Ref 讀完關閉局部 descriptors，避免整段歷史累積 FD；request/candidate 仍保持原 stack。Host 用 CommandContext、Run/WaitDelay 及非嵌入式 bounded writer，stdout 64 MiB、stderr 64 KiB；保留 cancellation 與 process errors，不變成普通缺資料。這些限額不代表 Python RSS 或 live 容量已驗。
 
 匿名測試沿原 Store 與真 engine/Store/RPC，包含 historical assessment、兩版 claim、偽 producer/uncommitted/tamper、artifact/renderer/cleanup/cancel 與原 review consumer；另有真 producer 的局部低 FD 上限、多輸入 Ref，以及 io.Copy/host output-limit 回歸。沒有全 EIO/替換競態/live/模型技能或產品驗收證明。
+
+### 明示政策的調查收尾與 execution outcome
+
+`executeInvestigationReport` 重用初始化/adapt，要求既有 RecoveryPolicy、caller 明列的 `ReportPolicy{ReportRetries, ReserveSessions, ReserveAttempts}` 與已 extraction 的 renderer。舊 `executeInvestigation` 的 signature、nil policies、state-only 結果及 R5 單項 report caller 不改。
+
+在 accepted yield 的 Planner close 前，執行正常 report Step、committed 驗收／全文 deterministic 比較、Decision、有限 Retry 完成與 strict close，才沿原 Result／FinalSelection 交 artifact。不新增 writer Agent、Store 或 registry。Report retry 只限原可信 timeout／compaction，重用 shared retry、SessionIdentity／strict close、fresh Refs/history。非法產物、host renderer、Decision／RetryFinished、cleanup 或 fatal/cancel 不被當成可重新成功的 report；`PendingReportError` 明交已知真 state/report Ref、Inputs、完成 boundary 與 recovery/verification/report retry/controller feedback，Unwrap 原錯誤，並不是 FinalSelection。
+
+Report v1 的 `m6` 是相容擴充：舊 caller 不接受自行附加 metadata，M6 則要求完整。每個合法 recoverable failure 都綁最初接收的 committed owner、delivery/claim/role/index/原 failure，包括報告未選的 claims。Agent 宣告 `unresolved`、`handled` 或 `redirect`，各有理由及明列 results/basis；Go 驗完整對應、版本、原 producers 與機械續接，不從來源 schema／支持字串判因果或判斷調查必要性。
+
+`handled` 不能只引任意較晚的 Planner state：Planner／claim 要真 retry key 與原 role/model／parent binding，worker/wiki 要原 task 與經已驗 RecoveryChoice 的 resume/proposal/context，support 要原 Proposal/Context/Work、retained phases、Authorization 及 failed phase 的真成功產物。重用原 worker/wiki/context acceptance；support resume 的 key 改變仍可保留 lineage。無法證明該續接則保留 unresolved，或由 Agent 以非空 evidence basis 交代有根據的 redirect，不把普通 state echo 當工作成功。
+
+原 native causes 沿實際 callback 保存，verifier 分支各自收集、join 後才合併，fresh clone 保留；不從 Snapshot.FailureInfo 或文字重造 error。Unresolved 必須 incomplete，仍交原錯誤與非零 exit；後續同版成功或有據 redirect 不抹除診斷／原 assessment。合法缺資料的 incomplete report 可以 execution 成功，但不表示 root cause confirmed；Report 仍投影原 claim/assessment 支持程度，三角完成不等於因果成立。
+
+### 最後報告額度與非保證
+
+這個入口是 Run 調查的唯一 dispatch coordinator，並非通用 reservation API。Caller 的 attempts reserve 至少涵蓋最後 report 與全部有限 retry，sessions reserve 至少涵蓋每次 fresh retry，第一份 report 使用現有 usable Planner。沒有產品預設數字，測試值不當 live policy。
+
+Bootstrap 與每個同步段落邊界讀原 Run.Snapshot().Policy/Sessions/Attempts，一次計入普通 action、全部分支／retries／fresh、下一 Planner feedback/retry 與可能容量 handoff 的上界。Worker 最多三個 ready tasks；wiki 一 phase；support resolve/revision 用既有二／三 phases加reopen的保守上界；新 claim 與未補 verifier 各依明示 retry policy，已 accepted 角不重派。所有 branches join、下一 Planner update 成功後才再 admission，沒有 token 帳本、通用 scheduler 或 engine 業務邏輯；算術檢查 overflow。
+
+普通段將侵入 reserve 時，在原 Planner close 前，以最後 accepted state 直接產 resource-limited incomplete report，回普通 workflow failure／非零 exit。不追加停止用 Planner Step，不偽造 ledger yield 或重置 counters。無 accepted state 的 bootstrap 不保證報告；真的 hard cap、fatal/cancel、storage/journal/cleanup 或 byte/disk/deadline 耗盡時不強迫補報告。Snapshot 不是對同 Run 其他並行 dispatcher 的原子預留。
+
+匿名案例沿原 engine/Store/RPC與renderer，包含 persisted final、report recovery／原 error chain、處置完整性及偽 lineage、reserve 差一/剛好、並行反序與 support phase resume。Decision 故障有真完整 completion 路徑；RetryFinished 精確注入僅 shared primitive／report consumer seam，不冒稱完整 finishReport 的所有微時序。未獨立強制所有 undispatched sibling、未捕捉每個初始 Runtime error 物件，也未窮舉交錯、live／模型技能／RSS／容量；source/fixture 採證不是這些能力的保證。
 
 ### 同一次驗收內的讀取重用
 

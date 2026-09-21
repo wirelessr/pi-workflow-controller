@@ -179,6 +179,7 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 		delivery.Failures, delivery.Support = []RecoveryFailure{failure}, continuation
 		p.recovery.Deliveries = append(p.recovery.Deliveries, delivery)
 		p.recoveryErrors = append(p.recoveryErrors, err)
+		p.nativeFailures = append(p.nativeFailures, nativeRecoveryFailure{failure, err})
 		return p.reopen(ctx, before.Context)
 	}
 	afterAcceptance := newAcceptance(ctx, p.r)

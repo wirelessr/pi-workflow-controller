@@ -130,6 +130,7 @@ func (p *plannerCaller) verify(ctx context.Context) (retErr error) {
 	}
 	var branches []engine.Branch
 	unavailableErrors := make([]error, 3)
+	nativeFailures := make([][]nativeRecoveryFailure, 3)
 	for i, role := range p.verification.Policy.roles() {
 		if retained != nil && retained.Roles[i].Result != nil {
 			delivery.Roles[i] = retained.Roles[i]
@@ -158,7 +159,11 @@ func (p *plannerCaller) verify(ctx context.Context) (retErr error) {
 				delivery.Roles[i] = VerificationRoleDelivery{Role: role.name, Result: &ref}
 				return ref, nil
 			}
-			ref, failures, err := retryPlannerInputs(ctx, p.r, s, key+"-recovery", "verification", role.policy.Retries, run, nil)
+			recovered := func(_ context.Context, failure RecoveryFailure, cause error, _ bool) error {
+				nativeFailures[i] = append(nativeFailures[i], nativeRecoveryFailure{failure, cause})
+				return nil
+			}
+			ref, failures, err := retryPlannerInputs(ctx, p.r, s, key+"-recovery", "verification", role.policy.Retries, run, recovered)
 			outcome := VerificationRoleDelivery{Role: role.name, Failures: append([]RecoveryFailure{}, failures...)}
 			if err != nil {
 				var f *engine.Failure
@@ -174,6 +179,7 @@ func (p *plannerCaller) verify(ctx context.Context) (retErr error) {
 				}
 				outcome.Unavailable, outcome.Exhausted = true, string(f.Code)
 				unavailableErrors[i] = err
+				nativeFailures[i] = append(nativeFailures[i], nativeRecoveryFailure{failures[len(failures)-1], err})
 			} else {
 				outcome.Result = &ref
 			}
@@ -189,6 +195,9 @@ func (p *plannerCaller) verify(ctx context.Context) (retErr error) {
 		return fmt.Errorf("same-version verification has no missing role")
 	}
 	joined, groupErr := p.r.Root().Parallel(ctx, "verification-"+delivery.ID, engine.CollectAll, branches)
+	for _, branchFailures := range nativeFailures {
+		p.nativeFailures = append(p.nativeFailures, branchFailures...)
+	}
 	var failures []error
 	if groupErr != nil {
 		failures = append(failures, groupErr)
