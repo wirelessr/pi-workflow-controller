@@ -69,6 +69,9 @@ def render(meta, data, documents):
     reference("Context", data["context"])
     context = document(data["context"])
     state = document(data["state"])
+    if "request" in data:
+        sections.append("## 原始調查請求\n")
+        text("Caller request", data["request"])
     sections.append("## 問題、身份與環境\n")
     text("問題", context["problem"])
     scope = context.get("scope") or {}

@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": ["state", "context", "claims", "completeness", "closure", "gaps", "next_steps", "report_file"],
   "properties": {
+    "request": {"type": "string", "minLength": 1},
     "m6": {"$ref": "#/$defs/metadata"},
     "state": {"$ref": "common.v1.json#/$defs/ref"},
     "context": {"$ref": "common.v1.json#/$defs/ref"},

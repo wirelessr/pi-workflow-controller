@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/workflows"
 )
 
 func TestCLIPreflightDoesNotCreateTaskOrStartPi(t *testing.T) {
@@ -78,6 +79,73 @@ func TestCLIPreflightDoesNotCreateTaskOrStartPi(t *testing.T) {
 				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("preflight side effect at %s: %v", path, err)
 				}
+			}
+		})
+	}
+}
+
+func TestCLITriageMalformedInput(t *testing.T) {
+	for _, tc := range []struct{ name, prompt string }{
+		{"prose", "Investigate CASE-17"},
+		{"unknown", `{"scope":{"ticket":"CASE-17"},"request":"inspect","extra":1}`},
+		{"wrong-case", `{"scope":{"ticket":"CASE-17"},"Request":"inspect"}`},
+		{"scope-unknown", `{"scope":{"ticket":"CASE-17","project":"x"},"request":"inspect"}`},
+		{"duplicate", `{"scope":{"ticket":"CASE-17"},"request":"inspect","request":"expand"}`},
+		{"escaped-duplicate", `{"scope":{"ticket":"CASE-17"},"request":"inspect","\u0072equest":"expand"}`},
+		{"scope-duplicate", `{"scope":{"ticket":"CASE-17","ticket":"CASE-18"},"request":"inspect"}`},
+		{"tenant-duplicate", `{"scope":{"ticket":"CASE-17","tenant_ids":["17"],"tenant_ids":["18"]},"request":"inspect"}`},
+		{"extra-json", `{"scope":{"ticket":"CASE-17"},"request":"inspect"} {}`},
+		{"request-number", `{"scope":{"ticket":"CASE-17"},"request":17}`},
+		{"request-null", `{"scope":{"ticket":"CASE-17"},"request":null}`},
+		{"scope-array", `{"scope":[],"request":"inspect"}`},
+		{"scope-null", `{"scope":null,"request":"inspect"}`},
+		{"tenant-number", `{"scope":{"ticket":"CASE-17","tenant_ids":[17]},"request":"inspect"}`},
+		{"tenant-null", `{"scope":{"ticket":"CASE-17","tenant_ids":null},"request":"inspect"}`},
+		{"tenant-blank", `{"scope":{"ticket":"CASE-17","tenant_ids":[" "]},"request":"inspect"}`},
+		{"missing-request", `{"scope":{"ticket":"CASE-17"}}`},
+		{"blank-request", `{"scope":{"ticket":"CASE-17"},"request":" \n\t "}`},
+		{"missing-scope", `{"request":"inspect"}`},
+		{"missing-ticket", `{"scope":{},"request":"inspect"}`},
+		{"bad-ticket", `{"scope":{"ticket":"CASE 17"},"request":"inspect"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			marker := filepath.Join(base, "pi-started")
+			opts := cliProtocolOptions(t, "", filepath.Join(base, "bridge"), "")
+			opts.definitions, opts.resources, opts.schemas = workflows.Definitions(), workflows.Resources(), workflows.Schemas()
+			opts.engine.BaseDir = base
+			opts.engine.RuntimeOptions.Env = append(opts.engine.RuntimeOptions.Env, "PWC_CLI_PI_MARKER="+marker)
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"run", "jira-triage", tc.prompt}, strings.NewReader(""), &stdout, &stderr, opts); code == 0 {
+				t.Fatal("malformed product input succeeded")
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("malformed input started provider: %v", err)
+			}
+			seen := 0
+			err := filepath.WalkDir(base, func(path string, entry os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if entry.Name() != "run.json" {
+					return nil
+				}
+				seen++
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				var state engine.Snapshot
+				if err := json.Unmarshal(raw, &state); err != nil {
+					return err
+				}
+				if len(state.Sessions) != 0 || len(state.Attempts) != 0 || state.Input.Prompt != tc.prompt {
+					t.Fatal("rejected input dispatched work or changed persisted input")
+				}
+				return nil
+			})
+			if err != nil || seen != 1 {
+				t.Fatalf("missing rejected run state: count=%d err=%v", seen, err)
 			}
 		})
 	}

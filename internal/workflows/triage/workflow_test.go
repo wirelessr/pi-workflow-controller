@@ -1470,8 +1470,25 @@ func corruptInputEvidence(ref contract.Ref) error {
 	return os.WriteFile(filepath.Join(filepath.Dir(ref.Path), p.Files[0].Path), []byte("changed after acceptance"), 0600)
 }
 
-func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stageTask, step int, reporting ...bool) PlannerState {
+func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stageTask, step int, reporting ...bool) (result PlannerState) {
 	t.Helper()
+	product := len(reporting) > 1 && reporting[1]
+	if product {
+		var supplied struct {
+			Checkpoint   *PlannerCheckpoint   `json:"checkpoint"`
+			Recovery     *PlannerRecovery     `json:"recovery"`
+			Verification *PlannerVerification `json:"verification"`
+		}
+		if err := json.Unmarshal([]byte(req.Prompt), &supplied); err != nil {
+			t.Fatal(err)
+		}
+		if supplied.Checkpoint == nil || supplied.Checkpoint.Policy.HandoffPercent != 80 || supplied.Recovery == nil || supplied.Recovery.Policy.PlannerRetries != 1 || supplied.Verification == nil {
+			t.Fatal("product omitted approved continuation policies")
+		}
+		defer func() {
+			result.Checkpoint, result.Recovery, result.Verification = supplied.Checkpoint, supplied.Recovery, supplied.Verification
+		}()
+	}
 	if strings.HasPrefix(name, "r5-") {
 		if name == "r5-incomplete" {
 			return plannerFixture(t, "complete", req, task, step, contract.Ref{})
@@ -1706,7 +1723,7 @@ func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stag
 		if delivered.Recovery == nil || !strings.Contains(task.Requirements, recoveryRequirements) {
 			t.Fatal("M4 omitted recovery metadata or requirements")
 		}
-		if (delivered.Checkpoint != nil) != (name == "m4-capacity-fresh-worker-timeout" || name == "m4-allfail-reframe-checkpoint" || strings.HasPrefix(name, "m4-reframe-")) {
+		if !product && (delivered.Checkpoint != nil) != (name == "m4-capacity-fresh-worker-timeout" || name == "m4-allfail-reframe-checkpoint" || strings.HasPrefix(name, "m4-reframe-")) {
 			t.Fatal("M4 recovery unexpectedly changed capacity policy")
 		}
 	} else if m3 && name != "m3-illegal-optin" {
@@ -1714,7 +1731,7 @@ func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stag
 			t.Fatal("M3 entry omitted checkpoint or requirements")
 		}
 	} else if len(reporting) > 0 && reporting[0] {
-		if delivered.Recovery == nil || !strings.Contains(task.Requirements, recoveryRequirements) || delivered.Checkpoint != nil {
+		if delivered.Recovery == nil || !strings.Contains(task.Requirements, recoveryRequirements) || (!product && delivered.Checkpoint != nil) {
 			t.Fatal("M6 omitted explicit recovery or invented capacity")
 		}
 	} else if task.Requirements != plannerRequirements+"\n\n"+adaptiveRequirements || delivered.Checkpoint != nil {
@@ -2319,6 +2336,9 @@ func m2WikiFixture(t *testing.T, name string, req contract.Request) (WikiSearch,
 // the event-loop goroutine owns these maps; the workflow never mutates them.
 type m2Barrier struct {
 	reportFailureAttempt string
+	settleAbortGate      bool
+	settledAbort         *protocol.Event
+	abortReleased        bool
 	held                 map[string]protocol.Event
 	attempts             map[string]string
 	order                []string
@@ -2330,6 +2350,25 @@ type m2Barrier struct {
 
 func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 	t.Helper()
+	if b.settledAbort != nil && b.faulted && !b.abortReleased {
+		snapshot := r.Snapshot()
+		primary := snapshot.Attempts[b.attempts["w2"]]
+		if primary.Failure == nil {
+			return
+		}
+		success := snapshot.Attempts[b.attempts["w3"]]
+		if !snapshot.StatePersisted || primary.State != engine.Failed || primary.Failure.Code != engine.CompactionFailed || primary.LastSeq <= success.LastSeq || snapshot.Sessions[primary.HandleID].State != "Closed" {
+			t.Fatal("abort gate requires persisted CompactionFailed after w2 cleanup")
+		}
+		if success.State != engine.Succeeded || success.Output == nil || snapshot.Sessions[success.HandleID].State == "Closed" {
+			t.Fatal("w3 cleanup escaped abort gate before primary terminal")
+		}
+		if err := b.settledAbort.Reply(protocol.Control{Type: "release-abort"}); err != nil {
+			t.Fatal(err)
+		}
+		b.abortReleased = true
+		t.Logf("abort gate released w3 after w2 CompactionFailed terminal: commit_seq=%d primary_seq=%d", success.LastSeq, primary.LastSeq)
+	}
 	if b.reportFailureAttempt != "" {
 		if b.faulted || len(b.held) != 2 {
 			return
@@ -2485,6 +2524,19 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 				t.Fatal("worker committed before all three prompts reached barrier")
 			}
 		}
+		if name == "m4-mixed-committed-close-cleanup-fatal" {
+			owner := snapshot.Sessions[snapshot.Attempts[b.attempts["w3"]].HandleID]
+			if owner.Identity.SessionID == "" {
+				t.Fatal("cleanup fault requires the opened worker identity")
+			}
+			// All startups have passed discovery preflight, but no worker can
+			// settle yet. Do not race discovery removal after the real commit.
+			path := filepath.Join(bridge, owner.Identity.SessionID+".json")
+			if err := os.Rename(path, path+".recovering"); err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("cleanup fault installed after three open prompts, before w3 commit: owner=%+v path=%s", owner.Identity, path)
+		}
 		b.proved = true
 	}
 	if name == "m4-mixed-three-failed" {
@@ -2501,16 +2553,12 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 		return
 	}
 	if b.waiting != "" {
+		if b.settleAbortGate && b.waiting == "w3" && b.settledAbort == nil {
+			return
+		}
 		a := snapshot.Attempts[b.attempts[b.waiting]]
 		if a.State != engine.Succeeded || a.Output == nil || snapshot.Sessions[a.HandleID].State != "Closed" && !strings.HasPrefix(name, "m4-mixed-committed-close-") {
 			return
-		}
-		if name == "m4-mixed-committed-close-cleanup-fatal" {
-			sid := snapshot.Sessions[a.HandleID].Identity.SessionID
-			path := filepath.Join(bridge, sid+".json")
-			if err := os.Rename(path, path+".recovering"); err != nil {
-				t.Fatal(err)
-			}
 		}
 		b.waiting = ""
 	}
@@ -2519,6 +2567,9 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 	}
 	id := []string{"w3", "w2", "w1"}[len(b.order)]
 	ack := "settle"
+	if b.settleAbortGate && id == "w3" {
+		ack = "settle-abortgate"
+	}
 	if id == "w2" {
 		if (strings.HasPrefix(name, "m2-branch-") && name != "m2-branch-binding") || strings.HasPrefix(name, "m4-mixed-") {
 			b.faulted = true
@@ -2554,6 +2605,9 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 	}
 	if err := b.held[id].Reply(protocol.Control{Type: ack}); err != nil {
 		t.Fatal(err)
+	}
+	if b.settleAbortGate && id == "w2" {
+		t.Log("w3 abort held; w2 compaction-error released without blocking host event loop")
 	}
 	b.order = append(b.order, id)
 	b.waiting = id
@@ -3298,7 +3352,7 @@ func m2AssertWikiOwners(t *testing.T, inputs []contract.Ref) {
 	}
 }
 
-func m2AssertWorkerInputs(t *testing.T, r *engine.Run, req contract.Request, request workerRequest, original ContextResult, name string) {
+func m2AssertWorkerInputs(t *testing.T, r *engine.Run, req contract.Request, request workerRequest, original ContextResult, name string, product ...bool) {
 	t.Helper()
 	requirements := workerRequirements
 	if strings.HasPrefix(name, "m4-support-") || name == "m4-wiki-timeout-partial-resume" || (strings.HasPrefix(name, "m4-reframe-") || name == "m5-supplement-reframe-inspection-resume") && strings.HasPrefix(request.Task.ID, "inspection") {
@@ -3333,7 +3387,14 @@ func m2AssertWorkerInputs(t *testing.T, r *engine.Run, req contract.Request, req
 		}
 	}
 	model := r.Snapshot().Sessions[r.Snapshot().Attempts[req.Identity.AttemptID].HandleID].Role.Model
-	if model != (runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: "high"}) {
+	want := runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: "high"}
+	if len(product) > 0 && product[0] {
+		want.Thinking = "off"
+		if request.Task.Responsibility == "analysis" {
+			want.ID, want.Thinking = "accounts/fireworks/models/glm-5p3-flash", "high"
+		}
+	}
+	if model != want {
 		t.Fatal("M2 evidence-only worker changed model binding")
 	}
 }
@@ -5721,7 +5782,35 @@ var m6Cases = map[string]m6Case{
 }
 
 func TestIntakeToContext(t *testing.T) {
+	productCases := map[string]string{
+		"m7-scope-expanded":           "m6-yield",
+		"m7-support-revision":         "m6-review-support-revise-context",
+		"m7-vision":                   "m6-capacity-handoff",
+		"m7-yield":                    "m6-yield",
+		"m7-verified":                 "m6-verified-yield",
+		"m7-handoff":                  "m6-capacity-handoff",
+		"m7-report-retry":             "m6-report-compaction-retry",
+		"m7-same-version":             "m6-history-same-version-handled",
+		"m7-planner-retry":            "m6-review-planner-retry",
+		"m7-close-failure":            "m6-report-close-failure",
+		"m7-cancel":                   "m6-report-cancel",
+		"m7-fatal":                    "m6-ordinary-fatal-no-report",
+		"m7-wrong-ref":                "m6-history-uncommitted-result",
+		"m7-partial-scope":            "m6-yield",
+		"m7-no-runtime-prerequisites": "m6-yield",
+		"m7-request-rewritten":        "m6-yield",
+		"m7-resource":                 "m6-claim-and-role-retry-reserve",
+	}
 	cases := slices.Clone(triageCases)
+	var productNames []string
+	for name := range productCases {
+		productNames = append(productNames, name)
+	}
+	slices.Sort(productNames)
+	for _, name := range productNames {
+		v := m6Cases[productCases[name]]
+		cases = append(cases, triageCase{name, v.stages, v.failure, true})
+	}
 	var names []string
 	for name := range m6Cases {
 		names = append(names, name)
@@ -5736,8 +5825,29 @@ func TestIntakeToContext(t *testing.T) {
 			continue
 		}
 		t.Run(tc.name, func(t *testing.T) {
+			productName := tc.name
+			productBase, product := productCases[tc.name]
 			m6Name := tc.name
-			m6Spec, m6 := m6Cases[tc.name]
+			if product {
+				m6Name = productBase
+			}
+			m6Spec, m6 := m6Cases[m6Name]
+			if productName == "m7-resource" {
+				// Product capacity policy reserves one additional fresh Planner session.
+				m6Spec.cost.Sessions++
+			}
+			if productName == "m7-scope-expanded" {
+				m6Spec.failure, m6Spec.final = true, false
+				m6Spec.contains = "context source/scope mismatch"
+				m6Spec.stages = 3
+				tc.failure, tc.stages = true, 3
+			}
+			if productName == "m7-request-rewritten" {
+				m6Spec.failure, m6Spec.final = true, false
+				m6Spec.boundary, m6Spec.contains = "step-committed", "immutable caller instruction"
+				tc.failure = true
+			}
+			const originalRequest = "  請調查匿名案例，保留不確定性。\n第二行：不要擴充授權，圖片另做 analysis。 e\u0301  "
 			if m6 {
 				tc.name = m6Spec.base
 			}
@@ -5843,6 +5953,12 @@ func TestIntakeToContext(t *testing.T) {
 				case "work-ticket-only":
 					mode = "ticket-only"
 				}
+			}
+			if productName == "m7-partial-scope" {
+				mode = "ticket-only"
+			}
+			if productName == "m7-no-runtime-prerequisites" {
+				mode = "wiki-partial"
 			}
 			scope := testScope()
 			if mode == "ticket-only" {
@@ -5995,6 +6111,12 @@ func TestIntakeToContext(t *testing.T) {
 			policy.Runtime.StartupTimeout = 5 * time.Second
 			policy.Runtime.CleanupTimeout = 3 * time.Second
 			policy.Runtime.AbortGrace = 50 * time.Millisecond
+			if m6Name == "m6-ordinary-cleanup-priority" {
+				// This abort spans another session's RPC cleanup, Wait and persisted
+				// terminal, not just one provider round trip. Ordering is event-gated.
+				const boundedAbortGrace = time.Second
+				policy.Runtime.AbortGrace = boundedAbortGrace
+			}
 			policy.Runtime.HealthInterval = time.Hour
 			if m2 {
 				policy.MaxLiveSessions = 4 // Three ready workers plus the persistent Planner.
@@ -6514,6 +6636,13 @@ func TestIntakeToContext(t *testing.T) {
 				}
 				return engine.Result{Outputs: outputs}, err
 			}}
+			if product {
+				def = Definition()
+				// Exercise hard-cap admission with a smaller anonymous resource budget.
+				if m6Spec.attempts != 0 {
+					def.Policy.MaxTotalAttempts = m6Spec.attempts
+				}
+			}
 			var transport runtime.Runtime = pi
 			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" || tc.name == "planner-timeout" || tc.name == "work-worker-timeout" || tc.name == "work-planner-timeout" || tc.name == "m1-worker-timeout" {
 				transport = deadlineRuntime{Runtime: pi}
@@ -6533,7 +6662,11 @@ func TestIntakeToContext(t *testing.T) {
 				runCtx, cancelParent = context.WithCancelCause(ctx)
 				defer cancelParent(nil)
 			}
-			r, err = engine.New(runCtx, def, engine.Input{Prompt: "CASE-17", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
+			input := engine.Input{Prompt: "CASE-17", LaunchCWD: dir}
+			if product {
+				input.Prompt = string(testJSON(workflowInput{Scope: scope, Request: originalRequest}))
+			}
+			r, err = engine.New(runCtx, def, input, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -6550,7 +6683,7 @@ func TestIntakeToContext(t *testing.T) {
 			var refreshRequests int32
 			var revisionIntake contract.Ref
 			observedSupportingRefs := map[contract.Ref]bool{}
-			barrier := m2Barrier{held: map[string]protocol.Event{}, attempts: map[string]string{}}
+			barrier := m2Barrier{held: map[string]protocol.Event{}, attempts: map[string]string{}, settleAbortGate: m6Name == "m6-ordinary-cleanup-priority"}
 			var abortEvent protocol.Event
 			var pendingLateAborts []struct {
 				event protocol.Event
@@ -6587,6 +6720,10 @@ func TestIntakeToContext(t *testing.T) {
 				return false
 			}
 			var barrierTick <-chan time.Time
+			var barrierChanges <-chan struct{}
+			if barrier.settleAbortGate {
+				barrierChanges = r.Changes()
+			}
 			if m2 {
 				ticker := time.NewTicker(5 * time.Millisecond)
 				defer ticker.Stop()
@@ -6597,6 +6734,8 @@ func TestIntakeToContext(t *testing.T) {
 				select {
 				case <-done:
 					break loop
+				case <-barrierChanges:
+					barrier.release(t, r, tc.name, bridge)
 				case <-barrierTick:
 					barrier.release(t, r, tc.name, bridge)
 				case <-ctx.Done():
@@ -6732,6 +6871,24 @@ func TestIntakeToContext(t *testing.T) {
 						}
 						continue
 					}
+					if barrier.settleAbortGate && e.Message.Type == "abort" {
+						snapshot := r.Snapshot()
+						success := snapshot.Attempts[barrier.attempts["w3"]]
+						owner := snapshot.Sessions[success.HandleID]
+						if barrier.settledAbort != nil || !barrier.proved || success.State != engine.Succeeded || success.Output == nil || owner.Identity.SessionID != e.Message.SessionID || owner.State == "Closed" {
+							t.Fatal("settled abort gate requires first real abort from committed w3 owner")
+						}
+						primary := snapshot.Attempts[barrier.attempts["w2"]]
+						if primary.Failure != nil || primary.Output != nil || len(barrier.order) != 1 || barrier.order[0] != "w3" {
+							t.Fatal("w2 must remain at prompt barrier until committed w3 reaches real abort")
+						}
+						barrier.settledAbort = &e
+						t.Logf("w3 first real abort held after commit: owner=%s commit_seq=%d", owner.Identity.SessionID, success.LastSeq)
+						// Release w2 now, not on a timer. Keep the event loop free while
+						// its provider handles abort/abort_bash and Step persists failure.
+						barrier.release(t, r, tc.name, bridge)
+						continue
+					}
 					if m4 && e.Message.Type == "abort" {
 						snapshot := r.Snapshot()
 						primary := snapshot.Attempts[barrier.attempts["w2"]]
@@ -6792,6 +6949,26 @@ func TestIntakeToContext(t *testing.T) {
 					if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
 						t.Fatal(err)
 					}
+					if product {
+						if strings.HasPrefix(task.Stage, "intake") || strings.HasPrefix(task.Stage, "wiki") || strings.HasPrefix(task.Stage, "context") || task.Stage == "planner" || task.Stage == "planner-report" {
+							if task.Request != originalRequest {
+								t.Fatalf("%s lost original caller request", task.Stage)
+							}
+						}
+						for _, a := range r.Snapshot().Attempts {
+							if a.Output == nil {
+								continue
+							}
+							switch a.Key {
+							case "intake":
+								result.Intake = *a.Output
+							case "wiki":
+								result.Wiki = *a.Output
+							case "context":
+								result.Context = *a.Output
+							}
+						}
+					}
 					if m4 && req.Output.SchemaID != ReportSchema {
 						model := runtime.ModelSpec{Provider: "fixture", ID: "analysis", Thinking: "high"}
 						if task.Stage == "intake" || task.Stage == "intake-update" || task.Stage == "intake-revision" {
@@ -6807,6 +6984,18 @@ func TestIntakeToContext(t *testing.T) {
 							}
 							if request.Task.Responsibility != "analysis" {
 								model = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: "high"}
+							}
+						}
+						if product {
+							if model.Provider == "fireworks" {
+								model.Thinking = "off"
+							} else {
+								model.Provider = "fireworks"
+								if task.Stage == "planner" {
+									model.ID = "accounts/fireworks/models/glm-5p3"
+								} else {
+									model.ID = "accounts/fireworks/models/glm-5p3-flash"
+								}
 							}
 						}
 						m4Phases[task.Stage]++
@@ -6883,11 +7072,17 @@ func TestIntakeToContext(t *testing.T) {
 									t.Fatal(err)
 								}
 								selected := append([]ReportClaim{}, reportTask.Assessments...)
-								data = InvestigationReport{State: reportTask.State, Context: reportTask.Context, Claims: selected, Completeness: "incomplete", Closure: "Missing runtime evidence, not disproof", Gaps: append([]string{}, state.Data.Gaps...), NextSteps: []string{"Obtain authorized runtime measurements"}, ReportFile: ReportFileID}
+								data = InvestigationReport{Request: reportTask.Request, State: reportTask.State, Context: reportTask.Context, Claims: selected, Completeness: "incomplete", Closure: "Missing runtime evidence, not disproof", Gaps: append([]string{}, state.Data.Gaps...), NextSteps: []string{"Obtain authorized runtime measurements"}, ReportFile: ReportFileID}
 								if m6 {
 									m6Tasks = append(m6Tasks, reportTask)
 									m6Requests = append(m6Requests, req)
 									v := data.(InvestigationReport)
+									if productName == "m7-verified" {
+										v.Completeness = "complete"
+									}
+									if productName == "m7-request-rewritten" {
+										v.Request = strings.TrimSpace(v.Request)
+									}
 									v.Claims = []ReportClaim{}
 									seen := map[contract.Ref]bool{}
 									for _, claim := range selected {
@@ -7019,7 +7214,11 @@ func TestIntakeToContext(t *testing.T) {
 								snapshot := r.Snapshot()
 								owner := snapshot.Sessions[snapshot.Attempts[req.Identity.AttemptID].HandleID]
 								parent := snapshot.Sessions[snapshot.Attempts[projection.ParentState.AttemptID].HandleID]
-								if owner.Identity != parent.Identity && tc.name != "m5-claim-timeout-retry" && tc.name != "m5-claim-retry-exhausted" || owner.Role.Model != (runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}) || owner.Role.Name != "triage-planner" || !slices.Contains(req.Inputs, projection.ParentState) || !slices.Contains(req.Inputs, projection.Context) {
+								wantPlanner := runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}
+								if product {
+									wantPlanner = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/glm-5p3", Thinking: "high"}
+								}
+								if owner.Identity != parent.Identity && !(product && parent.State == "Closed" && owner.Role == parent.Role) && tc.name != "m5-claim-timeout-retry" && tc.name != "m5-claim-retry-exhausted" || owner.Role.Model != wantPlanner || owner.Role.Name != "triage-planner" || !slices.Contains(req.Inputs, projection.ParentState) || !slices.Contains(req.Inputs, projection.Context) {
 									t.Fatal("claim lost proposing Planner/session/exact inputs")
 								}
 								switch tc.name {
@@ -7130,7 +7329,13 @@ func TestIntakeToContext(t *testing.T) {
 								data = intake
 							case PlannerSchema:
 								plannerSteps++
-								expectedPlanner = m2PlannerFixture(t, tc.name, req, task, plannerSteps, m6)
+								expectedPlanner = m2PlannerFixture(t, tc.name, req, task, plannerSteps, m6, product)
+								if productName == "m7-vision" {
+									for i := range expectedPlanner.WorkerTasks {
+										expectedPlanner.WorkerTasks[i].SourceKind = "vision"
+										expectedPlanner.WorkerTasks[i].Responsibility = "analysis"
+									}
+								}
 								if m6 && strings.HasPrefix(m6Spec.fault, "worker-resume") && len(expectedPlanner.Recovery.Deliveries) == 1 {
 									d := expectedPlanner.Recovery.Deliveries[0]
 									var original publication[PlannerState]
@@ -7181,7 +7386,7 @@ func TestIntakeToContext(t *testing.T) {
 								if err := json.Unmarshal([]byte(req.Prompt), &request); err != nil {
 									t.Fatal(err)
 								}
-								m2AssertWorkerInputs(t, r, req, request, result, tc.name)
+								m2AssertWorkerInputs(t, r, req, request, result, tc.name, product)
 								fixtureName := tc.name
 								if request.Task.SourceKind == "logs" {
 									fixtureName = "m1-logs"
@@ -7516,6 +7721,11 @@ func TestIntakeToContext(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
+					if productName == "m7-scope-expanded" && req.Output.SchemaID == ContextSchema {
+						v := data.(Context)
+						v.Scope.TenantIDs = append(slices.Clone(v.Scope.TenantIDs), "999")
+						data = v
+					}
 					if acquiring && count == 1 {
 						writeEnvelope(t, e.Message, req, data, acquiredFiles)
 					} else {
@@ -7779,6 +7989,47 @@ func TestIntakeToContext(t *testing.T) {
 					}
 				}
 			}
+			if product {
+				m6Result, m6Err = report.Result, report.Failure
+				plannerRef, reportRef = report.Result.Outputs["state"], report.Result.Outputs["report"]
+				if report.Snapshot.Input != input {
+					t.Fatal("persisted caller input changed")
+				}
+				for _, session := range report.Snapshot.Sessions {
+					want := runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/glm-5p3", Thinking: "high"}
+					switch session.Role.Name {
+					case "triage-intake", "triage-intake-revision", "triage-intake-update":
+						want.ID, want.Thinking = "accounts/fireworks/models/deepseek-v4p1-flash", "off"
+					case "triage-wiki", "triage-context", "triage-worker":
+						want.ID = "accounts/fireworks/models/glm-5p3-flash"
+					}
+					if strings.HasPrefix(session.Role.Name, "triage-wiki-") || strings.HasPrefix(session.Role.Name, "triage-context-") {
+						want.ID = "accounts/fireworks/models/glm-5p3-flash"
+					}
+					if strings.HasPrefix(session.Role.Name, "triage-worker-") {
+						want.ID = "accounts/fireworks/models/glm-5p3-flash"
+						if strings.HasSuffix(session.Role.Name, "-evidence-only") {
+							want.ID, want.Thinking = "accounts/fireworks/models/deepseek-v4p1-flash", "off"
+						}
+					}
+					if session.Role.Model != want {
+						t.Fatalf("product role %s has model %+v, want %+v", session.Role.Name, session.Role.Model, want)
+					}
+				}
+				if report.Final != nil {
+					var accepted publication[InvestigationReport]
+					if err := protocol.ReadJSON(report.Result.Outputs["report"].Path, &accepted); err != nil {
+						t.Fatal(err)
+					}
+					if accepted.Data.Request != originalRequest {
+						t.Fatal("committed report lost request")
+					}
+					body, err := os.ReadFile(filepath.Join(filepath.Dir(report.Result.Outputs["report"].Path), accepted.Files[0].Path))
+					if err != nil || !strings.Contains(string(body), originalRequest) {
+						t.Fatalf("report projection lost request: %v", err)
+					}
+				}
+			}
 			if lateAbort {
 				if abortEvent.Message.Type != "abort" {
 					t.Fatal("journal fault did not reach the original abort barrier")
@@ -7881,6 +8132,42 @@ func TestIntakeToContext(t *testing.T) {
 				}
 			}
 			if m6 {
+				if m6Name == "m6-ordinary-cleanup-priority" {
+					if barrier.settledAbort == nil || !barrier.abortReleased {
+						t.Fatal("cleanup priority did not traverse the real abort gate")
+					}
+					success := report.Snapshot.Attempts[barrier.attempts["w3"]]
+					primary := report.Snapshot.Attempts[barrier.attempts["w2"]]
+					if !barrier.proved || success.State != engine.Succeeded || success.Output == nil || success.Failure != nil || primary.Failure == nil || primary.Failure.Code != engine.CompactionFailed || len(m6Tasks) != 0 {
+						t.Fatal("cleanup priority lost committed sibling, recoverable primary or forced a report")
+					}
+					var persisted engine.Snapshot
+					if err := protocol.ReadJSON(filepath.Join(r.Dir(), "run.json"), &persisted); err != nil {
+						t.Fatal(err)
+					}
+					producer := persisted.Attempts[barrier.attempts["w3"]]
+					if producer.Output == nil || *producer.Output != *success.Output || producer.Execution == nil || producer.Execution.SessionID != report.Snapshot.Sessions[success.HandleID].Identity.SessionID {
+						t.Fatal("cleanup lost persisted committed output or true producer")
+					}
+					if len(report.Cleanup) != len(report.Snapshot.Sessions) {
+						t.Fatal("cleanup priority lost owned session accounting")
+					}
+					for _, cleanup := range report.Cleanup {
+						owner := report.Snapshot.Sessions[cleanup.Identity.HandleID]
+						hello := hellos[owner.Identity.SessionID]
+						if owner.State != "Closed" || !sameIdentity(cleanup.Identity, owner.Identity) || hello.PID != owner.Identity.PID || hello.History != owner.Identity.SessionFile || !cleanup.WaitCompleted || !cleanup.ProcessExited || cleanup.WaitError != "" || cleanup.KillError != "" || len(cleanup.Unconfirmed) != 0 {
+							t.Fatalf("cleanup priority lost independently observed owner/Wait: %+v", cleanup)
+						}
+						if owner.Identity.HandleID == success.HandleID {
+							if cleanup.DiscoveryError != "owned discovery has a recovery claim" || cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
+								t.Fatalf("w3 cleanup fault was not retained: %+v", cleanup)
+							}
+							t.Logf("w3 closed after real Wait with cleanup fault: %+v", cleanup)
+						} else if !cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
+							t.Fatalf("unrelated cleanup failed: %+v", cleanup)
+						}
+					}
+				}
 				if count != m6Spec.stages || (report.Failure != nil) != m6Spec.failure || (report.Final != nil) != m6Spec.final {
 					t.Fatalf("%s stages=%d want=%d failure=%v final=%v, want failure=%v final=%v", m6Name, count, m6Spec.stages, report.Failure, report.Final, m6Spec.failure, m6Spec.final)
 				}
@@ -8034,7 +8321,11 @@ func TestIntakeToContext(t *testing.T) {
 							t.Fatal("supplement report owner lacks confirmed process Wait/cleanup")
 						}
 					}
-					if owner.Role.Name != "triage-planner" || owner.Role.Model != (runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}) || owner.State != "Closed" && m6Spec.fault != "journal" && m6Spec.fault != "journal-decision" && m6Spec.fault != "seam-retry-finished" {
+					wantPlanner := runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}
+					if product {
+						wantPlanner = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/glm-5p3", Thinking: "high"}
+					}
+					if owner.Role.Name != "triage-planner" || owner.Role.Model != wantPlanner || owner.State != "Closed" && m6Spec.fault != "journal" && m6Spec.fault != "journal-decision" && m6Spec.fault != "seam-retry-finished" {
 						t.Fatalf("report producer/close: %+v", owner)
 					}
 					if !slices.Contains(req.Inputs, task.State) || !slices.Contains(req.Inputs, task.Context) || len(req.Inputs) != len(task.Owners) {

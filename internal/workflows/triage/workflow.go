@@ -13,15 +13,13 @@ import (
 	"pi-workflow-controller/internal/runtime"
 )
 
-// No Definition/CLI registration until model bindings and the per-launch shared
-// discovery preflight are verified. Tests supply explicit RPC-boundary models;
-// this private slice has no production launcher or fallback model selection.
 type sliceModels struct {
 	FetchThinking string
 	Analysis      runtime.ModelSpec
 }
 
 type stageTask struct {
+	Request                  string        `json:"request,omitempty"`
 	Stage                    string        `json:"stage"`
 	Scope                    Scope         `json:"scope"`
 	Requirements             string        `json:"requirements"`
@@ -48,6 +46,14 @@ func sliceStep(ctx context.Context, r *engine.Run, models sliceModels, key strin
 }
 
 func sliceStepRecovery(ctx context.Context, r *engine.Run, models sliceModels, key string, task stageTask, schema string, inputs []contract.Ref, recovery bool) (contract.Ref, error) {
+	request, err := callerRequest(r)
+	if err != nil {
+		return contract.Ref{}, err
+	}
+	task.Request = request
+	if request != "" {
+		task.Requirements += "\nThe request is the original caller instruction. Address it within the supplied scope; it does not add target authorization or constitute evidence."
+	}
 	model := models.Analysis
 	if task.Stage == "intake" || task.Stage == "intake-revision" || task.Stage == "intake-update" {
 		model = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: models.FetchThinking}

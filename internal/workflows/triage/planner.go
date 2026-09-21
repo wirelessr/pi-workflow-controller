@@ -59,6 +59,7 @@ const plannerRequirements = `Read the exact committed supporting context and all
 // Supporting work and worker results retain their own accepted provenance;
 // failure recovery remains a separate unit.
 type plannerCaller struct {
+	request         string
 	r               *engine.Run
 	scope           Scope
 	model           runtime.ModelSpec
@@ -94,6 +95,10 @@ func openPlannerWithResults(ctx context.Context, r *engine.Run, scope Scope, mod
 }
 
 func openPlannerWithEvidence(ctx context.Context, r *engine.Run, scope Scope, model runtime.ModelSpec, contextRef contract.Ref, previous *contract.Ref, accepted, wikiResults []contract.Ref) (*plannerCaller, error) {
+	request, err := callerRequest(r)
+	if err != nil {
+		return nil, err
+	}
 	a := newAcceptance(ctx, r)
 	records, err := a.loadWorkerResults(scope, accepted)
 	if err != nil {
@@ -164,7 +169,7 @@ func openPlannerWithEvidence(ctx context.Context, r *engine.Run, scope Scope, mo
 			return nil, err
 		}
 	}
-	p := &plannerCaller{r: r, scope: scope, model: model, history: h, handle: handle, last: prior, workerResults: slices.Clone(accepted), wikiResults: slices.Clone(wikiResults), adaptive: adaptive, identity: identity, recovery: recovery, verification: verification}
+	p := &plannerCaller{request: request, r: r, scope: scope, model: model, history: h, handle: handle, last: prior, workerResults: slices.Clone(accepted), wikiResults: slices.Clone(wikiResults), adaptive: adaptive, identity: identity, recovery: recovery, verification: verification}
 	if checkpoint != nil {
 		policy := checkpoint.Policy
 		p.capacity, p.adaptiveNote = &policy, checkpoint.AdaptiveNote
@@ -337,6 +342,9 @@ func (p *plannerCaller) stepInScope(ctx context.Context, executionScope *engine.
 	if p.verification != nil {
 		requirements += "\n\n" + verificationPlannerRequirements
 	}
+	if p.request != "" {
+		requirements += "\nAddress the original caller request supplied separately in this task. It is immutable caller instruction, not evidence or additional scope authorization."
+	}
 	task := struct {
 		stageTask
 		WorkerResults []contract.Ref       `json:"worker_results"`
@@ -345,7 +353,7 @@ func (p *plannerCaller) stepInScope(ctx context.Context, executionScope *engine.
 		Checkpoint    *PlannerCheckpoint   `json:"checkpoint,omitempty"`
 		Recovery      *PlannerRecovery     `json:"recovery,omitempty"`
 		Verification  *PlannerVerification `json:"verification,omitempty"`
-	}{stageTask{Stage: "planner", Scope: p.scope, Previous: p.last, Gaps: p.history.value.Gaps, Requirements: requirements}, slices.Clone(p.workerResults), nil, p.adaptiveNote, checkpoint, p.recoveryTask(), p.verificationTask()}
+	}{stageTask{Request: p.request, Stage: "planner", Scope: p.scope, Previous: p.last, Gaps: p.history.value.Gaps, Requirements: requirements}, slices.Clone(p.workerResults), nil, p.adaptiveNote, checkpoint, p.recoveryTask(), p.verificationTask()}
 	if p.adaptive {
 		wikiResults := append([]contract.Ref{}, p.wikiResults...)
 		task.WikiResults = &wikiResults

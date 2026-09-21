@@ -187,7 +187,12 @@ func Serve() error {
 			}
 			ack := <-acks
 			switch ack.Type {
-			case "settle", "provider-error", "compaction-error":
+			case "settle", "settle-abortgate", "provider-error", "compaction-error":
+				// Let the host order another session's failure before this settled
+				// session finishes its first real cleanup, without faking a Step.
+				if ack.Type == "settle-abortgate" {
+					holdAbort = true
+				}
 				if ack.Type == "compaction-error" {
 					if err = out.Encode(map[string]any{"type": "compaction_end", "aborted": false, "errorMessage": "fixture compaction failed"}); err != nil {
 						return err

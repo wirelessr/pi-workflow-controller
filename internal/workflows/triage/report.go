@@ -29,6 +29,7 @@ type ReportClaim struct {
 }
 
 type InvestigationReport struct {
+	Request      string          `json:"request,omitempty"`
 	State        contract.Ref    `json:"state"`
 	Context      contract.Ref    `json:"context"`
 	Claims       []ReportClaim   `json:"claims"`
@@ -50,6 +51,7 @@ type reportOwner struct {
 }
 
 type reportTask struct {
+	Request      string              `json:"request,omitempty"`
 	Stage        string              `json:"stage"`
 	State        contract.Ref        `json:"state"`
 	Context      contract.Ref        `json:"context"`
@@ -62,7 +64,7 @@ type reportTask struct {
 
 // reportInputs follows committed lineage, not directory order or session memory.
 func (p *plannerCaller) reportInputs(a *acceptance) (reportTask, []contract.Ref, error) {
-	task := reportTask{Stage: "planner-report", State: *p.last, Context: p.history.ref, Assessments: []ReportClaim{}, Owners: []reportOwner{}}
+	task := reportTask{Request: p.request, Stage: "planner-report", State: *p.last, Context: p.history.ref, Assessments: []ReportClaim{}, Owners: []reportOwner{}}
 	inputs := []contract.Ref{*p.last, p.history.ref}
 	seen := map[contract.Ref]bool{}
 	for ref := p.last; ref != nil; {
@@ -164,6 +166,9 @@ func (p *plannerCaller) reportInScope(ctx context.Context, executionScope *engin
 	}
 	task.Renderer = renderer
 	task.Requirements = "You are the existing investigation Planner, producing a report, not a new claim. Read the supplied exact accepted state/context, historical assessment owners, claims, deliveries, allowed evidence and original producers. Select claims only by exact entries in assessments. Do not rewrite statement, premises, support, disputes or measurement conditions; a new or changed claim must return to independent verification. Declare completeness (complete/incomplete), closure reason, retained gaps and concrete next_steps. No claim is legitimate only as incomplete. Missing evidence is not disproof; preserve execution failures and unavailable roles. Write triage.report.v1 candidate with state/context exactly supplied and report_file triage-report, then run python3 -B with renderer and the absolute request.json and candidate.json paths. The fixed renderer appends the artifact entry; do not create that entry beforehand. No acquisition, external publication, wiki write-back or final selection."
+	if task.Request != "" {
+		task.Requirements += "\nThe request is the immutable original caller instruction, not additional scope or evidence. Copy it exactly into data.request, preserving all whitespace and Unicode. Address that request without rewriting it."
+	}
 	if task.M6 != nil {
 		task.Requirements += "\nM6 finalization: reconstruct every supplied historical owner and pending recovery/verification/controller feedback, including failures for claims you do not select. Supply m6.dispositions for every exact item in m6.failures once, without changing owner, delivery, claim, role, index or failure. Declare action unresolved (retain incomplete and no results), handled (cite subsequent supplied results of the same failed work: the actual Planner/claim retry key and claim parent; the original worker task or wiki task through an explicit resume proposal; or the successful support delivery retaining original proposal/context/work, accepted phases and resume authorization; verification retains the exact claim version and role. A receiving Planner snapshot or an unrelated result is not a worker/wiki/support completion. If this continuation cannot be shown, use unresolved or evidence-backed redirect), or redirect (explain why no longer needed using nonempty supplied evidence basis, without claiming success). Include reason, results and basis arrays for each. Necessity and applicability are your judgments; do not infer confirmation from support text, source schemas or votes. Echo m6.report_failures and m6.budget exactly. These report retry failures remain history even when this report succeeds. A nonnull budget requires resource-limited incomplete closure using the last accepted state, not a new ledger yield or a new claim. A handled disposition does not alter any historical diagnostic or assessment. No extra planning, acquisition or verification is authorized by this report task."
 		p.reporting.pending.Inputs = slices.Clone(inputs)
@@ -227,6 +232,9 @@ func (p *plannerCaller) checkReport(ctx context.Context, ref contract.Ref, task 
 		return fmt.Errorf("report must retain its exact Planner producer")
 	}
 	v := accepted.Data
+	if v.Request != p.request || task.Request != p.request {
+		return fmt.Errorf("report request differs from immutable caller instruction")
+	}
 	if v.State != task.State || v.Context != task.Context || v.ReportFile != ReportFileID {
 		return fmt.Errorf("report state/context/file binding mismatch")
 	}

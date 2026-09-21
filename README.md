@@ -10,8 +10,11 @@
 |---|---|
 | `smoke-echo` | 將單行 Prompt 當資料，經 Pi 產出 JSON contract；committed Decode 必須精確符合輸入。只有 contract，沒有 Markdown artifact |
 | `code-review` | 固定 deep 靜態 PR review：Prepare、Code／Scale-Failure／Simplicity 平行審閱、獨立 Validation，交付結構化 contract 與繁中 Markdown report |
+| `jira-triage` | 以明列 Scope/request JSON 進行 intake/wiki/context、adaptive 調查、獨立三方驗證及固定報告收尾；交付繁中調查報告，不發布或生成 Jira/Slack drafts |
 
 `code-review` 只讀 pinned code／來源，不執行被審 repository 的 tests/build/scripts，不發 comments 或其他外部寫入。合法 `limited` report 可以是執行成功，但不代表 PR 全面通過；必要 reviewer 失敗不能 exit 0。模型、來源及失敗語義見 [CODE-REVIEW](docs/CODE-REVIEW.md)。
+
+`jira-triage` 的模型與初版數字集中在 `internal/workflows/triage/definition.go`，沒有外部 workflow config 或隱含模型 fallback。合法 incomplete report 可以 execution 成功，但不是 root cause confirmed；未恢復的必要 execution error 或提早 resource-limited 收尾仍非零。產品接線及匿名測試不代表真 Pi/provider、圖片理解、skills 或 live 容量已驗，詳 [JIRA-TRIAGE](docs/JIRA-TRIAGE.md)。
 
 ## CI 與 coverage
 
@@ -48,7 +51,10 @@ pi-workflow-controller list
 pi-workflow-controller run <workflow> "一行 Prompt"
 pi-workflow-controller run smoke-echo "範例文字"
 pi-workflow-controller run code-review "https://github.com/owner/repo/pull/123"
+pi-workflow-controller run jira-triage '{"scope":{"ticket":"CASE-1","stack":"example","pop":"example","binding":"example-target","tenant_ids":["100"]},"request":"Investigate the anomaly and preserve uncertainty"}'
 ```
+
+Jira triage 的範例 Scope 值都是占位，執行前須替換為實際已授權範圍；`binding` 不是 credential。Scope 是 caller 授權邊界，不是已證實身份，`request` 原樣交給 intake、正常／fresh Planner 與報告。也可只給 ticket 做合法前置，但省略 target 不授權 runtime 查詢，缺項依原 prerequisites 保留；ticket/linked issue 不能擴權。JSON 必須是單一 shell argument；request 內換行以 JSON `\n` escape 表示。未知／重複／錯大小寫欄位、null／錯型及空白 request 拒絕，不猜輸入。
 
 不從 stdin 讀 Prompt，不接受 task naming、input-file 或 config flags。未知 workflow、空／多行／非法 UTF-8／超限 Prompt 在建立 task 或啟動 Pi 前拒絕。每個 Controller 執行一個 run，資料路徑由 Controller 自動產生並顯示：`~/WIP/<task-id>/runs/<run-id>/`。
 
@@ -111,7 +117,7 @@ NODE_TLS_REJECT_UNAUTHORIZED=1 pi --session "$SESSION"
 | [IMPLEMENTATION](IMPLEMENTATION.md) | 開發維護路線、責任分工與 source/tests 入口 |
 | [ADDING-A-WORKFLOW](docs/ADDING-A-WORKFLOW.md) | Workflow authoring、registry／skills／交付與清理 |
 | [CODE-REVIEW](docs/CODE-REVIEW.md) | 固定靜態 review 的業務設計 |
-| [JIRA-TRIAGE](docs/JIRA-TRIAGE.md) | 移植中的 workflow／runtime 適配，沿用既有 AGENTS.md／hooks，尚未註冊 CLI workflow |
+| [JIRA-TRIAGE](docs/JIRA-TRIAGE.md) | 已註冊的調查 workflow／runtime 適配，沿用既有 AGENTS.md／hooks；匿名產品接線與未驗 live 邊界 |
 | [FINAL-DELIVERY](docs/FINAL-DELIVERY.md) | FinalSelection／FinalDelivery／result.json.final |
 | [VERIFICATION](docs/VERIFICATION.md) | 分組測試 gates、共享環境安全與發布 scan 方法 |
 
