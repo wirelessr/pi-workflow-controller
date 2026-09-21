@@ -142,7 +142,7 @@ func runReport(t *testing.T, script, request, candidate string) ([]byte, error) 
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
-	cmd := exec.CommandContext(ctx, "python3", script, request, candidate)
+	cmd := exec.CommandContext(ctx, "python3", "-B", script, request, candidate)
 	cmd.Dir = t.TempDir()
 	cmd.WaitDelay = time.Second
 	output, err := cmd.CombinedOutput()

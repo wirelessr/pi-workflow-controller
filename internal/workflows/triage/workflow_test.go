@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -1471,6 +1472,25 @@ func corruptInputEvidence(ref contract.Ref) error {
 
 func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stageTask, step int) PlannerState {
 	t.Helper()
+	if strings.HasPrefix(name, "r5-") {
+		if name == "r5-incomplete" {
+			return plannerFixture(t, "complete", req, task, step, contract.Ref{})
+		}
+		if strings.HasPrefix(name, "r5-version") && step <= 3 {
+			return m2PlannerFixture(t, "m5-new-claim-all-fresh", req, task, step)
+		}
+		if step <= 2 {
+			return m2PlannerFixture(t, "m5-three-fresh-yield", req, task, step)
+		}
+		var prior publication[PlannerState]
+		if err := protocol.ReadJSON(task.Previous.Path, &prior); err != nil {
+			t.Fatal(err)
+		}
+		v := prior.Data
+		v.Previous, v.VerificationReview = task.Previous, nil
+		v.Ledger.ConsumedBatch, v.Ledger.Changes = []contract.Ref{}, []HypothesisChange{}
+		return v
+	}
 	if strings.HasPrefix(name, "m5-supplement-reframe-") {
 		var v PlannerState
 		if step <= 3 {
@@ -2516,6 +2536,235 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 	b.waiting = id
 	if name == "m2-branch-cancel" && id == "w2" {
 		r.Cancel(engine.OriginControllerUser)
+	}
+}
+
+func r5Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, input contract.Ref, name string) (contract.Ref, contract.Ref, error) {
+	t.Helper()
+	renderer, err := ExtractReport(r.Dir())
+	if err != nil {
+		return contract.Ref{}, contract.Ref{}, err
+	}
+	p, err := startPlanner(ctx, r, scope, runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}, input)
+	if err != nil {
+		return contract.Ref{}, contract.Ref{}, err
+	}
+	if name != "r5-incomplete" {
+		p.adaptive = true
+		p.recovery = &PlannerRecovery{Policy: RecoveryPolicy{PlannerRetries: 0}, Deliveries: []RecoveryDelivery{}, PlannerFailures: []RecoveryFailure{}}
+		p.verification = &PlannerVerification{Policy: VerificationPolicy{
+			Pro:   VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "pro", Thinking: "high"}},
+			Con:   VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "con", Thinking: "medium"}},
+			Cross: VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "cross", Thinking: "low"}},
+		}, Claims: []contract.Ref{}, Deliveries: []VerificationDelivery{}}
+		p.identity, err = r.SessionIdentity(ctx, p.handle)
+		if err != nil {
+			return contract.Ref{}, contract.Ref{}, err
+		}
+	}
+	if _, err = p.planningStep(ctx); err != nil {
+		return contract.Ref{}, contract.Ref{}, err
+	}
+	if name != "r5-incomplete" {
+		if err = p.verify(ctx); err != nil {
+			return *p.last, contract.Ref{}, err
+		}
+		if _, err = p.planningStep(ctx); err != nil {
+			return *p.last, contract.Ref{}, err
+		}
+		if strings.HasPrefix(name, "r5-version") {
+			if err = p.verify(ctx); err != nil {
+				return *p.last, contract.Ref{}, err
+			}
+			if _, err = p.planningStep(ctx); err != nil {
+				return *p.last, contract.Ref{}, err
+			}
+		}
+		if _, err = p.planningStep(ctx); err != nil {
+			return *p.last, contract.Ref{}, err
+		}
+	}
+	state := *p.last
+	if name == "r5-producer-forgery" {
+		task, inputs, inputErr := p.reportInputs(newAcceptance(ctx, r))
+		if inputErr != nil {
+			return state, contract.Ref{}, inputErr
+		}
+		if err := p.close(ctx); err != nil {
+			return state, contract.Ref{}, err
+		}
+		foreign, openErr := startPlanner(ctx, r, scope, p.model, input)
+		if openErr != nil {
+			return state, contract.Ref{}, openErr
+		}
+		task.Renderer = renderer
+		out, stepErr := r.Root().Step(ctx, engine.StepSpec{Key: "report-" + state.AttemptID, Session: foreign.handle, Prompt: string(testJSON(task)), Inputs: inputs, Output: contract.Spec{SchemaID: ReportSchema}, Timeout: time.Minute})
+		if stepErr != nil {
+			return state, contract.Ref{}, stepErr
+		}
+		return state, contract.Ref{}, p.checkReport(ctx, out.Output, task, inputs)
+	}
+	report, err := p.report(ctx, renderer)
+	if *p.last != state {
+		t.Error("report replaced the accepted investigation state")
+	}
+	if err != nil {
+		return state, contract.Ref{}, err
+	}
+	if name == "r5-uncommitted" {
+		task, inputs, inputErr := p.reportInputs(newAcceptance(ctx, r))
+		if inputErr != nil {
+			return state, contract.Ref{}, inputErr
+		}
+		report.Path = filepath.Join(filepath.Dir(report.Path), "candidate.json")
+		return state, contract.Ref{}, p.checkReport(ctx, report, task, inputs)
+	}
+	if name == "r5-historical" {
+		later, handoffErr := p.handoff(ctx)
+		if handoffErr != nil {
+			return state, contract.Ref{}, handoffErr
+		}
+		if _, err = later.planningStep(ctx); err != nil {
+			return state, contract.Ref{}, err
+		}
+		if err = later.close(ctx); err != nil {
+			return state, contract.Ref{}, err
+		}
+	} else if err = p.close(ctx); err != nil {
+		return state, contract.Ref{}, err
+	}
+	return state, report, nil
+}
+
+func r5RenderCandidate(t *testing.T, ctx context.Context, r *engine.Run, name string, m protocol.Control, req contract.Request) bool {
+	t.Helper()
+	var task reportTask
+	if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(filepath.Dir(m.CandidatePath), "artifacts", "triage-report.md")
+	if name == "r5-renderer-collision" {
+		if err := os.WriteFile(reportPath, []byte("keep"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.CommandContext(ctx, "python3", "-B", task.Renderer, filepath.Join(filepath.Dir(m.CandidatePath), "request.json"), m.CandidatePath)
+	cmd.WaitDelay = time.Second
+	output, err := cmd.CombinedOutput()
+	if name == "r5-renderer-collision" {
+		if err == nil {
+			t.Fatal("renderer overwrote an existing report")
+		}
+		got, readErr := os.ReadFile(reportPath)
+		if readErr != nil || string(got) != "keep" {
+			t.Fatalf("collision changed prior content: %v", readErr)
+		}
+		return false
+	}
+	if err != nil {
+		t.Fatalf("renderer: %v: %s", err, output)
+	}
+	var envelope struct {
+		Data  InvestigationReport `json:"data"`
+		Files []file              `json:"files"`
+	}
+	if err := protocol.ReadJSON(m.CandidatePath, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	switch name {
+	case "r5-assessment-owner":
+		envelope.Data.Claims[0].AssessmentOwner = task.State
+	case "r5-claim-version":
+		envelope.Data.Claims[0].Claim = task.Context
+	case "r5-state-binding":
+		envelope.Data.State = task.Context
+	case "r5-context-binding":
+		envelope.Data.Context = task.State
+	case "r5-artifact-kind":
+		envelope.Files[0].Kind = "evidence"
+	case "r5-file-path":
+		envelope.Files[0].Path = "artifacts/missing.md"
+	case "r5-body-tamper":
+		if err := os.WriteFile(reportPath, []byte("# Forged report\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	case "r5-version-binding":
+		envelope.Data.Claims[0].Claim = envelope.Data.Claims[1].Claim
+	case "r5-evidence-tamper":
+		if err := os.WriteFile(task.Context.Path, []byte("{}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	case "r5-cancel":
+		r.Cancel(engine.OriginControllerUser)
+	}
+	writeEnvelope(t, m, req, envelope.Data, envelope.Files)
+	return true
+}
+
+func r5AssertOutcome(t *testing.T, tc triageCase, report engine.Report, stateRef, reportRef contract.Ref, count int) {
+	t.Helper()
+	if (report.Failure != nil) != tc.failure {
+		t.Fatalf("failure=%v, want %v", report.Failure, tc.failure)
+	}
+	if count != tc.stages {
+		t.Fatalf("report stages=%d, want %d", count, tc.stages)
+	}
+	if tc.failure {
+		want := map[string]string{"r5-assessment-owner": "exact distinct claim/delivery/assessment owner", "r5-claim-version": "exact distinct claim/delivery/assessment owner", "r5-state-binding": "state/context/file binding mismatch", "r5-context-binding": "state/context/file binding mismatch", "r5-body-tamper": "deterministic accepted projection"}[tc.name]
+		if want != "" && !strings.Contains(fmt.Sprint(report.Failure), want) {
+			t.Fatalf("wrong report rejection: %v, want %s", report.Failure, want)
+		}
+		if tc.name == "r5-cleanup-failure" && len(report.CleanupErrors) == 0 {
+			t.Fatal("cleanup failure was not retained")
+		}
+		if tc.name == "r5-producer-forgery" && !strings.Contains(fmt.Sprint(report.Failure), "exact Planner producer") {
+			t.Fatalf("wrong forged producer rejection: %v", report.Failure)
+		}
+		if tc.name == "r5-version-binding" && !strings.Contains(fmt.Sprint(report.Failure), "exact distinct claim/delivery/assessment owner") {
+			t.Fatalf("wrong version rejection: %v", report.Failure)
+		}
+		t.Logf("report rejection: %v", report.Failure)
+		if report.Final != nil || reportRef.AttemptID != "" {
+			t.Fatal("invalid report gained final selection")
+		}
+		return
+	}
+	if report.Final == nil || report.Final.Ref != reportRef || report.Final.Output != "report" || report.Final.Step != "report-"+stateRef.AttemptID {
+		t.Fatalf("wrong report final: %+v", report.Final)
+	}
+	attempt := report.Snapshot.Attempts[reportRef.AttemptID]
+	if attempt.Output == nil || *attempt.Output != reportRef || attempt.State != engine.Succeeded || report.Final.HandleID != attempt.HandleID || report.Final.Scope != attempt.Scope {
+		t.Fatal("final lost exact committed producer")
+	}
+	if tc.name == "r5-historical" {
+		later := false
+		for _, other := range report.Snapshot.Attempts {
+			later = later || other.HandleID != attempt.HandleID && other.LastSeq > attempt.LastSeq
+		}
+		if !later {
+			t.Fatal("fixture did not exercise final selection of an earlier producer")
+		}
+	}
+	if report.Snapshot.Sessions[attempt.HandleID].State != "Closed" {
+		t.Fatal("report Planner was not closed")
+	}
+	var accepted publication[InvestigationReport]
+	if err := protocol.ReadJSON(reportRef.Path, &accepted); err != nil {
+		t.Fatal(err)
+	}
+	if accepted.Data.State != stateRef || len(accepted.Files) != 1 || report.Final.ArtifactPath != filepath.Join(filepath.Dir(reportRef.Path), accepted.Files[0].Path) {
+		t.Fatal("final artifact/state binding changed")
+	}
+	wantClaims := 1
+	if tc.name == "r5-versioned" {
+		wantClaims = 2
+	}
+	if tc.name != "r5-incomplete" && (len(accepted.Data.Claims) != wantClaims || accepted.Data.Claims[0].AssessmentOwner == stateRef) {
+		t.Fatal("historical assessment was rebound to yield state")
+	}
+	body, err := os.ReadFile(report.Final.ArtifactPath)
+	if err != nil || !bytes.Contains(body, []byte("Missing runtime evidence")) || !bytes.Contains(body, []byte(stateRef.SHA256)) || bytes.Contains(body, []byte("\"handle_id\"")) {
+		t.Fatalf("report projection missing: %v", err)
 	}
 }
 
@@ -4668,6 +4917,23 @@ var triageCases = []triageCase{
 	{"wiki-false-empty", 2, true, false}, {"wiki-ref", 2, true, false},
 	{"wrong-scope", 3, true, false}, {"wrong-environment", 3, true, false}, {"wrong-tenant", 3, true, false}, {"no-release", 3, true, false}, {"guessed-zone", 3, true, false}, {"wrong-utc", 3, true, false}, {"wrong-window", 3, true, false}, {"foreign-ref", 3, true, false}, {"uncommitted-ref", 3, true, false}, {"missing-resolution", 3, true, false}, {"no-evidence", 3, true, false}, {"local-no-pair", 3, true, false}, {"wrong-offset", 3, true, false},
 	{"attempt-timeout", 1, true, false}, {"provider-failure", 1, true, false}, {"cancel", 1, true, false}, {"cleanup-failure", 1, true, false}, {"attempt-cap", 1, true, false},
+	{"r5-historical", 12, false, true},
+	{"r5-incomplete", 5, false, true},
+	{"r5-assessment-owner", 11, true, true},
+	{"r5-claim-version", 11, true, true},
+	{"r5-state-binding", 11, true, true},
+	{"r5-context-binding", 11, true, true},
+	{"r5-artifact-kind", 11, true, true},
+	{"r5-file-path", 11, true, true},
+	{"r5-body-tamper", 11, true, true},
+	{"r5-renderer-collision", 11, true, true},
+	{"r5-cancel", 11, true, true},
+	{"r5-versioned", 16, false, true},
+	{"r5-version-binding", 16, true, true},
+	{"r5-producer-forgery", 11, true, true},
+	{"r5-uncommitted", 11, true, true},
+	{"r5-evidence-tamper", 11, true, true},
+	{"r5-cleanup-failure", 11, true, true},
 }
 
 // Data/contract scenarios use the real Store and publication validators below.
@@ -5299,7 +5565,8 @@ func TestIntakeToContext(t *testing.T) {
 			m1 := strings.HasPrefix(tc.name, "m1-")
 			m3 := strings.HasPrefix(tc.name, "m3-")
 			m4 := strings.HasPrefix(tc.name, "m4-")
-			m5 := strings.HasPrefix(tc.name, "m5-")
+			r5 := strings.HasPrefix(tc.name, "r5-")
+			m5 := strings.HasPrefix(tc.name, "m5-") || r5
 			m2 := strings.HasPrefix(tc.name, "m2-") || m3 || m4 || m5
 			working := strings.HasPrefix(tc.name, "work-") || tc.name == "m1-support"
 			transitionProbe := slices.Contains([]string{"work-unproposed-transition", "work-skipped-context", "work-wrong-task", "work-resolve-changed-intake", "work-refresh-work-mismatch"}, tc.name)
@@ -5514,7 +5781,7 @@ func TestIntakeToContext(t *testing.T) {
 			var report engine.Report
 			var result ContextResult
 			var beforeResolution ContextResult
-			var plannerRef, firstPlannerRef contract.Ref
+			var plannerRef, firstPlannerRef, reportRef contract.Ref
 			var plannerSteps int
 			var expectedPlanner PlannerState
 			t.Cleanup(func() {
@@ -5593,7 +5860,10 @@ func TestIntakeToContext(t *testing.T) {
 				var err error
 				models := sliceModels{FetchThinking: "high", Analysis: runtime.ModelSpec{Provider: "fixture", ID: "analysis", Thinking: "high"}}
 				result, err = executeSlice(ctx, run, scope, models)
-				if err == nil && m2 {
+				if err == nil && r5 {
+					plannerRef, reportRef, err = r5Run(t, ctx, run, scope, result.Context, tc.name)
+				}
+				if err == nil && m2 && !r5 {
 					plannerRef, err = m2Run(t, ctx, run, scope, models, result.Context, tc.name)
 				}
 				if err == nil && resolving && !working {
@@ -5923,6 +6193,10 @@ func TestIntakeToContext(t *testing.T) {
 						outputs["planner"] = plannerRef
 					}
 				}
+				if r5 && err == nil {
+					outputs["report"] = reportRef
+					return engine.Result{Outputs: outputs, Final: &engine.FinalSelection{Output: "report", FileID: ReportFileID}}, nil
+				}
 				return engine.Result{Outputs: outputs}, err
 			}}
 			var transport runtime.Runtime = pi
@@ -6238,7 +6512,7 @@ func TestIntakeToContext(t *testing.T) {
 					if m5 {
 						m4Phases[task.Stage]++
 					}
-					pureVerification := m5 && (req.Output.SchemaID == ClaimSchema || req.Output.SchemaID == VerificationSchema || task.Stage == "m5-supplement-publication")
+					pureVerification := m5 && (req.Output.SchemaID == ReportSchema || req.Output.SchemaID == ClaimSchema || req.Output.SchemaID == VerificationSchema || task.Stage == "m5-supplement-publication")
 					if !pureVerification && !reflect.DeepEqual(task.Scope, scope) {
 						t.Fatal("scope not in prompt")
 					}
@@ -6284,6 +6558,17 @@ func TestIntakeToContext(t *testing.T) {
 							data = payload.Data
 						} else {
 							switch req.Output.SchemaID {
+							case ReportSchema:
+								var reportTask reportTask
+								if err := json.Unmarshal([]byte(req.Prompt), &reportTask); err != nil {
+									t.Fatal(err)
+								}
+								var state publication[PlannerState]
+								if err := protocol.ReadJSON(reportTask.State.Path, &state); err != nil {
+									t.Fatal(err)
+								}
+								selected := append([]ReportClaim{}, reportTask.Assessments...)
+								data = InvestigationReport{State: reportTask.State, Context: reportTask.Context, Claims: selected, Completeness: "incomplete", Closure: "Missing runtime evidence, not disproof", Gaps: append([]string{}, state.Data.Gaps...), NextSteps: []string{"Obtain authorized runtime measurements"}, ReportFile: ReportFileID}
 							case ClaimSchema:
 								var claimTask struct {
 									Projection PureClaim `json:"projection"`
@@ -6756,6 +7041,14 @@ func TestIntakeToContext(t *testing.T) {
 					} else {
 						writeCandidate(t, e.Message, req, data, files, tc.name == "file-escape")
 					}
+					if r5 && req.Output.SchemaID == ReportSchema {
+						if !r5RenderCandidate(t, ctx, r, tc.name, e.Message, req) {
+							if err := e.Reply(protocol.Control{Type: "compaction-error"}); err != nil {
+								t.Fatal(err)
+							}
+							continue loop
+						}
+					}
 					if m2 && (req.Output.SchemaID == WorkerSchema || m5 && req.Output.SchemaID == VerificationSchema) {
 						for _, attemptID := range barrier.attempts {
 							if attemptID == req.Identity.AttemptID {
@@ -6931,9 +7224,9 @@ func TestIntakeToContext(t *testing.T) {
 					if tc.name == "work-worker-cleanup-failure" || tc.name == "m1-worker-cleanup-failure" {
 						cleanupAt = 5
 					}
-					if tc.name == "cleanup-failure" || ((resolving || revising || planning) && strings.HasSuffix(tc.name, "-cleanup-failure") && count == cleanupAt) {
+					if tc.name == "cleanup-failure" || r5 && tc.name == "r5-cleanup-failure" && req.Output.SchemaID == ReportSchema || ((resolving || revising || planning) && strings.HasSuffix(tc.name, "-cleanup-failure") && count == cleanupAt) {
 						for sid := range hellos {
-							if m1 && sid != r.Snapshot().Sessions[r.Snapshot().Attempts[req.Identity.AttemptID].HandleID].Identity.SessionID {
+							if (m1 || r5) && sid != r.Snapshot().Sessions[r.Snapshot().Attempts[req.Identity.AttemptID].HandleID].Identity.SessionID {
 								continue
 							}
 							path := filepath.Join(bridge, sid+".json")
@@ -6989,7 +7282,7 @@ func TestIntakeToContext(t *testing.T) {
 			if tc.name == "update-wrong-task" && !strings.Contains(fmt.Sprint(report.Failure), "intake revision changed dispatched task/work/previous") {
 				t.Fatalf("wrong task was not rejected at dispatch binding: %v", report.Failure)
 			}
-			if report.Final != nil {
+			if report.Final != nil && !r5 {
 				t.Fatal("slice invented final report")
 			}
 			if strings.HasPrefix(tc.name, "m4-support-") && !tc.failure {
@@ -7047,6 +7340,10 @@ func TestIntakeToContext(t *testing.T) {
 						t.Fatalf("worker %s was delivered without committed output then acceptance Decision before Planner", ref.AttemptID)
 					}
 				}
+			}
+			if r5 {
+				r5AssertOutcome(t, tc, report, plannerRef, reportRef, count)
+				return
 			}
 			if m2 {
 				m2AssertOutcome(t, tc, report, plannerRef, result, expectedPlanner, barrier, count, len(hellos))

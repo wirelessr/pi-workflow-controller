@@ -131,7 +131,7 @@ Private `startPlanner` 從 exact committed supporting context（ready 或 needs-
 - Fresh session 明列上一份完整 Planner state、supporting context 及所有歷史 evidence owners，不靠舊對話、目錄掃描或複製 raw files。成功驗收及 Decision 持久化後才替換 caller 的 last state。無效 contract 或執行失敗使該 caller 停止，不交出失敗 candidate，也不自動 recovery；原始 fatal／取消／限額／cleanup 錯誤仍返回。
 - 匿名 RPC fixtures 覆蓋同 session 多 Step、fresh handoff、revised intake 歷史 owner、supporting query inputs、ready／incomplete、非法 Ref／schema／scope、失敗與會計。這不是正常 Pi 技能操作或指定 GLM live 驗證。
 
-`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；一般 worker 與自動批次／reframe 接線見下節；容量訊號、週期 checkpoint、明示政策的 recovery 與三方驗證接線見下節；最終報告仍未實作。
+`handoff` 是活動 run 內的顯式操作，不是 crash resume；未註冊產品入口。既有 supporting 任務的 proposal／context 改版接線見下節；一般 worker 與自動批次／reframe 接線見下節；容量訊號、週期 checkpoint、明示政策的 recovery 與三方驗證接線見下節；自動報告收尾仍未接，R5 獨立報告操作亦見下節。
 
 ### Planner proposal → 既有 supporting 任務 → 新 Planner state
 
@@ -224,6 +224,20 @@ Claim Ref 與 evidence 集合固定版本；改 candidate 或 allowed evidence �
 既有 Planner 必須提交綁定 delivery/claim 的 `verification_review`：支持程度、runtime/量測限制、可檢驗分歧、反例處置/gaps與等於 ledger.action 的下一步。Agent 決定補證、換版再驗或 yield 調查 state；Go 不投票、不加 hypothesis taxonomy、不因三角完成自動升 confirmed。歷史版本與處置保留，後續新 verifier 不接前輪 verdict。`PendingVerificationError` 明交已 committed state/claim、已驗 partial roles、history/recovery並 Unwrap 原錯誤，不偽造成功 output。
 
 匿名 fixtures 沿原 Store 與真 engine/Store/RPC，驗 pure claim/producer/版本隔離、三角逆序完成、同版補角/換版全驗、callback failure/未完成交付、Agent feedback→蒐證→新 claim 與 reframe。精確 claim acceptance→RetryFinished 的 filesystem 故障時點未動態注入，只有相鄰邊界與 source 證據；不宣稱所有 fault 排列、live 技能/模型或 runtime 因果判讀已驗。
+
+### 獨立報告操作與共用 renderer 機械
+
+R5 已提供 `ExtractReport`、`triage.report.v1`／`ReportFileID`、`InvestigationReport`／`ReportClaim` 與可呼叫的 `plannerCaller.report(ctx, renderer)`。它使用現有 Planner handle 的正常 Step，不新增 writer，不更新原 Planner state-only `last`，也不自行 yield、reserve、retry 或 close。M6 的 adaptive 收尾／歷史 failure 處置／報告額度與產品入口仍未接，不能將此操作當作完整調查已能自動交付報告。
+
+Report 明列 accepted state/context、選中的 exact claim/delivery/assessment owner、Planner 宣告的 completeness/closure/gaps/next_steps。沿 previous lineage 重驗真歷史，assessment 不是任取最後一個 state；新版 claim 不重用舊驗證，也不在 report 重寫 statement/premises/支持判讀。沒有 claim 只能宣告 incomplete；Go 驗來源、版本、producer、必填與既有 gaps，不按 support 字串、schema 或模型共識推定因果。
+
+Agent 在該 attempt 執行固定 renderer，exclusive 寫 artifact 及 candidate.files，然後由真 engine Stage/Confirm/Publish/commit。Go 再經 committed resolver／原 reader 驗收，固定 host Python 用同一 embedded 模板重算完整 bytes 並比較；不相信自報 digest，也不執行 Agent 可修改的 script。成功 Decision 後回 report Ref，caller 沿既有 Result／FinalSelection 選 `triage-report` artifact，producer 由 engine 解析，沒有另一份 registry。
+
+正文投影問題、身份環境與已解析時間線、原假說/claim、支持理由、runtime/量測條件、同版三方結果、反例/分歧、缺口/下一步，以及必要 exact Ref/file 追溯。文字使用安全 fences，Ref ordering 固定；完整 Context/PlannerState、ledger/checkpoint 與 owners registry 留工作資料，不整份塞進報告。不生成 Jira/Slack drafts 或新因果。
+
+Extraction 與 Python file/JSON/candidate 機械使用 `contract/reportresource`，review 原 consumer 同步遷移；review 的 Pin/roster/template/appendix 驗收保持原義。Triage producer 各 Ref 讀完關閉局部 descriptors，避免整段歷史累積 FD；request/candidate 仍保持原 stack。Host 用 CommandContext、Run/WaitDelay 及非嵌入式 bounded writer，stdout 64 MiB、stderr 64 KiB；保留 cancellation 與 process errors，不變成普通缺資料。這些限額不代表 Python RSS 或 live 容量已驗。
+
+匿名測試沿原 Store 與真 engine/Store/RPC，包含 historical assessment、兩版 claim、偽 producer/uncommitted/tamper、artifact/renderer/cleanup/cancel 與原 review consumer；另有真 producer 的局部低 FD 上限、多輸入 Ref，以及 io.Copy/host output-limit 回歸。沒有全 EIO/替換競態/live/模型技能或產品驗收證明。
 
 ### 同一次驗收內的讀取重用
 

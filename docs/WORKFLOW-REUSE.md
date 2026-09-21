@@ -29,7 +29,7 @@
 | Envelope／file consumer | `contract.FileEntry`／`Publication[T]`／`DecodePublication[T]`；review `readReviewContract`、triage `readAccepted` 經 `engine.ReadContract` 後消費 | R3 已接線：只共用投影與 fresh decode，不新增授權；review ID 索引、triage lineage/cache 留 caller |
 | Published／checkout 二次讀檔 | `contract.ReadBounded`；review `readCheckFile`／`readPublishedFile`、triage `rawFile` | R3 已接線：共用 bounded loop，root/open/identity 與錯誤政策留 adapter；Store `copyStable` 的雙 digest 不合併 |
 | RPC 測試 transport | `testutil/protocol.NewHost`／`Host.Events`／`Event.Reply`／`Host.Close` 及 `WriteEnvelope` | R4 已接線：review workflow/check integration、triage RPC driver 共用 host；原 domain scenarios 與 Store-only 分層不變 |
-| Skill extraction／report renderer | 目前只有 review 的 `ExtractSkills` 與 `render_report.py` | R5：第二個實際 consumer 出現時才抽機械部分 |
+| Skill extraction／report renderer | `contract/reportresource.ExtractFresh`／embedded `pwc_report_io.py`；review `ExtractSkills`／renderer 與 triage `ExtractReport`／report Step | R5：兩個真 consumer 共用機械，業務模板／report binding 各自保留 |
 
 上述相對路徑均位於 `internal/`。角色模型、PR Pin、code-location Evidence、investigation Ref/file Evidence、Source status 及 verdict 不屬於通用登記項，保留 workflow-specific 語義。
 
@@ -112,9 +112,15 @@ R3 是單一實作／review／commit 單元，以下兩組驗收要求須一起�
 
 **完成出口：** 指定 consumers 不再各保有相同 host pump/lifecycle；逐案 mapping、typed failure、資源 ownership／取消與完整一般/race 回歸一致。效能以整套同類情境比較，不因共用程式就預告加速幅度。
 
-### R5：report／resource 機械部分，延後至第二 consumer
+### R5：report／resource 機械部分
 
-目前只有 review renderer/extractor。到 triage M6 出現實際需求時，先比較 fresh exclusive extraction、安全 JSON/file I/O、candidate identity、artifact 註冊與 cleanup，再抽窄共用部分。
+**已實作接線：** `contract/reportresource.ExtractFresh` 共用既有 OpenRoot、fresh directory reservation、O_EXCL copy、0700/0600 與 partial 留存；review `ExtractSkills` 與 triage `ExtractReport` 實際使用。共用 embedded `pwc_report_io.py` 保留 descriptor/NOFOLLOW/NONBLOCK、bounded JSON、duplicate keys、Ref identity、candidate nlink、exclusive report 及原 fd rewrite；review 私有副本移除，Pin／roster／模板與原 appendix 驗收不變。不提供 plugin、installer 或另一個 final registry。
+
+Triage 已有可呼叫的 `plannerCaller.report`，以既有 Planner 的正常 Step 產獨立 report contract／artifact，前後均驗 committed state、真正歷史 assessment owner、同版 claim／delivery／evidence 與 producer，驗收後 Decision 才回 Ref。Caller 使用原 Result／FinalSelection。固定 host Python 只執行 embedded 模板，重算完整預期 bytes；不執行 Agent 可修改的 extracted 檔案，不另抄 Go 模板或另開 writer Agent。Context/ledger/checkpoint/owner registry 留 committed 工作資料，報告只投影調查內容及必要 Ref/file 追溯。
+
+Triage producer 每個 Ref 用局部 ExitStack，讀完即關閉；candidate/request 保留原生命週期。Host CommandContext／Run／WaitDelay 保有錯誤與 Wait，named buffer 強制 stdout 64 MiB／stderr 64 KiB 限額，不透過 promoted ReaderFrom 繞過。這不是 Python RSS 上限、filesystem sandbox、兩檔 atomic 或 live 容量承諾；write/close 的所有 EIO 與替換競態未窮舉。
+
+R5 提供真 report 操作及 shared consumer；M6 才接 adaptive yield、歷史 failure 處置、預留額度與最終 outcome，舊 M5 state-only 出口未改。以下保留 R5 完成要求：
 
 **完成出口：** 原 review 仍能使用同一機械能力，triage 報告也實際接入；模板、Pin／claim、verdict及追溯資料保持各自 contracts。保留 exclusive output、大小／路徑／identity檢查與已提交 Ref 驗收。沒有第二 consumer 時保持延後，不建立 renderer plugins、installer 或新 final registry。
 
@@ -140,7 +146,7 @@ M3 已在既有 Planner snapshot 增加 exact checkpoint/counter/Controller feed
 
 M4 已以明示 RecoveryPolicy 沿既有 Scope.Retry 接 Planner 有限 fresh 恢復，worker/wiki/support 以 exact typed delivery 回 Planner，由 Agent 提出具 basis 的 inspection/resume/redirect。全敗worker batch亦計一輪，進展仍Agent明報；未完成的當前reframe可先做安全inspection，不重置streak或讓舊reframe繞規則。Support重用原pipeline續接已驗收phase，原intake/wiki/context provenance不重綁，pending中間Refs不升格checkpoint。SessionIdentity提供dispatch前known owner，所有replacement仍strict close/Wait，不改普通Close語義或造重試會計。取消/fatal/cleanup/unknownProviderFailed不吞，M5 verifier恢復待角色出現才接。
 
-M5 已接純claim producing Step與reference-linked state、fresh pro/con/cross、同版安全補角及Planner feedback；每角model/retry由caller明示。Planner/claim/verifier共用由M4抽出的retryPlannerInputs、Scope.Retry與原identity/strict-close，不加driver/engine多output/inputjournal。新verifier只claim/allowed evidence，不注入Planner敘事或舊verdict；同版Refs有序驗收、換版全fresh、pending partial不當checkpoint。完整verification delivery也算一輪，progress與支持程度由既有Planner判讀，Go不投票或按schema認列因果。M6報告/renderer及M7產品/live仍未接。
+M5 已接純claim producing Step與reference-linked state、fresh pro/con/cross、同版安全補角及Planner feedback；每角model/retry由caller明示。Planner/claim/verifier共用由M4抽出的retryPlannerInputs、Scope.Retry與原identity/strict-close，不加driver/engine多output/inputjournal。新verifier只claim/allowed evidence，不注入Planner敘事或舊verdict；同版Refs有序驗收、換版全fresh、pending partial不當checkpoint。完整verification delivery也算一輪，progress與支持程度由既有Planner判讀，Go不投票或按schema認列因果。M6 adaptive報告收尾及M7產品/live仍未接；R5獨立report操作見上節。
 
 M3 保存當時已有的工作結果／feedback；M5 新增 verifier 時，同步擴充可重建 state 與恢復驗收。不得把尚未存在的角色填成占位資料就宣稱完成，也不得要求 M4 先完成 M5 才能提供的 verifier，形成相依循環。
 

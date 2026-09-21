@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/report.v1.json",
+  "description": "Planner report selection over accepted state, claims and historical assessments. No new claim or causal verdict fields.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state", "context", "claims", "completeness", "closure", "gaps", "next_steps", "report_file"],
+  "properties": {
+    "state": {"$ref": "common.v1.json#/$defs/ref"},
+    "context": {"$ref": "common.v1.json#/$defs/ref"},
+    "claims": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "delivery_id", "assessment_owner"],
+        "properties": {
+          "claim": {"$ref": "common.v1.json#/$defs/ref"},
+          "delivery_id": {"type": "string", "minLength": 1},
+          "assessment_owner": {"$ref": "common.v1.json#/$defs/ref"}
+        }
+      }
+    },
+    "completeness": {"enum": ["complete", "incomplete"]},
+    "closure": {"type": "string", "minLength": 1},
+    "gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "next_steps": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "report_file": {"const": "triage-report"}
+  }
+}

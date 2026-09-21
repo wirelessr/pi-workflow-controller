@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"pi-workflow-controller/internal/contract"
+	"pi-workflow-controller/internal/contract/reportresource"
 )
 
 func resourceTestStore(t *testing.T) *contract.Store {
@@ -414,6 +415,20 @@ func resourceTestExtractedTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	shared, err := reportresource.Common.ReadFile("pwc_report_io.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	copiedShared := filepath.Join(root, "pwc_report_io.py")
+	gotShared, err := os.ReadFile(copiedShared)
+	if err != nil || !bytes.Equal(shared, gotShared) {
+		t.Fatalf("shared report I/O bytes: %v", err)
+	}
+	sharedInfo, err := os.Lstat(copiedShared)
+	if err != nil || !sharedInfo.Mode().IsRegular() || sharedInfo.Mode().Perm() != 0600 {
+		t.Fatalf("shared report I/O mode: %v", err)
+	}
+	expectedFiles++
 	actualFiles := 0
 	if err := filepath.WalkDir(root, func(_ string, entry fs.DirEntry, err error) error {
 		if err == nil && !entry.IsDir() {
