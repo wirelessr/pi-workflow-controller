@@ -19,7 +19,7 @@
 
 | 能力 | 現有入口／位置 | 決策 |
 |---|---|---|
-| Run、session、Step 與 limits | `engine/api.go`、`session.go`、`step.go`、`policy.go`；`Run.SessionIdentity` 讀 owned committed identity | 直接重用；M4 dispatch 前身份沿中性入口，不另造 session driver／會計 |
+| Run、session、Step 與 limits | `engine/api.go`、`session.go`、`step.go`、`policy.go`；`Run.SessionIdentity` 讀 owned committed identity；`Run.WorkflowInput` 以值回傳 immutable workflow/input | 直接重用；M4 dispatch 前身份沿中性入口，不另造 session driver／會計；`callerRequest` 使用 input 投影，無需複製歷史 |
 | Child、Parallel、Retry、Decision | `engine/scope.go` | 直接重用；workflow 決定批次、依賴及可重做分支 |
 | Stage／Confirm／Publish、committed resolver | `contract/`、`engine/resolve.go`、`step.go` | 直接重用；禁止第二個 Store／commit／journal |
 | Result／FinalSelection／FinalDelivery | `engine/api.go`、`resolve.go`、`run.go` | 直接重用；禁止另一個 final artifact registry |
@@ -28,7 +28,7 @@
 | 嚴格收尾確認 | `runtime.CleanupReport.ConfirmsLocalClose(expectedSessionID)` | R2 已接線：triage slice／Planner 共用；caller 先處理 CloseSessionReport error，普通 CloseSession 不改義 |
 | Envelope／file consumer | `contract.FileEntry`／`Publication[T]`／`DecodePublication[T]`；review `readReviewContract`、triage `readAccepted` 經 `engine.ReadContract` 後消費 | R3 已接線：只共用投影與 fresh decode，不新增授權；review ID 索引、triage lineage/cache 留 caller |
 | Published／checkout 二次讀檔 | `contract.ReadBounded`；review `readCheckFile`／`readPublishedFile`、triage `rawFile` | R3 已接線：共用 bounded loop，root/open/identity 與錯誤政策留 adapter；Store `copyStable` 的雙 digest 不合併 |
-| RPC 測試 transport | `testutil/protocol.NewHost`／`Host.Events`／`Event.Reply`／`Host.Close` 及 `WriteEnvelope` | R4 已接線：review workflow/check integration、triage RPC driver 共用 host；原 domain scenarios 與 Store-only 分層不變 |
+| RPC 測試 transport | `testutil/protocol.NewHost`／`Host.Events`／`Event.Reply`／`Host.Close`、`RegisterCleanup` 及 `WriteEnvelope` | review workflow/check integration、triage RPC driver 共用 host 與 late-bound cancel/close/join；原 domain scenarios 與 Store-only 分層不變 |
 | Skill extraction／report renderer | `contract/reportresource.ExtractFresh`／embedded `pwc_report_io.py`；review `ExtractSkills`／renderer 與 triage `ExtractReport`／report Step | R5：兩個真 consumer 共用機械，業務模板／report binding 各自保留 |
 
 上述相對路徑均位於 `internal/`。角色模型、PR Pin、code-location Evidence、investigation Ref/file Evidence、Source status 及 verdict 不屬於通用登記項，保留 workflow-specific 語義。
@@ -101,7 +101,7 @@ R3 是單一實作／review／commit 單元，以下兩組驗收要求須一起�
 
 **已實作接線：** Host 擷取原非同步 listener／per-peer decoder／fan-in 機械，保有 fixture deadline、原 peer 的序列化 Reply 與冪等 Close。Close 先解除 queue 發送、停止接受，再關自有 sockets 並 join pumps；不代替 caller Cancel／join 真 engine，也不代表 process Wait。非 EOF／net.ErrClosed 的 decode/accept errors 同時保留給 Events 與 Close，取消或 queue 滿不再靜默遺失。Triage control socket 新增 fixture deadline 是明列的測試邊界改變，不是產品 timeout 政策。
 
-三個指定 consumers 已移除私有 host pumps／connections／join 副本。WriteEnvelope 只寫 caller 明列的 meta/data/files，不猜檔案種類、不驗授權、不更改 nil entries，允許原故障 cases 宣告不合法內容。正常 child WriteCandidate 也使用它。Engine 的同步 handoff／worker-limiter socket tests 保留逐 socket Accept/Decode barriers，runtime fixtures 使用不同 control/HTTP 協定，兩者不強制改成 eager fan-in。
+三個指定 consumers 已移除私有 host pumps／connections／join 副本。`RegisterCleanup` 於 cleanup 當下呼叫 caller 的 stop，再 Close、即時回報 close error，最後才等待非 nil completion channel；保留三處取消次序、parent cleanup LIFO、原診斷及 Close 後的 10/10/8 秒 join 界線。Host 不持有 engine，未啟動 Run 不等待預建 channel。WriteEnvelope 只寫 caller 明列的 meta/data/files，不猜檔案種類、不驗授權、不更改 nil entries，允許原故障 cases 宣告不合法內容。正常 child WriteCandidate 也使用它。Engine 的同步 handoff／worker-limiter socket tests 保留逐 socket Accept/Decode barriers，runtime fixtures 使用不同 control/HTTP 協定，兩者不強制改成 eager fan-in。
 
 **目標與責任層：** 擴充既有 `internal/testutil/protocol`，共用 listener、event pump、connection ownership、deadline、cancel/close/join 及明列 file entries 的 envelope writer。
 
@@ -156,7 +156,7 @@ Admission 由唯一同步 dispatcher 一次計入普通 action 的全分支、�
 
 M7 由 `triage.Definition()` 接入既有 `workflows.Definitions/Resources/Schemas` 與 CLI，沿原 slice → report resources → investigation report pipeline，沒有新 launcher 或 CLI config。已批准初值集中於 Definition：fireworks GLM-5p3/high 供 Planner/三方/report，GLM-5p3-flash/high 供 analysis/vision，DeepSeek-v4p1-flash/off 供 fetch；capacity80、Planner/各 verifier/report retry1、report reserve1session/2attempts。各 Run 仍使用複製的明示政策，不在執行中改會計。
 
-Workflow-local JSON envelope 明列 scope/request，局部 strict decoder 保留 duplicate/case/null/type/extraJSON 檢查，舊 private contract parser 不為此擴成共用 API。`callerRequest` 從 `r.Snapshot().Input.Prompt` 明交本 Run 已持久化的原 request，供初始/修訂、正常/fresh Planner 與 report 使用，report 驗原字串；不是新 evidence 或 instruction Step。Partial Scope 的既定限制保持，省略 tenant_ids 表示空授權 array，不從 ticket 推導 target。模型/image catalog 宣告、CLI 匿名 engine/Store/RPC/renderer 採證與真 Pi/provider/skills/live 仍是不同層級。
+Workflow-local JSON envelope 明列 scope/request，局部 strict decoder 保留 duplicate/case/null/type/extraJSON 檢查，舊 private contract parser 不為此擴成共用 API。`callerRequest` 從 `r.WorkflowInput()` 的 Input.Prompt 明交本 Run 已持久化的原 request，保留 registered workflow gate 與每次 strict decode。此 read-only 投影在 r.mu 下回傳 immutable workflow/input 的值，不複製歷史；目前 Input 只有兩個 string，未來增加可變欄位時必須複製而不得暴露內部引用。供初始/修訂、正常/fresh Planner 與 report 使用，report 驗原字串；不是新 evidence 或 instruction Step。Partial Scope 的既定限制保持，省略 tenant_ids 表示空授權 array，不從 ticket 推導 target。模型/image catalog 宣告、CLI 匿名 engine/Store/RPC/renderer 採證與真 Pi/provider/skills/live 仍是不同層級。
 
 M3 保存當時已有的工作結果／feedback；M5 新增 verifier 時，同步擴充可重建 state 與恢復驗收。不得把尚未存在的角色填成占位資料就宣稱完成，也不得要求 M4 先完成 M5 才能提供的 verifier，形成相依循環。
 

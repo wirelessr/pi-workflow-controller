@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -154,6 +155,136 @@ closed:
 		if err == nil || (errors.As(err, &netErr) && netErr.Timeout()) {
 			t.Errorf("peer not closed by Host.Close: %v", err)
 		}
+	}
+}
+
+func TestHostRegisterCleanup(t *testing.T) {
+	for _, name := range []string{"unstarted", "late-bound", "parent-first"} {
+		t.Run(name, func(t *testing.T) {
+			var stopped bool
+			done := make(chan struct{})
+			t.Run("lifetime", func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				t.Cleanup(cancel)
+				f := newHostFixture(t, ctx, 1)
+				var started bool
+				stopping := make(chan struct{})
+				t.Cleanup(func() {
+					if !stopped {
+						t.Error("stop was not called")
+					}
+					if name != "parent-first" && ctx.Err() != nil {
+						t.Error("parent cancelled before registered cleanup")
+					}
+					if started {
+						select {
+						case <-done:
+						default:
+							t.Error("cleanup returned without joining")
+						}
+					}
+					requireHostClosed(t, f)
+				})
+				protocol.RegisterCleanup(t, f.host, func() <-chan struct{} {
+					defer close(stopping)
+					stopped = true
+					peer := f.dial(t)
+					if err := json.NewEncoder(peer).Encode(protocol.Control{Type: "stop-before-close"}); err != nil {
+						t.Fatal(err)
+					}
+					if e := hostEvent(t, f.host); e.Err != nil || e.Message.Type != "stop-before-close" {
+						t.Fatalf("host closed before stop: %v", e.Err)
+					}
+					if name == "parent-first" {
+						cancel()
+					}
+					if started {
+						return done
+					}
+					return nil
+				}, hostTestTimeout, "close: ", "cleanup did not join")
+				if name != "unstarted" {
+					started = true
+					go func() {
+						<-stopping
+						for range f.host.Events() {
+						}
+						close(done)
+					}()
+				}
+			})
+		})
+	}
+}
+
+func TestHostRegisterCleanupFailures(t *testing.T) {
+	if mode := os.Getenv("PWC_HOST_CLEANUP_FAILURE"); mode != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), hostTestTimeout)
+		defer cancel()
+		f := newHostFixture(t, ctx, 1)
+		done := make(chan struct{})
+		t.Cleanup(func() {
+			requireHostClosed(t, f)
+			t.Log("AFTER-CLEANUP")
+		})
+		wait := 20 * time.Millisecond
+		if mode == "close" {
+			wait = hostTestTimeout
+		}
+		protocol.RegisterCleanup(t, f.host, func() <-chan struct{} {
+			t.Log("STOP")
+			if mode == "unstarted" {
+				return nil
+			}
+			return done
+		}, wait, "CLOSE-FAILURE: ", "JOIN-FAILURE")
+		if mode == "unstarted" {
+			t.Fatal("EARLY-ASSERTION")
+		}
+		if mode != "join" {
+			peer := f.dial(t)
+			if _, err := io.WriteString(peer, `{"Type":!}`); err != nil {
+				t.Fatal(err)
+			}
+			var syntax *json.SyntaxError
+			if err := hostEvent(t, f.host).Err; !errors.As(err, &syntax) {
+				t.Fatalf("did not reach decoder syntax failure: %v", err)
+			}
+			t.Log("SYNTAX-REACHED")
+		}
+		if mode == "close" {
+			go func() {
+				for range f.host.Events() {
+				}
+				close(done)
+			}()
+		}
+		return
+	}
+	for _, mode := range []string{"close", "join", "both", "unstarted"} {
+		t.Run(mode, func(t *testing.T) {
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), hostTestTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, executable, "-test.run=^TestHostRegisterCleanupFailures$", "-test.v")
+			cmd.Env = append(os.Environ(), "PWC_HOST_CLEANUP_FAILURE="+mode, "GORACE=atexit_sleep_ms=0")
+			out, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if ctx.Err() != nil || !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				t.Fatalf("expected assertion failure, got %v: %s", err, out)
+			}
+			text := string(out)
+			stop, after := strings.Index(text, "STOP"), strings.Index(text, "AFTER-CLEANUP")
+			closeAt, joinAt := strings.Index(text, "CLOSE-FAILURE: invalid character"), strings.Index(text, "JOIN-FAILURE")
+			wantClose, wantJoin := mode == "close" || mode == "both", mode == "join" || mode == "both"
+			if stop < 0 || after <= stop || wantClose != (closeAt > stop && closeAt < after) || wantJoin != (joinAt > stop && joinAt < after) || mode == "both" && closeAt >= joinAt || wantClose && !strings.Contains(text, "SYNTAX-REACHED") {
+				t.Fatalf("cleanup order/diagnostic mismatch: %s", out)
+			}
+			t.Logf("verified real subprocess diagnostics:\n%s", out)
+		})
 	}
 }
 

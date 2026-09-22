@@ -6375,22 +6375,14 @@ func TestIntakeToContext(t *testing.T) {
 			var plannerRef, firstPlannerRef, reportRef contract.Ref
 			var plannerSteps int
 			var expectedPlanner PlannerState
-			t.Cleanup(func() {
+			protocol.RegisterCleanup(t, host, func() <-chan struct{} {
 				cancel()
 				if r != nil {
 					r.Cancel(engine.OriginControllerUser)
+					return done
 				}
-				if err := host.Close(); err != nil {
-					t.Errorf("fixture host close: %v", err)
-				}
-				if r != nil {
-					select {
-					case <-done:
-					case <-time.After(8 * time.Second):
-						t.Error("fixture run did not join")
-					}
-				}
-			})
+				return nil
+			}, 8*time.Second, "fixture host close: ", "fixture run did not join")
 			policy := slicePolicy()
 			policy.RunTimeout = time.Nanosecond
 			policy.Runtime.StartupTimeout = 5 * time.Second
@@ -6948,6 +6940,13 @@ func TestIntakeToContext(t *testing.T) {
 			r, err = engine.New(runCtx, def, input, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if product {
+				_, detached := r.WorkflowInput()
+				detached.Prompt, detached.LaunchCWD = "not JSON", filepath.Join(dir, "not-created")
+				if _, err := decodeWorkflowInput(detached.Prompt); err == nil {
+					t.Fatal("mutated caller-owned input remained valid")
+				}
 			}
 			go func() { report = r.Execute(); close(done) }()
 			count := 0

@@ -482,21 +482,12 @@ func TestCheckCommittedResolverIntegration(t *testing.T) {
 	}
 	var run *engine.Run
 	var joined chan struct{}
-	t.Cleanup(func() {
+	protocol.RegisterCleanup(t, host, func() <-chan struct{} {
 		if run != nil {
 			run.Cancel(engine.OriginControllerUser)
 		}
-		if err := host.Close(); err != nil {
-			t.Error(err)
-		}
-		if joined != nil {
-			select {
-			case <-joined:
-			case <-time.After(10 * time.Second):
-				t.Error("engine cleanup did not join")
-			}
-		}
-	})
+		return joined
+	}, 10*time.Second, "", "engine cleanup did not join")
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)

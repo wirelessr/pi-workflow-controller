@@ -87,11 +87,7 @@ func startPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime
 }
 
 func openPlanner(ctx context.Context, r *engine.Run, scope Scope, model runtime.ModelSpec, contextRef contract.Ref, previous *contract.Ref) (*plannerCaller, error) {
-	return openPlannerWithResults(ctx, r, scope, model, contextRef, previous, nil)
-}
-
-func openPlannerWithResults(ctx context.Context, r *engine.Run, scope Scope, model runtime.ModelSpec, contextRef contract.Ref, previous *contract.Ref, accepted []contract.Ref) (*plannerCaller, error) {
-	return openPlannerWithEvidence(ctx, r, scope, model, contextRef, previous, accepted, nil)
+	return openPlannerWithEvidence(ctx, r, scope, model, contextRef, previous, nil, nil)
 }
 
 func openPlannerWithEvidence(ctx context.Context, r *engine.Run, scope Scope, model runtime.ModelSpec, contextRef contract.Ref, previous *contract.Ref, accepted, wikiResults []contract.Ref) (*plannerCaller, error) {

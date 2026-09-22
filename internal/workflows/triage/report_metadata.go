@@ -153,8 +153,7 @@ func (a *acceptance) resumesReportDelivery(proposal contract.Ref, original Recov
 	return false, nil
 }
 
-func (p *plannerCaller) handledRecoveryResult(a *acceptance, item ReportFailure, ref contract.Ref) (bool, error) {
-	snapshot := a.run.Snapshot()
+func (p *plannerCaller) handledRecoveryResult(a *acceptance, snapshot engine.Snapshot, item ReportFailure, ref contract.Ref) (bool, error) {
 	failed := snapshot.Attempts[item.Failure.AttemptID]
 	result := snapshot.Attempts[ref.AttemptID]
 	failedOwner := snapshot.Sessions[failed.HandleID]
@@ -373,7 +372,7 @@ func (p *plannerCaller) checkReportMetadata(a *acceptance, v InvestigationReport
 					return fmt.Errorf("handled verification must retain exact claim version and role")
 				}
 			} else {
-				continued, err := p.handledRecoveryResult(a, item, ref)
+				continued, err := p.handledRecoveryResult(a, snapshot, item, ref)
 				if err != nil {
 					return err
 				}

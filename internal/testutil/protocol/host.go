@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"sync"
+	"testing"
+	"time"
 )
 
 // Event retains the connection which supplied a control message.
@@ -58,6 +60,25 @@ func NewHost(ctx context.Context, buffer int) (*Host, error) {
 	h := &Host{listener: listener, ctx: ctx, cancel: cancel, events: make(chan Event, buffer), accepted: make(chan struct{}), peers: map[*peer]struct{}{}}
 	go h.accept()
 	return h, nil
+}
+
+// RegisterCleanup leaves cancellation and the engine's completion channel with
+// the caller. Resolve both at cleanup time, including an unstarted run.
+func RegisterCleanup(t testing.TB, host *Host, stop func() <-chan struct{}, wait time.Duration, closePrefix, joinFailure string) {
+	t.Helper()
+	t.Cleanup(func() {
+		done := stop()
+		if err := host.Close(); err != nil {
+			t.Errorf("%s%v", closePrefix, err)
+		}
+		if done != nil {
+			select {
+			case <-done:
+			case <-time.After(wait):
+				t.Error(joinFailure)
+			}
+		}
+	})
 }
 
 func (h *Host) Addr() net.Addr       { return h.listener.Addr() }

@@ -34,9 +34,9 @@ Agent 先載入既有領域 skill，沿用其中的 scripts、CLI、REST 與其�
 
 Decoder 僅處理兩個固定 JSON objects，拒絕未知／錯大小寫／重複鍵（包括 escaped key）、null、錯型、extra JSON 及非法 ticket/tenant 值。沿用既有 Scope 規則，不解析票內容、不猜身份／時間或把 linked issue 當擴權。可只給 ticket 做合法前置；省略 tenant_ids 代表空授權集合，normalize 為契約所需空 array，不新增 target，explicit null 仍拒絕。Runtime 查詢仍須原完整 Scope、intake/wiki prerequisites。
 
-`callerRequest` 只對已登記產品 workflow 從 `r.Snapshot().Input.Prompt` 讀 engine 已持久化的原輸入；初始 intake、revision/resolution stages、正常／fresh／recovery Planner 及報告明交同一 request。它是 caller 任務指示，不是虛構的 committed evidence。Report optional `request` 必須精確符合原字串並由固定模板呈現，trim／改寫會拒絕；舊 slice/Planner/report callers 不必改成此 envelope。未新增 instruction 轉抄 Step、Store 或 registry。
+`callerRequest` 只對已登記產品 workflow 從 `r.WorkflowInput()` 的 Input.Prompt 讀 engine 已持久化的原輸入；read-only 投影在鎖下以值回傳 immutable workflow/input，不複製歷史，也不快取 decode 結果。初始 intake、revision/resolution stages、正常／fresh／recovery Planner 及報告明交同一 request。它是 caller 任務指示，不是虛構的 committed evidence。Report optional `request` 必須精確符合原字串並由固定模板呈現，trim／改寫會拒絕；舊 slice/Planner/report callers 不必改成此 envelope。未新增 instruction 轉抄 Step、Store 或 registry。
 
-每次取 request 仍使用完整 Snapshot 再 decode，成本隨既有歷史增加；目前沒有跨 Run cache，也未量測此成本的 live N/RSS/p99，不宣稱零成本。
+每次取 request 仍需 decode 輸入，但不再為此複製完整 Snapshot；目前沒有跨 Run cache，也未量測此成本的 live N/RSS/p99，不宣稱零成本。
 
 ## 模型與預算
 

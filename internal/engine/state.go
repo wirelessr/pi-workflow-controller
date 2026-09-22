@@ -150,6 +150,18 @@ type Report struct {
 	Snapshot           Snapshot
 }
 
+// WorkflowInput returns the immutable workflow name and input by value, without
+// copying run history. Input contains only strings; mutable fields added later
+// must be copied here rather than exposing run-owned data.
+func (r *Run) WorkflowInput() (string, Input) {
+	if r == nil {
+		return "", Input{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state.Workflow, r.state.Input
+}
+
 // Snapshot returns an owned copy, including emergency status after persistence failure.
 func (r *Run) Snapshot() Snapshot {
 	if r == nil {

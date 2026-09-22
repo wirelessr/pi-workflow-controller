@@ -158,21 +158,13 @@ func newWorkflowFixtureFromSeed(t *testing.T, scenario workflowScenario, seed *a
 	}
 	f := &workflowFixture{t: t, ctx: ctx, host: host, done: make(chan engine.Report, 1), joined: make(chan struct{}), scenario: scenario, hellos: map[string]protocol.Control{}}
 	// Install the lifeline before any Start, so even a failed assertion releases children.
-	t.Cleanup(func() {
+	protocol.RegisterCleanup(t, host, func() <-chan struct{} {
 		if f.run != nil {
 			f.run.Cancel(engine.OriginControllerUser)
+			return f.joined
 		}
-		if err := host.Close(); err != nil {
-			t.Error(err)
-		}
-		if f.run != nil {
-			select {
-			case <-f.joined:
-			case <-time.After(10 * time.Second):
-				t.Error("workflow cleanup did not join")
-			}
-		}
-	})
+		return nil
+	}, 10*time.Second, "", "workflow cleanup did not join")
 	definition := Definition()
 	definition.Policy.RunTimeout = 30 * time.Second
 	if scenario.stop == "deadline" {
@@ -838,5 +830,40 @@ func TestWorkflowProductionRuntimeAttemptDeadline(t *testing.T) {
 	}
 	if len(report.Snapshot.Sessions) != 5 {
 		t.Fatal("attempt timeout did not release the validation slot")
+	}
+}
+
+func TestWorkflowProductionCleanupJoinsUnfinishedRun(t *testing.T) {
+	var f *workflowFixture
+	if !t.Run("active-run", func(t *testing.T) {
+		f = newWorkflowFixture(t, workflowScenario{})
+		f.prepare(f.next("prompt"))
+		for _, event := range f.reviewerBarrier() {
+			f.ack(event, "hold")
+		}
+		for range 3 {
+			f.next("held")
+		}
+	}) {
+		return
+	}
+	select {
+	case <-f.joined:
+	default:
+		t.Fatal("registered cleanup returned without joining the active engine")
+	}
+	report := <-f.done
+	if report.Outcome != engine.CancelledState || report.ExitCode == 0 {
+		t.Fatalf("cleanup did not cancel active run: outcome=%s failure=%v", report.Outcome, report.Failure)
+	}
+	if len(report.Cleanup) != len(report.Snapshot.Sessions) {
+		t.Fatal("cleanup lost owned sessions")
+	}
+	for _, cleanup := range report.Cleanup {
+		owner := report.Snapshot.Sessions[cleanup.Identity.HandleID]
+		if owner.State != "Closed" || cleanup.Identity.SessionID != owner.Identity.SessionID || !cleanup.WaitCompleted || !cleanup.ProcessExited {
+			t.Fatalf("registered cleanup did not retain real close/Wait: %+v", cleanup)
+		}
+		t.Logf("ordinary cleanup retained diagnostics: WaitError=%q KillError=%q DiscoveryError=%q Unconfirmed=%v", cleanup.WaitError, cleanup.KillError, cleanup.DiscoveryError, cleanup.Unconfirmed)
 	}
 }

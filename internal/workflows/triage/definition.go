@@ -108,10 +108,10 @@ func decodeInputObject(raw []byte, fields map[string]any) error {
 // Run.Input is already persisted by the engine. Only the registered product
 // envelope has this contract; legacy slice callers keep their original inputs.
 func callerRequest(r *engine.Run) (string, error) {
-	snapshot := r.Snapshot()
-	if snapshot.Workflow != workflowName {
+	workflow, input := r.WorkflowInput()
+	if workflow != workflowName {
 		return "", nil
 	}
-	v, err := decodeWorkflowInput(snapshot.Input.Prompt)
+	v, err := decodeWorkflowInput(input.Prompt)
 	return v.Request, err
 }
