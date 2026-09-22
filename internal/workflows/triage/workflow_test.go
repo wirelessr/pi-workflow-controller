@@ -19,6 +19,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -123,44 +124,120 @@ func TestTriageProtocolSubprocess(t *testing.T) {
 	os.Exit(0)
 }
 
-// Only the external runtime execution context is shortened; Step and its
-// cancellation/commit/cleanup machinery remain real.
+// Only intentional timeout faults shorten the external execution context.
+// Step, cancellation, commit, cleanup and the fixture watchdog remain real.
 type deadlineRuntime struct {
 	runtime.Runtime
-	taskTimeouts map[string]time.Duration
+	name, fault string
+	mu          sync.Mutex
+	occurrences map[[2]string]int
 }
 type deadlineSession struct {
 	runtime.Session
-	taskTimeouts map[string]time.Duration
+	owner *deadlineRuntime
 }
 
-func (r deadlineRuntime) Start(ctx context.Context, spec runtime.SessionSpec) (runtime.Session, error) {
+func (r *deadlineRuntime) Start(ctx context.Context, spec runtime.SessionSpec) (runtime.Session, error) {
 	s, err := r.Runtime.Start(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
-	return deadlineSession{s, r.taskTimeouts}, nil
+	return deadlineSession{s, r}, nil
 }
 func (s deadlineSession) Execute(ctx context.Context, d runtime.Dispatch) (runtime.Execution, error) {
-	timeout := time.Second
-	if len(s.taskTimeouts) != 0 {
-		_, _, req, err := protocol.ParseDispatch(d.Message)
-		if err != nil {
-			return runtime.Execution{}, err
-		}
-		var task struct {
-			Task WorkerTask `json:"task"`
-		}
-		if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
-			return runtime.Execution{}, err
-		}
-		if override, ok := s.taskTimeouts[task.Task.ID]; ok {
-			timeout = override
-		}
+	_, _, req, err := protocol.ParseDispatch(d.Message)
+	if err != nil {
+		return runtime.Execution{}, err
 	}
-	timed, cancel := context.WithTimeoutCause(ctx, timeout, &runtime.Failure{Code: runtime.TimedOut, Origin: runtime.AttemptDeadline, Message: "fixture step deadline"})
+	var task struct {
+		Stage string     `json:"stage"`
+		Task  WorkerTask `json:"task"`
+	}
+	if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
+		return runtime.Execution{}, err
+	}
+	// Counts survive fresh sessions. Concurrent workers are keyed by task ID,
+	// never by their arrival rank; retries of the same key are sequential.
+	r := s.owner
+	key := [2]string{task.Stage, ""}
+	if req.Output.SchemaID == WorkerSchema {
+		key[1] = task.Task.ID
+	}
+	r.mu.Lock()
+	if r.occurrences == nil {
+		r.occurrences = map[[2]string]int{}
+	}
+	r.occurrences[key]++
+	n := r.occurrences[key]
+	r.mu.Unlock()
+	if !r.timeoutTarget(key[0], key[1], n) {
+		return s.Session.Execute(ctx, d)
+	}
+	timed, cancel := context.WithTimeoutCause(ctx, time.Second, &runtime.Failure{Code: runtime.TimedOut, Origin: runtime.AttemptDeadline, Message: "fixture step deadline"})
 	defer cancel()
 	return s.Session.Execute(timed, d)
+}
+
+func (r *deadlineRuntime) timeoutTarget(stage, taskID string, n int) bool {
+	if stage == "planner-report" {
+		return r.fault == "timeout-once" && n == 1 || r.fault == "timeout-always" && n <= 2
+	}
+	switch r.name {
+	case "attempt-timeout":
+		return stage == "intake" && n == 1
+	case "resolve-timeout", "m4-support-resolve-wiki-timeout":
+		return stage == "wiki-resolution" && n == 1
+	case "support-resolve-timeout", "m4-support-resolve-context-timeout":
+		return stage == "context-resolution" && n == 1
+	case "refresh-timeout":
+		return stage == "intake-revision" && n == 1
+	case "update-timeout", "work-worker-timeout":
+		return stage == "intake-update" && n == 1
+	case "planner-timeout", "work-planner-timeout", "m5-planner-feedback-timeout":
+		return stage == "planner" && n == 2
+	case "m1-worker-timeout", "m4-worker-timeout", "m4-capacity-fresh-worker-timeout":
+		return stage == "worker-code-evidence-only" && taskID == "w1" && n == 1
+	case "m2-branch-timeout", "m4-mixed-timeout":
+		return stage == "worker-code-evidence-only" && taskID == "w2" && n == 1
+	case "m4-support-update-wiki-timeout":
+		return stage == "wiki-revision" && n == 1
+	case "m4-support-update-context-timeout":
+		return stage == "context-revision" && n == 1
+	case "m4-wiki-timeout-partial-resume", "m5-supplement-reframe-inspection-resume":
+		return stage == "wiki-investigation" && n == 1
+	case "m4-nil-recovery-timeout", "m4-planner-later-user-cancel", "m4-planner-parent-deadline", "m4-planner-run-limit", "m4-planner-storage-fatal", "m4-planner-journal-fatal", "m4-planner-first-timeout":
+		return stage == "planner" && n == 1
+	case "m4-planner-retry-exhausted":
+		return stage == "planner" && n <= 2
+	case "m5-claim-timeout-retry":
+		return stage == "planner-claim" && n == 1
+	case "m5-claim-retry-exhausted":
+		return stage == "planner-claim" && n <= 2
+	case "m5-verifier-timeout-retry", "m5-verifier-unavailable", "m5-same-version-missing-only":
+		role, attempts := "verify-con", 2
+		if r.fault == "cross-missing" {
+			role = "verify-cross"
+		}
+		if r.fault == "wrong-result-role" {
+			return false
+		}
+		if r.name == "m5-verifier-timeout-retry" {
+			attempts = 1
+		}
+		return stage == role && n <= attempts
+	}
+	if strings.HasPrefix(r.name, "m4-allfail-") || strings.HasPrefix(r.name, "m4-reframe-") {
+		// The first two sequential batches explicitly dispatch these IDs.
+		// Inspection/later tasks share their stage but must not time out.
+		if stage == "worker-code-evidence-only" && (taskID == "failed-0" || taskID == "failed-1") && n == 1 {
+			return true
+		}
+		return strings.HasPrefix(r.name, "m4-reframe-") && stage == "wiki-investigation" && n == 1
+	}
+	if strings.HasPrefix(r.name, "m4-meta-") {
+		return stage == "planner" && n == 1
+	}
+	return strings.HasPrefix(r.name, "m4-support-unsafe-") && stage == "wiki-resolution" && n == 1
 }
 
 func testJSON(v any) []byte {
@@ -2350,6 +2427,22 @@ type m2Barrier struct {
 	proved               bool
 	faulted              bool
 	stats                []contract.Ref
+}
+
+func (b *m2Barrier) pending(name string) bool {
+	if b.settledAbort != nil && !b.abortReleased {
+		return true
+	}
+	if b.faulted {
+		return false
+	}
+	if b.reportFailureAttempt != "" {
+		return len(b.held) == 2
+	}
+	if strings.HasPrefix(name, "m5-supplement-exhausted-") {
+		return len(b.held) == 1
+	}
+	return len(b.held) == 3 && (len(b.order) < 3 || b.waiting != "")
 }
 
 func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
@@ -5123,6 +5216,9 @@ var triageCases = []triageCase{
 // Truncated intake, blank proposal reason and history-alias negatives also stay
 // there to detect a production loader accidentally bypassing its validator.
 func validationStage(name string) string {
+	if name == "r5-artifact-kind" || name == "r5-file-path" {
+		return "report-files"
+	}
 	if strings.HasPrefix(name, "m5-store-") {
 		return "m2-schema"
 	}
@@ -5467,13 +5563,17 @@ func validationRejection(name string, err error) error {
 	return nil
 }
 
-func newValidationStore(t *testing.T) *contract.Store {
+func newValidationStore(t *testing.T, limits ...contract.Limits) *contract.Store {
 	t.Helper()
+	limit := contract.DefaultLimits()
+	if len(limits) != 0 {
+		limit = limits[0]
+	}
 	registry, err := contract.NewRegistry(Resources(), Schemas())
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := contract.NewStore(registry, contract.Options{BaseDir: t.TempDir(), Prompt: "anonymous validation cases", Limits: contract.DefaultLimits()})
+	store, err := contract.NewStore(registry, contract.Options{BaseDir: t.TempDir(), Prompt: "anonymous validation cases", Limits: limit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5483,6 +5583,90 @@ func newValidationStore(t *testing.T) *contract.Store {
 		}
 	})
 	return store
+}
+
+// Stage validates files but grants no engine commit authority to these schema-only Refs.
+func testReportFileStage(t *testing.T, store *contract.Store, name string) {
+	t.Helper()
+	for _, valid := range []bool{true, false} {
+		t.Run(map[bool]string{true: "valid", false: "invalid"}[valid], func(t *testing.T) {
+			id := contract.Identity{RunID: store.RunID(), InvocationID: contract.NewID(), AttemptID: contract.NewID(), DispatchToken: contract.NewID()}
+			req := contract.Request{Identity: id, Prompt: "anonymous report file validation", Output: contract.OutputSpec{SchemaID: ReportSchema}}
+			attempt, err := store.BeginAttempt(id, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v := InvestigationReport{State: contract.Ref{AttemptID: "state", SchemaID: PlannerSchema}, Context: contract.Ref{AttemptID: "context", SchemaID: ContextSchema}, Claims: []ReportClaim{}, Completeness: "incomplete", Closure: "Retain gaps", Gaps: []string{}, NextSteps: []string{}, ReportFile: ReportFileID}
+			entries := []file{{ID: ReportFileID, Kind: "artifact", Path: "artifacts/triage-report.md"}}
+			size := 1
+			if name == "m6-report-file-hardcap" {
+				size = 64 << 10
+			}
+			if !valid {
+				switch name {
+				case "r5-artifact-kind":
+					entries[0].Kind = "evidence"
+				case "r5-file-path":
+					entries[0].Path = "artifacts/missing.md"
+				case "m6-report-file-hardcap":
+					size++
+				default:
+					t.Fatal("unknown report file case")
+				}
+			}
+			if err := os.WriteFile(filepath.Join(attempt.Dir(), "artifacts", "triage-report.md"), bytes.Repeat([]byte("x"), size), 0600); err != nil {
+				t.Fatal(err)
+			}
+			writeEnvelope(t, protocol.Control{CandidatePath: attempt.CandidatePath()}, req, v, entries)
+			staged, err := attempt.Stage(t.Context(), contract.Spec{SchemaID: ReportSchema})
+			if valid {
+				if err != nil || staged == nil {
+					t.Fatalf("legal report Stage: %v", err)
+				}
+				if err := staged.Discard(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				code := contract.ContractInvalid
+				if name == "m6-report-file-hardcap" {
+					code = contract.LimitExceeded
+				}
+				var failure *contract.Error
+				if staged != nil || !errors.As(err, &failure) || failure.Code != code || failure.Phase != "files" || failure.Identity != id {
+					t.Fatalf("expected %s/files for this attempt, no staged output: %v", code, err)
+				}
+				switch name {
+				case "r5-artifact-kind":
+					if failure.Message != `invalid or duplicate file reference "artifacts/triage-report.md"` || errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("wrong kind/path rejection: %v", err)
+					}
+				case "r5-file-path":
+					var pathErr *os.PathError
+					rel, relErr := filepath.Rel(store.Dir(), filepath.Join(attempt.Dir(), "artifacts", "missing.md"))
+					if relErr != nil || !errors.Is(err, os.ErrNotExist) || !errors.As(err, &pathErr) || pathErr.Path != rel {
+						t.Fatalf("missing report lost exact path/ENOENT: %v, want %s", err, rel)
+					}
+				case "m6-report-file-hardcap":
+					if failure.Message != "file exceeds byte limit" {
+						t.Fatalf("wrong file hardcap rejection: %v", err)
+					}
+				}
+			}
+			if _, err := os.Stat(filepath.Join(attempt.Dir(), "published")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Stage must not publish: %v", err)
+			}
+			remaining, err := os.ReadDir(filepath.Join(store.Dir(), ".staging"))
+			if err != nil || len(remaining) != 0 {
+				t.Fatalf("Stage/Discard left a private snapshot: %v, %v", remaining, err)
+			}
+		})
+	}
+}
+
+func TestTriageReportFileHardcap(t *testing.T) {
+	limits := contract.DefaultLimits()
+	limits.MaxFileBytes = 64 << 10
+	testReportFileStage(t, newValidationStore(t, limits), "m6-report-file-hardcap")
 }
 
 func TestValidationRejectionFailures(t *testing.T) {
@@ -5600,6 +5784,10 @@ func TestTriageValidation(t *testing.T) {
 			continue
 		}
 		t.Run(tc.name, func(t *testing.T) {
+			if stage == "report-files" {
+				testReportFileStage(t, store, tc.name)
+				return
+			}
 			key := "complete"
 			switch {
 			case stage == "support":
@@ -5887,6 +6075,8 @@ var m6Cases = map[string]m6Case{
 	"m6-history-no-basis":                                {base: "m5-verifier-unavailable", stages: 11, failure: true, fault: "no-basis", boundary: "step-committed", contains: "redirect requires evidence"},
 	"m6-history-uncommitted-result":                      {base: "m5-same-version-missing-only", stages: 13, failure: true, disposition: "handled", fault: "uncommitted-result", boundary: "step-committed", contains: "supplied committed Ref"},
 	"m6-history-wrong-version":                           {base: "m5-same-version-missing-only", stages: 13, failure: true, disposition: "handled", fault: "wrong-version", boundary: "step-committed", contains: "exact distinct historical"},
+	"m6-deadline-slow-intake-reframe":                    {base: "m5-supplement-reframe-inspection-resume", stages: 22, final: true},
+	"m6-deadline-slow-intake-compaction":                 {base: "m4-planner-first-compaction", stages: 6, final: true, plannerRetries: 1},
 	"m6-planner-history-reopen":                          {base: "m4-planner-first-compaction", stages: 6, final: true, plannerRetries: 1},
 	"m6-claim-history-reopen":                            {base: "m5-claim-timeout-retry", stages: 11, final: true, plannerRetries: 1},
 }
@@ -5931,7 +6121,7 @@ func TestIntakeToContext(t *testing.T) {
 		cases = append(cases, triageCase{name, v.stages, v.failure, true})
 	}
 	for _, tc := range cases {
-		if validationStage(tc.name) != "" {
+		if validationStage(tc.name) != "" || pureValidationStage(tc.name) != "" {
 			continue
 		}
 		t.Run(tc.name, func(t *testing.T) {
@@ -6074,18 +6264,6 @@ func TestIntakeToContext(t *testing.T) {
 			if mode == "ticket-only" {
 				scope = Scope{Ticket: "CASE-17", TenantIDs: []string{}}
 			}
-			switch mode {
-			case "blank-stack":
-				scope.Stack = ""
-			case "blank-pop":
-				scope.Pop = ""
-			case "blank-binding":
-				scope.Binding = ""
-			case "blank-target":
-				scope.Stack, scope.Pop, scope.Binding = "", "", ""
-			case "whitespace-target":
-				scope.Stack, scope.Pop, scope.Binding = " ", " ", " "
-			}
 			targetAuthorized := strings.TrimSpace(scope.Stack) != "" && strings.TrimSpace(scope.Pop) != "" && strings.TrimSpace(scope.Binding) != "" && len(scope.TenantIDs) > 0
 			var supportingRequests atomic.Int32
 			var supportingURL string
@@ -6129,9 +6307,6 @@ func TestIntakeToContext(t *testing.T) {
 				}
 				if working && (tc.name == "work-update-incomplete" || (workKind == "refresh" && tc.name != "work-refresh-ready")) {
 					httpMode = "page-failure"
-				}
-				if tc.name == "work-refresh-ready" {
-					httpMode = "complete"
 				}
 				server := acquireFixture(t, httpMode, bundle, mime, func(*http.Request) { requests.Add(1) })
 				acquisition = acquisitionOptions{BaseURL: server.URL}
@@ -6755,16 +6930,10 @@ func TestIntakeToContext(t *testing.T) {
 			}
 			var transport runtime.Runtime = pi
 			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" || tc.name == "planner-timeout" || tc.name == "work-worker-timeout" || tc.name == "work-planner-timeout" || tc.name == "m1-worker-timeout" {
-				transport = deadlineRuntime{Runtime: pi}
+				transport = &deadlineRuntime{Runtime: pi, name: tc.name, fault: m6Spec.fault}
 			}
 			if tc.name == "m2-branch-timeout" || m4 || m5 || m6 {
-				transport = deadlineRuntime{Runtime: pi}
-				if tc.name == "m4-mixed-timeout" || tc.name == "m4-mixed-storage-fatal" || tc.name == "m4-mixed-journal-fatal" || tc.name == "m4-mixed-user-cancel" || tc.name == "m4-mixed-wait-fatal" || tc.name == "m4-mixed-three-failed" {
-					transport = deadlineRuntime{Runtime: pi, taskTimeouts: map[string]time.Duration{"w1": time.Minute}}
-				}
-			}
-			if strings.HasPrefix(tc.name, "m5-supplement-exhausted-") {
-				transport = deadlineRuntime{Runtime: pi, taskTimeouts: map[string]time.Duration{"": time.Minute}}
+				transport = &deadlineRuntime{Runtime: pi, name: tc.name, fault: m6Spec.fault}
 			}
 			runCtx := ctx
 			var cancelParent context.CancelCauseFunc
@@ -6831,25 +7000,22 @@ func TestIntakeToContext(t *testing.T) {
 				}
 				return false
 			}
-			var barrierTick <-chan time.Time
-			var barrierChanges <-chan struct{}
-			if barrier.settleAbortGate {
-				barrierChanges = r.Changes()
-			}
-			if m2 {
-				ticker := time.NewTicker(5 * time.Millisecond)
-				defer ticker.Stop()
-				barrierTick = ticker.C
-			}
 		loop:
 			for {
+				var barrierChanges <-chan struct{}
+				if barrier.pending(tc.name) {
+					// This driver is the sole Changes consumer. Arm before reading
+					// state so coalesced notifications cannot hide a terminal transition.
+					barrierChanges = r.Changes()
+					barrier.release(t, r, tc.name, bridge)
+					if !barrier.pending(tc.name) {
+						barrierChanges = nil
+					}
+				}
 				select {
 				case <-done:
 					break loop
 				case <-barrierChanges:
-					barrier.release(t, r, tc.name, bridge)
-				case <-barrierTick:
-					barrier.release(t, r, tc.name, bridge)
 				case <-ctx.Done():
 					t.Fatal("slice exceeded test deadline")
 				case e, ok := <-host.Events():
@@ -6996,9 +7162,8 @@ func TestIntakeToContext(t *testing.T) {
 						}
 						barrier.settledAbort = &e
 						t.Logf("w3 first real abort held after commit: owner=%s commit_seq=%d", owner.Identity.SessionID, success.LastSeq)
-						// Release w2 now, not on a timer. Keep the event loop free while
-						// its provider handles abort/abort_bash and Step persists failure.
-						barrier.release(t, r, tc.name, bridge)
+						// The loop arms Changes before releasing w2 and remains free
+						// to serve its cleanup RPC while w3's abort stays held.
 						continue
 					}
 					if m4 && e.Message.Type == "abort" {
@@ -7859,7 +8024,7 @@ func TestIntakeToContext(t *testing.T) {
 					if m2 && (req.Output.SchemaID == WorkerSchema || m5 && req.Output.SchemaID == VerificationSchema) {
 						for _, attemptID := range barrier.attempts {
 							if attemptID == req.Identity.AttemptID {
-								barrier.release(t, r, tc.name, bridge)
+								// Candidate is complete before the loop can release any peer.
 								continue loop
 							}
 						}
@@ -8096,6 +8261,10 @@ func TestIntakeToContext(t *testing.T) {
 								t.Fatal(err)
 							}
 						}
+					}
+					if strings.HasPrefix(m6Name, "m6-deadline-slow-intake-") && task.Stage == "intake" {
+						// Normal external response latency must not become a fault deadline.
+						time.Sleep(1500 * time.Millisecond)
 					}
 					if err := e.Reply(protocol.Control{Type: ack}); err != nil {
 						t.Fatal(err)

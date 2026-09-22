@@ -59,6 +59,14 @@ func checkClaimCandidate(candidate ClaimCandidate, sources map[contract.Ref][]fi
 	return nil
 }
 
+func checkClaimProjection(claim PureClaim, parent PlannerState, files []file) error {
+	request := parent.VerificationRequest
+	if len(files) != 0 || parent.Ledger == nil || parent.Ledger.Action != "verify" || request == nil || request.Candidate == nil || request.Claim != nil || claim.Context != parent.Context || !reflect.DeepEqual(claim.Candidate, *request.Candidate) {
+		return fmt.Errorf("pure claim must equal its parent state's candidate projection")
+	}
+	return nil
+}
+
 func (a *acceptance) loadClaim(scope Scope, ref contract.Ref) (PureClaim, error) {
 	p, err := readAccepted[PureClaim](a, ref, ClaimSchema)
 	if err != nil {
@@ -77,9 +85,8 @@ func (a *acceptance) loadClaim(scope Scope, ref contract.Ref) (PureClaim, error)
 	if err != nil {
 		return claim, err
 	}
-	request := parent.Data.VerificationRequest
-	if len(p.Files) != 0 || parent.Data.Ledger == nil || parent.Data.Ledger.Action != "verify" || request == nil || request.Candidate == nil || request.Claim != nil || claim.Context != parent.Data.Context || !reflect.DeepEqual(claim.Candidate, *request.Candidate) {
-		return claim, fmt.Errorf("pure claim must equal its parent state's candidate projection")
+	if err := checkClaimProjection(claim, parent.Data, p.Files); err != nil {
+		return claim, err
 	}
 	if _, err := a.loadContextHistory(scope, claim.Context); err != nil {
 		return claim, err

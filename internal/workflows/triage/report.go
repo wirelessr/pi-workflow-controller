@@ -215,6 +215,13 @@ func (p *plannerCaller) reportInScope(ctx context.Context, executionScope *engin
 	return out.Output, nil
 }
 
+func checkReportBinding(v InvestigationReport, task reportTask) error {
+	if v.State != task.State || v.Context != task.Context || v.ReportFile != ReportFileID {
+		return fmt.Errorf("report state/context/file binding mismatch")
+	}
+	return nil
+}
+
 func (p *plannerCaller) checkReport(ctx context.Context, ref contract.Ref, task reportTask, inputs []contract.Ref) error {
 	a := newAcceptance(ctx, p.r)
 	accepted, err := readAccepted[InvestigationReport](a, ref, ReportSchema)
@@ -235,8 +242,8 @@ func (p *plannerCaller) checkReport(ctx context.Context, ref contract.Ref, task 
 	if v.Request != p.request || task.Request != p.request {
 		return fmt.Errorf("report request differs from immutable caller instruction")
 	}
-	if v.State != task.State || v.Context != task.Context || v.ReportFile != ReportFileID {
-		return fmt.Errorf("report state/context/file binding mismatch")
+	if err := checkReportBinding(v, task); err != nil {
+		return err
 	}
 	if len(accepted.Files) != 1 || accepted.Files[0].ID != ReportFileID || accepted.Files[0].Kind != "artifact" || accepted.Files[0].Path != "artifacts/triage-report.md" {
 		return fmt.Errorf("report requires its exclusive artifact")

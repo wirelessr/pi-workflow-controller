@@ -3,6 +3,7 @@ package review
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,11 +61,16 @@ func TestParsePRURL(t *testing.T) {
 	}
 }
 
+type acquisitionGit struct {
+	sourceRepo, baseRepo, headRepo, base, head, mergeBase string
+}
+
 type acquisitionFixture struct {
-	dir, root, sourceRepo, baseRepo, headRepo, base, head, mergeBase string
-	source                                                           acquisitionSource
-	metadata                                                         map[string]any
-	requests                                                         chan string
+	acquisitionGit
+	dir, root string
+	source    acquisitionSource
+	metadata  map[string]any
+	requests  chan string
 }
 
 func fixtureWrite(t *testing.T, path string, data []byte) {
@@ -91,17 +97,9 @@ func fixtureGit(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
-func newAcquisitionFixture(t *testing.T) *acquisitionFixture {
+func newAcquisitionGit(t *testing.T, dir, sourceRepo string) acquisitionGit {
 	t.Helper()
-	f := &acquisitionFixture{dir: t.TempDir(), root: t.TempDir(), sourceRepo: t.TempDir(), requests: make(chan string, 100)}
-	if err := os.Chmod(f.root, 0700); err != nil {
-		t.Fatal(err)
-	}
-	canonical, err := filepath.EvalSymlinks(f.root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.root = canonical
+	f := acquisitionGit{sourceRepo: sourceRepo}
 	fixtureGit(t, f.sourceRepo, "init", "--template=", "-b", "actual-base")
 	fixtureWrite(t, filepath.Join(f.sourceRepo, "shared.txt"), []byte("common\n"))
 	fixtureGit(t, f.sourceRepo, "add", ".")
@@ -111,8 +109,8 @@ func newAcquisitionFixture(t *testing.T) *acquisitionFixture {
 	fixtureGit(t, f.sourceRepo, "add", ".")
 	fixtureGit(t, f.sourceRepo, "commit", "-m", "base")
 	f.base = fixtureGit(t, f.sourceRepo, "rev-parse", "HEAD")
-	f.baseRepo = filepath.Join(f.dir, "base.git")
-	fixtureGit(t, f.dir, "clone", "--bare", "--template=", f.sourceRepo, f.baseRepo)
+	f.baseRepo = filepath.Join(dir, "base.git")
+	fixtureGit(t, dir, "clone", "--bare", "--template=", f.sourceRepo, f.baseRepo)
 	fixtureGit(t, f.sourceRepo, "checkout", "-b", "topic", f.mergeBase)
 	fixtureWrite(t, filepath.Join(f.sourceRepo, "shared.txt"), []byte("pinned head\n"))
 	fixtureWrite(t, filepath.Join(f.sourceRepo, "odd\nname.txt"), []byte("newline path\n"))
@@ -120,8 +118,42 @@ func newAcquisitionFixture(t *testing.T) *acquisitionFixture {
 	fixtureGit(t, f.sourceRepo, "add", ".")
 	fixtureGit(t, f.sourceRepo, "commit", "-m", "head")
 	f.head = fixtureGit(t, f.sourceRepo, "rev-parse", "HEAD")
-	f.headRepo = filepath.Join(f.dir, "fork.git")
-	fixtureGit(t, f.dir, "clone", "--bare", "--template=", f.sourceRepo, f.headRepo)
+	f.headRepo = filepath.Join(dir, "fork.git")
+	fixtureGit(t, dir, "clone", "--bare", "--template=", f.sourceRepo, f.headRepo)
+	return f
+}
+
+func newAcquisitionFixture(t *testing.T) *acquisitionFixture {
+	t.Helper()
+	return newAcquisitionFixtureFromSeed(t, nil)
+}
+
+func newAcquisitionFixtureFromSeed(t *testing.T, seed *acquisitionGit) *acquisitionFixture {
+	t.Helper()
+	f := &acquisitionFixture{dir: t.TempDir(), root: t.TempDir(), requests: make(chan string, 100)}
+	if err := os.Chmod(f.root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.root = canonical
+	if seed == nil {
+		f.acquisitionGit = newAcquisitionGit(t, f.dir, t.TempDir())
+	} else {
+		f.acquisitionGit = acquisitionGit{sourceRepo: t.TempDir(), baseRepo: filepath.Join(f.dir, "base.git"), headRepo: filepath.Join(f.dir, "fork.git"), base: seed.base, head: seed.head, mergeBase: seed.mergeBase}
+		fixtureGit(t, f.dir, "clone", "--no-hardlinks", "--template=", seed.sourceRepo, f.sourceRepo)
+		fixtureGit(t, f.sourceRepo, "branch", "actual-base", seed.base)
+		// Git preserves tree modes, but checkout creation uses the process umask.
+		for _, name := range []string{"shared.txt", "odd\nname.txt", "binary.dat"} {
+			if err := os.Chmod(filepath.Join(f.sourceRepo, name), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fixtureGit(t, f.dir, "clone", "--bare", "--no-hardlinks", "--template=", seed.baseRepo, f.baseRepo)
+		fixtureGit(t, f.dir, "clone", "--bare", "--no-hardlinks", "--template=", seed.headRepo, f.headRepo)
+	}
 	f.metadata = map[string]any{
 		"number": 17, "html_url": "https://github.com/owner/repo/pull/17",
 		"base": map[string]any{"sha": f.base, "ref": "actual-base", "repo": map[string]string{"full_name": "owner/repo"}},
@@ -169,6 +201,105 @@ func (f *acquisitionFixture) saveMetadata(t *testing.T) {
 }
 func (f *acquisitionFixture) acquire(ctx context.Context) (*Checkout, error) {
 	return acquire(ctx, f.root, "https://github.com/owner/repo/pull/17/", f.source)
+}
+
+func TestAcquisitionSeedIsolation(t *testing.T) {
+	seed := newAcquisitionGit(t, t.TempDir(), t.TempDir())
+	seedState := func() map[string]string {
+		state := map[string]string{}
+		for _, repo := range []string{seed.sourceRepo, seed.baseRepo, seed.headRepo} {
+			err := filepath.Walk(repo, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if info.Mode().IsRegular() {
+					raw, err := os.ReadFile(path)
+					if err != nil {
+						return err
+					}
+					state[path] = fmt.Sprintf("%v:%x", info.Mode(), sha256.Sum256(raw))
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		return state
+	}
+	wantDiff := fixtureGit(t, seed.sourceRepo, "diff", "--binary", "--no-ext-diff", "--no-textconv", seed.mergeBase, seed.head, "--")
+	before := seedState()
+	for _, name := range []string{"case-A", "case-B"} {
+		t.Run(name, func(t *testing.T) {
+			f := newAcquisitionFixtureFromSeed(t, &seed)
+			for _, repo := range []string{filepath.Join(f.sourceRepo, ".git"), f.baseRepo, f.headRepo} {
+				if _, err := os.Lstat(filepath.Join(repo, "objects", "info", "alternates")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("clone uses alternates: %s: %v", repo, err)
+				}
+				if err := filepath.Walk(repo, func(path string, info os.FileInfo, err error) error {
+					if err != nil {
+						return err
+					}
+					if !info.IsDir() && (!info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Nlink != 1) {
+						return fmt.Errorf("clone shares file identity: %s", path)
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c, err := f.acquire(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := c.Cleanup(context.Background()); err != nil {
+					t.Error(err)
+				}
+			})
+			if c.BaseSHA != seed.base || c.HeadSHA != seed.head || c.MergeBase != seed.mergeBase || c.DiffRange != seed.mergeBase+".."+seed.head {
+				t.Fatalf("clone changed pin: %+v", c)
+			}
+			for path, want := range map[string][]byte{"shared.txt": []byte("pinned head\n"), "odd\nname.txt": []byte("newline path\n"), "binary.dat": {0, 1, 2, 3}} {
+				for _, root := range []string{f.sourceRepo, c.Worktree} {
+					if raw, err := os.ReadFile(filepath.Join(root, path)); err != nil || !bytes.Equal(raw, want) {
+						t.Fatalf("clone bytes %q: %q %v", path, raw, err)
+					}
+				}
+				if info, err := os.Stat(filepath.Join(f.sourceRepo, path)); err != nil || info.Mode().Perm() != 0600 {
+					t.Fatalf("source mode changed: %v %v", info, err)
+				}
+			}
+			if raw, err := os.ReadFile(c.Snapshots["diff"]); err != nil || strings.TrimSpace(string(raw)) != wantDiff {
+				t.Fatalf("clone changed binary/newline diff: %q %v", raw, err)
+			}
+			checkError(t, c.Verify(context.Background()), "")
+			if name == "case-A" {
+				fixtureWrite(t, filepath.Join(f.sourceRepo, "shared.txt"), []byte("case A only\n"))
+				fixtureGit(t, f.sourceRepo, "commit", "-am", "case A")
+				fixtureGit(t, f.sourceRepo, "push", f.headRepo, "topic")
+				fixtureGit(t, f.sourceRepo, "checkout", "actual-base")
+				fixtureWrite(t, filepath.Join(f.sourceRepo, "base-only.txt"), []byte("case A base\n"))
+				fixtureGit(t, f.sourceRepo, "commit", "-am", "case A base")
+				fixtureGit(t, f.sourceRepo, "push", f.baseRepo, "actual-base")
+				if fixtureGit(t, f.headRepo, "rev-parse", "topic") == seed.head || fixtureGit(t, f.baseRepo, "rev-parse", "actual-base") == seed.base {
+					t.Fatal("case A mutation did not change both clone refs")
+				}
+				fixtureWrite(t, filepath.Join(c.Worktree, "shared.txt"), []byte("dirty checkout\n"))
+				f.metadata["number"] = 99
+				f.saveMetadata(t)
+			}
+			if err := c.Cleanup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(c.Worktree); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("owned checkout retained: %v", err)
+			}
+		})
+		if !reflect.DeepEqual(before, seedState()) {
+			t.Fatalf("%s changed seed files, refs or modes", name)
+		}
+	}
 }
 
 func TestAcquirePinnedForkSnapshotAndOwnedCleanup(t *testing.T) {

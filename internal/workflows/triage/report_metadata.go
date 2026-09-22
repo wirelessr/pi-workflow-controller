@@ -268,7 +268,7 @@ func (p *plannerCaller) handledRecoveryResult(a *acceptance, item ReportFailure,
 	return false, nil
 }
 
-func (p *plannerCaller) checkReportMetadata(a *acceptance, v InvestigationReport, task reportTask, inputs []contract.Ref) error {
+func checkReportMetadataHeader(v InvestigationReport, task reportTask) error {
 	if task.M6 == nil {
 		if v.M6 != nil {
 			return fmt.Errorf("report continuation metadata requires the M6 caller")
@@ -281,6 +281,44 @@ func (p *plannerCaller) checkReportMetadata(a *acceptance, v InvestigationReport
 	if task.M6.Budget != nil && v.Completeness != "incomplete" {
 		return fmt.Errorf("resource-limited report must remain incomplete")
 	}
+	return nil
+}
+
+func matchReportDisposition(disposition ReportDisposition, failures []ReportFailure, seen []bool) (int, error) {
+	index := slices.IndexFunc(failures, func(item ReportFailure) bool { return reflect.DeepEqual(item, disposition.Item) })
+	if index < 0 || seen[index] || !nonblank(disposition.Reason) {
+		return index, fmt.Errorf("report disposition requires an exact distinct historical owner/delivery/role/item")
+	}
+	return index, nil
+}
+
+func checkReportDispositionAction(disposition ReportDisposition, completeness string) error {
+	switch disposition.Action {
+	case "unresolved":
+		if len(disposition.Results) != 0 || completeness != "incomplete" {
+			return fmt.Errorf("unresolved execution requires incomplete report without success results")
+		}
+	case "redirect":
+		if len(disposition.Basis) == 0 || len(disposition.Results) != 0 {
+			return fmt.Errorf("redirect requires evidence basis, not fabricated success")
+		}
+	case "handled":
+		if len(disposition.Results) == 0 {
+			return fmt.Errorf("handled failure requires subsequent committed results")
+		}
+	default:
+		return fmt.Errorf("unsupported report disposition")
+	}
+	return nil
+}
+
+func (p *plannerCaller) checkReportMetadata(a *acceptance, v InvestigationReport, task reportTask, inputs []contract.Ref) error {
+	if err := checkReportMetadataHeader(v, task); err != nil {
+		return err
+	}
+	if task.M6 == nil {
+		return nil
+	}
 	sources := map[contract.Ref][]file{}
 	for _, ref := range inputs {
 		doc, err := readAccepted[json.RawMessage](a, ref, ref.SchemaID)
@@ -292,29 +330,16 @@ func (p *plannerCaller) checkReportMetadata(a *acceptance, v InvestigationReport
 	snapshot := p.r.Snapshot()
 	seen := make([]bool, len(task.M6.Failures))
 	for _, disposition := range v.M6.Dispositions {
-		index := slices.IndexFunc(task.M6.Failures, func(item ReportFailure) bool { return reflect.DeepEqual(item, disposition.Item) })
-		if index < 0 || seen[index] || !nonblank(disposition.Reason) {
-			return fmt.Errorf("report disposition requires an exact distinct historical owner/delivery/role/item")
+		index, err := matchReportDisposition(disposition, task.M6.Failures, seen)
+		if err != nil {
+			return err
 		}
 		seen[index] = true
 		if err := checkInvestigationBasis(disposition.Basis, sources); err != nil {
 			return err
 		}
-		switch disposition.Action {
-		case "unresolved":
-			if len(disposition.Results) != 0 || v.Completeness != "incomplete" {
-				return fmt.Errorf("unresolved execution requires incomplete report without success results")
-			}
-		case "redirect":
-			if len(disposition.Basis) == 0 || len(disposition.Results) != 0 {
-				return fmt.Errorf("redirect requires evidence basis, not fabricated success")
-			}
-		case "handled":
-			if len(disposition.Results) == 0 {
-				return fmt.Errorf("handled failure requires subsequent committed results")
-			}
-		default:
-			return fmt.Errorf("unsupported report disposition")
+		if err := checkReportDispositionAction(disposition, v.Completeness); err != nil {
+			return err
 		}
 		results := map[contract.Ref]bool{}
 		for _, ref := range disposition.Results {

@@ -302,6 +302,362 @@ func TestTriageReportRendererFailures(t *testing.T) {
 	}
 }
 
+// These routes test existing mechanical predicates, not the authority of synthetic Refs.
+func pureValidationStage(name string) string {
+	switch name {
+	case "m6-policy-negative-retry", "m6-policy-negative-session", "m6-policy-negative-attempt", "m6-policy-overflow", "m6-policy-retry-session-short", "m6-policy-retry-attempt-short":
+		return "policy"
+	case "m6-metadata-missing", "m6-history-missing-item", "m6-budget-echo":
+		return "header"
+	case "m6-history-duplicate-item", "m6-history-wrong-version":
+		return "tuple"
+	case "m6-history-no-basis":
+		return "action"
+	case "r5-state-binding", "r5-context-binding":
+		return "binding"
+	case "m5-claim-projection", "m5-claim-context":
+		return "projection"
+	}
+	return ""
+}
+
+func TestTriagePureValidation(t *testing.T) {
+	var names []string
+	for _, tc := range triageCases {
+		if pureValidationStage(tc.name) != "" {
+			names = append(names, tc.name)
+		}
+	}
+	var reportNames []string
+	for name := range m6Cases {
+		if pureValidationStage(name) != "" {
+			reportNames = append(reportNames, name)
+		}
+	}
+	slices.Sort(reportNames)
+	names = append(names, reportNames...)
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			stage := pureValidationStage(name)
+			if stage == "policy" {
+				policy := ReportPolicy{ReportRetries: 1, ReserveSessions: 1, ReserveAttempts: 2}
+				if err := policy.check(); err != nil {
+					t.Fatal("invalid policy prerequisite: ", err)
+				}
+				switch name {
+				case "m6-policy-negative-retry":
+					policy.ReportRetries = -1
+				case "m6-policy-negative-session":
+					policy.ReserveSessions = -1
+				case "m6-policy-negative-attempt":
+					policy.ReserveAttempts = -1
+				case "m6-policy-overflow":
+					policy.ReportRetries = int(^uint(0) >> 1)
+				case "m6-policy-retry-session-short":
+					policy.ReserveSessions = 0
+				case "m6-policy-retry-attempt-short":
+					policy.ReserveAttempts = 1
+				}
+				if err := policy.check(); err == nil || err.Error() != "explicit report reserves must cover the report and all finite fresh retries" {
+					t.Fatalf("wrong policy rejection: %v", err)
+				}
+				return
+			}
+			state, contextRef := contract.Ref{AttemptID: "state"}, contract.Ref{AttemptID: "context"}
+			if stage == "projection" {
+				candidate := ClaimCandidate{ID: "claim", Statement: "The proposed candidate", Premises: []string{"first", "second"}, AllowedEvidence: []Evidence{{Ref: &contextRef, FileID: "raw"}}}
+				parent := PlannerState{Context: contextRef, Ledger: &InvestigationLedger{Action: "verify"}, VerificationRequest: &VerificationRequest{Candidate: &candidate}}
+				projection := PureClaim{ParentState: state, Context: contextRef, Candidate: candidate}
+				if err := checkClaimProjection(projection, parent, nil); err != nil {
+					t.Fatal("invalid claim prerequisite: ", err)
+				}
+				if name == "m5-claim-projection" {
+					projection.Candidate.Statement = "A different candidate"
+				} else {
+					projection.Context = projection.ParentState
+				}
+				if err := checkClaimProjection(projection, parent, nil); err == nil || err.Error() != "pure claim must equal its parent state's candidate projection" {
+					t.Fatalf("wrong projection rejection: %v", err)
+				}
+				return
+			}
+			task := reportTask{State: state, Context: contextRef}
+			v := InvestigationReport{State: state, Context: contextRef, ReportFile: ReportFileID, Completeness: "incomplete"}
+			if stage == "binding" {
+				if err := checkReportBinding(v, task); err != nil {
+					t.Fatal("invalid binding prerequisite: ", err)
+				}
+				if name == "r5-state-binding" {
+					v.State = task.Context
+				} else {
+					v.Context = task.State
+				}
+				if err := checkReportBinding(v, task); err == nil || err.Error() != "report state/context/file binding mismatch" {
+					t.Fatalf("wrong binding rejection: %v", err)
+				}
+				return
+			}
+			claim := contract.Ref{AttemptID: "claim"}
+			task.M6 = &reportContinuation{Failures: []ReportFailure{}, ReportFailures: []RecoveryFailure{}}
+			v.M6 = &ReportMetadata{Dispositions: []ReportDisposition{}, ReportFailures: []RecoveryFailure{}}
+			for i := 0; i < 2; i++ {
+				item := ReportFailure{Owner: contract.Ref{AttemptID: fmt.Sprintf("owner-%d", i)}, Kind: "verification", DeliveryID: "delivery", Claim: &claim, Role: "con", Index: i, Failure: RecoveryFailure{Stage: "verify-con", AttemptID: fmt.Sprintf("failed-%d", i)}}
+				task.M6.Failures = append(task.M6.Failures, item)
+				v.M6.Dispositions = append(v.M6.Dispositions, ReportDisposition{Item: item, Action: "redirect", Reason: "Evidence supports redirect", Results: []contract.Ref{}, Basis: []Evidence{{Ref: &contextRef, FileID: "raw"}}})
+			}
+			if name == "m6-budget-echo" {
+				task.M6.Budget = &ReportBudget{UsedAttempts: 4}
+				budget := *task.M6.Budget
+				v.M6.Budget = &budget
+			}
+			if err := checkReportMetadataHeader(v, task); err != nil {
+				t.Fatal("invalid header prerequisite: ", err)
+			}
+			seen := make([]bool, len(task.M6.Failures))
+			for i, disposition := range v.M6.Dispositions {
+				index, err := matchReportDisposition(disposition, task.M6.Failures, seen)
+				if err != nil || index != i || seen[index] {
+					t.Fatalf("invalid tuple prerequisite or helper mutated seen: %d, %v", index, err)
+				}
+				seen[index] = true
+				if err := checkInvestigationBasis(disposition.Basis, map[contract.Ref][]file{contextRef: {{ID: "raw", Kind: "evidence"}}}); err != nil {
+					t.Fatal("invalid basis prerequisite: ", err)
+				}
+				if err := checkReportDispositionAction(disposition, v.Completeness); err != nil {
+					t.Fatal("invalid action prerequisite: ", err)
+				}
+			}
+			switch name {
+			case "m6-metadata-missing":
+				v.M6 = nil
+			case "m6-history-missing-item":
+				v.M6.Dispositions = v.M6.Dispositions[1:]
+			case "m6-budget-echo":
+				v.M6.Budget.UsedAttempts++
+			case "m6-history-duplicate-item":
+				v.M6.Dispositions[1] = v.M6.Dispositions[0]
+			case "m6-history-wrong-version":
+				v.M6.Dispositions[0].Item.Claim = &task.Context
+			case "m6-history-no-basis":
+				v.M6.Dispositions[0].Basis = []Evidence{}
+			}
+			if stage == "header" {
+				if err := checkReportMetadataHeader(v, task); err == nil || err.Error() != "report requires complete M6 history and exact budget metadata" {
+					t.Fatalf("wrong header rejection: %v", err)
+				}
+				return
+			}
+			if err := checkReportMetadataHeader(v, task); err != nil {
+				t.Fatal("mutation rejected before intended tuple/action: ", err)
+			}
+			if stage == "tuple" {
+				seen = make([]bool, len(task.M6.Failures))
+				rejected := 0
+				for i, disposition := range v.M6.Dispositions {
+					index, err := matchReportDisposition(disposition, task.M6.Failures, seen)
+					bad := i == 0
+					if name == "m6-history-duplicate-item" {
+						bad = i == 1
+					}
+					if !bad {
+						if err != nil || index != i || seen[index] {
+							t.Fatalf("unexpected earlier tuple rejection: %v", err)
+						}
+						seen[index] = true
+						continue
+					}
+					if err == nil || err.Error() != "report disposition requires an exact distinct historical owner/delivery/role/item" {
+						t.Fatalf("wrong tuple rejection: %v", err)
+					}
+					rejected++
+					break
+				}
+				if rejected != 1 {
+					t.Fatal("mutation never reached tuple rejection")
+				}
+				return
+			}
+			if stage != "action" {
+				t.Fatal("unknown pure validation stage")
+			}
+			d := v.M6.Dispositions[0]
+			if _, err := matchReportDisposition(d, task.M6.Failures, make([]bool, len(task.M6.Failures))); err != nil {
+				t.Fatal("no-basis rejected before action: ", err)
+			}
+			if err := checkInvestigationBasis(d.Basis, map[contract.Ref][]file{contextRef: {{ID: "raw", Kind: "evidence"}}}); err != nil {
+				t.Fatal("empty basis rejected before action: ", err)
+			}
+			if err := checkReportDispositionAction(d, v.Completeness); err == nil || err.Error() != "redirect requires evidence basis, not fabricated success" {
+				t.Fatalf("wrong action rejection: %v", err)
+			}
+		})
+	}
+}
+
+func TestTriageReportMetadataPredicates(t *testing.T) {
+	for _, name := range []string{"valid", "no-m6", "unexpected-m6", "nil-empty", "retry-echo", "retry-order", "retry-multiplicity", "limited-complete", "header-before-completeness"} {
+		t.Run("header/"+name, func(t *testing.T) {
+			task := reportTask{M6: &reportContinuation{ReportFailures: []RecoveryFailure{{Stage: "report", AttemptID: "first"}, {Stage: "report", AttemptID: "second"}}}}
+			v := InvestigationReport{Completeness: "incomplete", M6: &ReportMetadata{ReportFailures: slices.Clone(task.M6.ReportFailures)}}
+			if err := checkReportMetadataHeader(v, task); err != nil {
+				t.Fatal("invalid prerequisite: ", err)
+			}
+			want := ""
+			switch name {
+			case "no-m6":
+				task.M6, v.M6 = nil, nil
+			case "unexpected-m6":
+				task.M6 = nil
+				want = "report continuation metadata requires the M6 caller"
+			case "nil-empty":
+				task.M6.ReportFailures, v.M6.ReportFailures = nil, []RecoveryFailure{}
+			case "retry-echo":
+				v.M6.ReportFailures = []RecoveryFailure{}
+			case "retry-order":
+				slices.Reverse(v.M6.ReportFailures)
+			case "retry-multiplicity":
+				v.M6.ReportFailures[1] = v.M6.ReportFailures[0]
+			case "limited-complete", "header-before-completeness":
+				task.M6.Budget, v.M6.Budget = &ReportBudget{}, &ReportBudget{}
+				v.Completeness = "complete"
+				want = "resource-limited report must remain incomplete"
+				if name == "header-before-completeness" {
+					v.M6.ReportFailures = nil
+				}
+			}
+			if strings.HasPrefix(name, "retry-") || name == "header-before-completeness" {
+				want = "report requires complete M6 history and exact budget metadata"
+			}
+			err := checkReportMetadataHeader(v, task)
+			if want == "" && err != nil || want != "" && (err == nil || err.Error() != want) {
+				t.Fatalf("header: %v, want %q", err, want)
+			}
+		})
+	}
+	for _, name := range []string{"valid", "wrong-owner", "blank-reason", "seen", "reverse-order"} {
+		t.Run("tuple/"+name, func(t *testing.T) {
+			failures := []ReportFailure{{Owner: contract.Ref{AttemptID: "owner-1"}, Index: 0}, {Owner: contract.Ref{AttemptID: "owner-2"}, Index: 1}}
+			d := ReportDisposition{Item: failures[0], Reason: "retained reason"}
+			seen := []bool{false, false}
+			if _, err := matchReportDisposition(d, failures, seen); err != nil {
+				t.Fatal("invalid prerequisite: ", err)
+			}
+			wantIndex := 0
+			switch name {
+			case "wrong-owner":
+				d.Item.Owner = contract.Ref{AttemptID: "context"}
+			case "blank-reason":
+				d.Reason = " "
+			case "seen":
+				seen[0] = true
+			case "reverse-order":
+				slices.Reverse(failures)
+				wantIndex = 1
+			}
+			before := slices.Clone(seen)
+			index, err := matchReportDisposition(d, failures, seen)
+			if !slices.Equal(before, seen) {
+				t.Fatal("tuple helper changed caller-owned seen state")
+			}
+			if name == "valid" || name == "reverse-order" {
+				if err != nil || index != wantIndex {
+					t.Fatalf("exact tuple failed: %d %v", index, err)
+				}
+			} else if err == nil || err.Error() != "report disposition requires an exact distinct historical owner/delivery/role/item" {
+				t.Fatalf("wrong tuple rejection: %v", err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, action, completeness, want string
+		results                          []contract.Ref
+		basis                            []Evidence
+	}{
+		{"unresolved", "unresolved", "incomplete", "", nil, nil},
+		{"unresolved-complete", "unresolved", "complete", "unresolved execution requires incomplete report without success results", nil, nil},
+		{"unresolved-result", "unresolved", "incomplete", "unresolved execution requires incomplete report without success results", []contract.Ref{{AttemptID: "result"}}, nil},
+		{"redirect", "redirect", "incomplete", "", nil, []Evidence{{FileID: "raw"}}},
+		{"redirect-result", "redirect", "incomplete", "redirect requires evidence basis, not fabricated success", []contract.Ref{{AttemptID: "result"}}, []Evidence{{FileID: "raw"}}},
+		{"handled", "handled", "complete", "", []contract.Ref{{AttemptID: "result"}}, nil},
+		{"handled-no-result", "handled", "incomplete", "handled failure requires subsequent committed results", nil, nil},
+		{"unsupported", "other", "incomplete", "unsupported report disposition", nil, nil},
+	} {
+		t.Run("action/"+tc.name, func(t *testing.T) {
+			err := checkReportDispositionAction(ReportDisposition{Action: tc.action, Results: tc.results, Basis: tc.basis}, tc.completeness)
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || err.Error() != tc.want) {
+				t.Fatalf("action shape: %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestTriageClaimProjectionPredicates(t *testing.T) {
+	for _, name := range []string{"valid", "files", "ledger-nil", "action", "request-nil", "candidate-nil", "existing-claim", "premise-order", "evidence-multiplicity", "file-binding"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := contract.Ref{AttemptID: "context"}
+			candidate := ClaimCandidate{ID: "claim", Statement: "candidate", Premises: []string{"first", "second"}, AllowedEvidence: []Evidence{{Ref: &ctx, FileID: "one"}, {Ref: &ctx, FileID: "two"}}}
+			parent := PlannerState{Context: ctx, Ledger: &InvestigationLedger{Action: "verify"}, VerificationRequest: &VerificationRequest{Candidate: &candidate}}
+			claim := PureClaim{Context: ctx, Candidate: candidate}
+			var files []file
+			if err := checkClaimProjection(claim, parent, files); err != nil {
+				t.Fatal("invalid prerequisite: ", err)
+			}
+			switch name {
+			case "files":
+				files = []file{{ID: "unexpected"}}
+			case "ledger-nil":
+				parent.Ledger = nil
+			case "action":
+				parent.Ledger.Action = "yield"
+			case "request-nil":
+				parent.VerificationRequest = nil
+			case "candidate-nil":
+				parent.VerificationRequest.Candidate = nil
+			case "existing-claim":
+				parent.VerificationRequest.Claim = &ctx
+			case "premise-order":
+				claim.Candidate.Premises = []string{"second", "first"}
+			case "evidence-multiplicity":
+				claim.Candidate.AllowedEvidence = []Evidence{candidate.AllowedEvidence[0], candidate.AllowedEvidence[0]}
+			case "file-binding":
+				v := InvestigationReport{State: ctx, Context: ctx, ReportFile: ReportFileID}
+				task := reportTask{State: ctx, Context: ctx}
+				if err := checkReportBinding(v, task); err != nil {
+					t.Fatal(err)
+				}
+				v.ReportFile = "other"
+				if err := checkReportBinding(v, task); err == nil || err.Error() != "report state/context/file binding mismatch" {
+					t.Fatalf("wrong file binding rejection: %v", err)
+				}
+				return
+			}
+			err := checkClaimProjection(claim, parent, files)
+			if name == "valid" && err != nil || name != "valid" && (err == nil || err.Error() != "pure claim must equal its parent state's candidate projection") {
+				t.Fatalf("projection: %v", err)
+			}
+		})
+	}
+}
+
+func TestTriageReportPolicyBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy ReportPolicy
+		valid  bool
+	}{
+		{"zero-invalid", ReportPolicy{}, false},
+		{"zero-retry-valid", ReportPolicy{ReserveAttempts: 1}, true},
+		{"finite-retry-valid", ReportPolicy{ReportRetries: 1, ReserveSessions: 1, ReserveAttempts: 2}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.policy.check()
+			if tc.valid && err != nil || !tc.valid && (err == nil || err.Error() != "explicit report reserves must cover the report and all finite fresh retries") {
+				t.Fatalf("policy boundary: %v", err)
+			}
+		})
+	}
+}
+
 // These arithmetic checks do not claim engine admission or verification authority.
 func TestM6SupplementRetryArithmetic(t *testing.T) {
 	max := int(^uint(0) >> 1)

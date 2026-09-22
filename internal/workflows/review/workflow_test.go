@@ -135,11 +135,16 @@ type workflowFixture struct {
 
 func newWorkflowFixture(t *testing.T, scenario workflowScenario) *workflowFixture {
 	t.Helper()
+	return newWorkflowFixtureFromSeed(t, scenario, nil)
+}
+
+func newWorkflowFixtureFromSeed(t *testing.T, scenario workflowScenario, seed *acquisitionGit) *workflowFixture {
+	t.Helper()
 	t.Setenv("NODE_TLS_REJECT_UNAUTHORIZED", "1")
 	// Only the runtime's explicit directory controls discovery, not this setting.
 	t.Setenv("PI_BRIDGE_DIR", filepath.Join(t.TempDir(), "not-the-runtime-bridge"))
 	t.Setenv("GORACE", "atexit_sleep_ms=0")
-	source := newAcquisitionFixture(t)
+	source := newAcquisitionFixtureFromSeed(t, seed)
 	if scenario.missing {
 		if err := os.Remove(filepath.Join(source.dir, "issues.json")); err != nil {
 			t.Fatal(err)
@@ -604,6 +609,7 @@ func (f *workflowFixture) finish() engine.Report {
 }
 
 func TestWorkflowProductionReports(t *testing.T) {
+	seed := newAcquisitionGit(t, t.TempDir(), t.TempDir())
 	for _, tc := range []struct {
 		name                     string
 		scenario                 workflowScenario
@@ -619,7 +625,7 @@ func TestWorkflowProductionReports(t *testing.T) {
 		{"unconfirmed-requirement", workflowScenario{unknown: true}, "limited", "undetermined", 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newWorkflowFixture(t, tc.scenario)
+			f := newWorkflowFixtureFromSeed(t, tc.scenario, &seed)
 			f.prepare(f.next("prompt"))
 			reviewers := f.reviewerBarrier()
 			for _, event := range reviewers {
@@ -680,6 +686,7 @@ func (f *workflowFixture) reviewerBarrier() []workflowControl {
 }
 
 func TestWorkflowProductionRejectsInvalidResults(t *testing.T) {
+	seed := newAcquisitionGit(t, t.TempDir(), t.TempDir())
 	for _, tc := range []struct {
 		name     string
 		scenario workflowScenario
@@ -702,7 +709,7 @@ func TestWorkflowProductionRejectsInvalidResults(t *testing.T) {
 		{"unknown-coverage-cannot-claim-complete", workflowScenario{unknown: true, validationError: "overstated"}, "overstates"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newWorkflowFixture(t, tc.scenario)
+			f := newWorkflowFixtureFromSeed(t, tc.scenario, &seed)
 			f.prepare(f.next("prompt"))
 			if tc.scenario.prepareError == "" {
 				reviewers := f.reviewerBarrier()

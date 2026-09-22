@@ -1179,122 +1179,143 @@ func TestEnginePersistenceResourceLimitsAreSticky(t *testing.T) {
 }
 
 func TestEnginePersistenceObservationQueueSaturation(t *testing.T) {
-	// Drain every accepted core event through fsync, including under -race.
-	// This is only a watchdog; all ordering is controlled by the I/O barrier.
-	guard, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	fake := &engTestRuntime{}
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	unblock := func() { releaseOnce.Do(func() { close(release) }) }
-	t.Cleanup(unblock)
-	overflowed := make(chan error, 1)
-	var observed, downstreamErr error
-	var downstream StepResult
-	var handleID string
-	accepted := 0
-	swallowed, barrierHit := false, false
-	r, _ := engTestNew(t, "", fake, func(ctx context.Context, run *Run, _ Input) (Result, error) {
-		h, err := run.OpenSession(ctx, engTestRole("worker"))
-		if err != nil {
-			return Result{}, err
-		}
-		handleID = h.id
-		if err := run.Observe(ctx, runtime.Observation{HandleID: h.id, Seq: 1, Kind: "auto_retry_start"}); err != nil {
-			return Result{}, err
-		}
-		accepted++
-		select {
-		case <-entered:
-		case <-ctx.Done():
-			return Result{}, context.Cause(ctx)
-		}
-		// The first observation is inside real journal I/O, so the consumer
-		// cannot free another slot until the test releases the barrier.
-		for i := 0; i < cap(run.observations); i++ {
-			if err := run.Observe(ctx, runtime.Observation{HandleID: h.id, Seq: uint64(i + 2), Kind: "auto_retry_start"}); err != nil {
-				overflowed <- fmt.Errorf("queue rejected available slot %d: %w", i, err)
-				return Result{}, err
+	for _, tc := range []struct {
+		name            string
+		queue, capacity int
+	}{
+		{"default1024", 0, 1024},
+		{"small2", 2, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Drain every accepted core event through fsync, including under -race.
+			// This is only a watchdog; all ordering is controlled by the I/O barrier.
+			guard, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			fake := &engTestRuntime{}
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
+			overflowed := make(chan error, 1)
+			var observed, downstreamErr error
+			var downstream StepResult
+			var handleID string
+			accepted := 0
+			swallowed, barrierHit := false, false
+			policy := DefaultRunPolicy()
+			if tc.queue != 0 {
+				policy.Runtime.ObservationQueue = tc.queue
 			}
-			accepted++
-		}
-		observed = run.Observe(ctx, runtime.Observation{HandleID: h.id, Seq: uint64(accepted + 1), Kind: "auto_retry_start"})
-		overflowed <- observed
-		<-release
-		downstream, downstreamErr = engTestStep(ctx, run.Root(), h, "after-overflow")
-		swallowed = true
-		return Result{}, nil
-	})
-	r.beforeIO = func(path, phase string) {
-		if path == "events.jsonl" && phase == "SessionObservation" && !barrierHit {
-			barrierHit = true
-			close(entered)
+			ctx, cancelRun := context.WithTimeout(context.Background(), 15*time.Second)
+			t.Cleanup(cancelRun)
+			base := t.TempDir()
+			r, err := New(ctx, Definition{Name: "integration", Version: "v1", Policy: policy, Execute: func(ctx context.Context, run *Run, _ Input) (Result, error) {
+				h, err := run.OpenSession(ctx, engTestRole("worker"))
+				if err != nil {
+					return Result{}, err
+				}
+				handleID = h.id
+				if err := run.Observe(ctx, runtime.Observation{HandleID: h.id, Seq: 1, Kind: "auto_retry_start"}); err != nil {
+					return Result{}, err
+				}
+				accepted++
+				select {
+				case <-entered:
+				case <-ctx.Done():
+					return Result{}, context.Cause(ctx)
+				}
+				// The first observation is inside real journal I/O, so the consumer
+				// cannot free another slot until the test releases the barrier.
+				for i := 0; i < cap(run.observations); i++ {
+					if err := run.Observe(ctx, runtime.Observation{HandleID: h.id, Seq: uint64(i + 2), Kind: "auto_retry_start"}); err != nil {
+						overflowed <- fmt.Errorf("queue rejected available slot %d: %w", i, err)
+						return Result{}, err
+					}
+					accepted++
+				}
+				observed = run.Observe(ctx, runtime.Observation{HandleID: h.id, Seq: uint64(accepted + 1), Kind: "auto_retry_start"})
+				overflowed <- observed
+				<-release
+				downstream, downstreamErr = engTestStep(ctx, run.Root(), h, "after-overflow")
+				swallowed = true
+				return Result{}, nil
+			}}, Input{Prompt: `原始 prompt "quotes" $(not-a-command)`, LaunchCWD: base},
+				Options{Schemas: engTestSchemas(t), Runtime: fake, BaseDir: base})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.beforeIO = func(path, phase string) {
+				if path == "events.jsonl" && phase == "SessionObservation" && !barrierHit {
+					barrierHit = true
+					close(entered)
+					select {
+					case <-release:
+					case <-guard.Done():
+					}
+				}
+			}
+			done := engTestExecuteAsync(t, r)
 			select {
-			case <-release:
+			case err := <-overflowed:
+				if !engTestCode(err, LimitExceeded) {
+					t.Errorf("overflow did not explicitly reject observation: %v", err)
+				}
 			case <-guard.Done():
+				t.Error("workflow did not reach observation overflow barrier")
 			}
-		}
-	}
-	done := engTestExecuteAsync(t, r)
-	select {
-	case err := <-overflowed:
-		if !engTestCode(err, LimitExceeded) {
-			t.Errorf("overflow did not explicitly reject observation: %v", err)
-		}
-	case <-guard.Done():
-		t.Error("workflow did not reach observation overflow barrier")
-	}
-	unblock()
-	var report Report
-	select {
-	case report = <-done:
-	case <-guard.Done():
-		t.Fatal("engine did not drain accepted observations and join after queue saturation")
-	}
-	engTestReport(t, report, Failed, 1)
-	engTestPersisted(t, r, report)
-	engPersistClosed(t, fake, report, 1)
-	if !barrierHit || !swallowed || !engTestCode(observed, LimitExceeded) || !engTestCode(downstreamErr, LimitExceeded) || !engTestCode(report.Failure, LimitExceeded) || report.Snapshot.Failure == nil || report.Snapshot.Failure.LimitScope != "run" || report.Snapshot.Failure.Phase != "observation" {
-		t.Errorf("queue saturation was swallowed or misclassified: observed=%v downstream=%v report=%+v", observed, downstreamErr, report)
-	}
-	if downstream != (StepResult{}) || len(report.Snapshot.Attempts) != 0 || accepted != cap(r.observations)+1 {
-		t.Errorf("overflow allocated downstream or failed to fill queue: downstream=%+v attempts=%d accepted=%d", downstream, len(report.Snapshot.Attempts), accepted)
-	}
-	seen := make(map[uint64]int)
-	for _, event := range engTestEvents(t, r) {
-		if event.Kind != "SessionObservation" {
-			continue
-		}
-		raw, err := json.Marshal(event.Details)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var observation runtime.Observation
-		if err := json.Unmarshal(raw, &observation); err != nil {
-			t.Fatal(err)
-		}
-		if observation.HandleID != handleID || observation.Kind != "auto_retry_start" {
-			t.Errorf("observation identity changed: %+v", observation)
-		}
-		seen[observation.Seq]++
-	}
-	if len(seen) != accepted {
-		t.Errorf("accepted observations dropped: journal=%d accepted=%d", len(seen), accepted)
-	}
-	for seq := 1; seq <= accepted; seq++ {
-		if seen[uint64(seq)] != 1 {
-			t.Errorf("accepted observation %d journal count=%d, want 1", seq, seen[uint64(seq)])
-		}
-	}
-	if seen[uint64(accepted+1)] != 0 {
-		t.Error("rejected overflow observation was falsely committed")
-	}
-	if session := report.Snapshot.Sessions[handleID]; session.RuntimeSeq != uint64(accepted) || session.State != "Closed" {
-		t.Errorf("drain lost final runtime seq or reopened closed handle: %+v", session)
-	}
-	calls, _, _ := fake.allSessions()[0].history()
-	if len(calls) != 0 {
-		t.Errorf("queue fatal still dispatched %d prompts", len(calls))
+			unblock()
+			var report Report
+			select {
+			case report = <-done:
+			case <-guard.Done():
+				t.Fatal("engine did not drain accepted observations and join after queue saturation")
+			}
+			engTestReport(t, report, Failed, 1)
+			engTestPersisted(t, r, report)
+			engPersistClosed(t, fake, report, 1)
+			if !barrierHit || !swallowed || !engTestCode(observed, LimitExceeded) || !engTestCode(downstreamErr, LimitExceeded) || !engTestCode(report.Failure, LimitExceeded) || report.Snapshot.Failure == nil || report.Snapshot.Failure.LimitScope != "run" || report.Snapshot.Failure.Phase != "observation" {
+				t.Errorf("queue saturation was swallowed or misclassified: observed=%v downstream=%v report=%+v", observed, downstreamErr, report)
+			}
+			if downstream != (StepResult{}) || len(report.Snapshot.Attempts) != 0 || accepted != cap(r.observations)+1 || accepted != tc.capacity+1 {
+				t.Errorf("overflow allocated downstream or failed to fill queue: downstream=%+v attempts=%d accepted=%d", downstream, len(report.Snapshot.Attempts), accepted)
+			}
+			seen := make(map[uint64]int)
+			for _, event := range engTestEvents(t, r) {
+				if event.Kind != "SessionObservation" {
+					continue
+				}
+				raw, err := json.Marshal(event.Details)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var observation runtime.Observation
+				if err := json.Unmarshal(raw, &observation); err != nil {
+					t.Fatal(err)
+				}
+				if observation.HandleID != handleID || observation.Kind != "auto_retry_start" {
+					t.Errorf("observation identity changed: %+v", observation)
+				}
+				seen[observation.Seq]++
+			}
+			if len(seen) != accepted {
+				t.Errorf("accepted observations dropped: journal=%d accepted=%d", len(seen), accepted)
+			}
+			for seq := 1; seq <= accepted; seq++ {
+				if seen[uint64(seq)] != 1 {
+					t.Errorf("accepted observation %d journal count=%d, want 1", seq, seen[uint64(seq)])
+				}
+			}
+			if seen[uint64(accepted+1)] != 0 {
+				t.Error("rejected overflow observation was falsely committed")
+			}
+			if session := report.Snapshot.Sessions[handleID]; session.RuntimeSeq != uint64(accepted) || session.State != "Closed" {
+				t.Errorf("drain lost final runtime seq or reopened closed handle: %+v", session)
+			}
+			calls, _, _ := fake.allSessions()[0].history()
+			if len(calls) != 0 {
+				t.Errorf("queue fatal still dispatched %d prompts", len(calls))
+			}
+		})
 	}
 }
