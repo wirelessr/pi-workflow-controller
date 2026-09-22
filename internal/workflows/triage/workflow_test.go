@@ -859,8 +859,12 @@ func refreshIntakeFixture(t *testing.T, ctx context.Context, name string, count 
 		v.Fields.Ref = &bad
 	case "refresh-wrong-previous", "update-wrong-previous":
 		v.Previous = &inputs[1]
-	case "refresh-work-changed":
+	case "refresh-work-changed", "refresh-work-binding":
 		v.Work = append(append([]intakeWork{}, v.Work...), intakeWork{Source: "fields", Reason: "unrequested expansion"})
+		if name == "refresh-work-binding" {
+			files["new-fields"] = []byte(`[{"id":"description","name":"Description"}]`)
+			v.Fields = available("new-fields")
+		}
 	case "refresh-no-metadata", "update-no-metadata":
 		v.Acquisition = nil
 	case "refresh-dropped-source":
@@ -2729,8 +2733,9 @@ func r5RenderCandidate(t *testing.T, ctx context.Context, r *engine.Run, name st
 	cmd.WaitDelay = time.Second
 	output, err := cmd.CombinedOutput()
 	if name == "r5-renderer-collision" {
-		if err == nil {
-			t.Fatal("renderer overwrote an existing report")
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || !exit.ProcessState.Exited() || !bytes.Contains(output, []byte("File exists")) || !bytes.Contains(output, []byte("triage-report.md")) {
+			t.Fatalf("renderer did not reject the existing report: %v: %s", err, output)
 		}
 		got, readErr := os.ReadFile(reportPath)
 		if readErr != nil || string(got) != "keep" {
@@ -2791,9 +2796,63 @@ func r5AssertOutcome(t *testing.T, tc triageCase, report engine.Report, stateRef
 		t.Fatalf("report stages=%d, want %d", count, tc.stages)
 	}
 	if tc.failure {
-		want := map[string]string{"r5-assessment-owner": "exact distinct claim/delivery/assessment owner", "r5-claim-version": "exact distinct claim/delivery/assessment owner", "r5-state-binding": "state/context/file binding mismatch", "r5-context-binding": "state/context/file binding mismatch", "r5-body-tamper": "deterministic accepted projection"}[tc.name]
+		want := map[string]string{"r5-assessment-owner": "exact distinct claim/delivery/assessment owner", "r5-claim-version": "exact distinct claim/delivery/assessment owner", "r5-state-binding": "state/context/file binding mismatch", "r5-context-binding": "state/context/file binding mismatch", "r5-body-tamper": "deterministic accepted projection", "r5-artifact-kind": `invalid or duplicate file reference "artifacts/triage-report.md"`, "r5-file-path": "artifacts/missing.md"}[tc.name]
 		if want != "" && !strings.Contains(fmt.Sprint(report.Failure), want) {
 			t.Fatalf("wrong report rejection: %v, want %s", report.Failure, want)
+		}
+		if tc.name == "r5-artifact-kind" || tc.name == "r5-file-path" {
+			var failure *engine.Failure
+			if !errors.As(report.Failure, &failure) || failure.Code != engine.ContractInvalid || failure.Phase != "files" || failure.Origin != engine.OriginContract {
+				t.Fatalf("wrong report file failure: %v", report.Failure)
+			}
+			if tc.name == "r5-file-path" && !errors.Is(report.Failure, os.ErrNotExist) {
+				t.Fatalf("missing report file lost its filesystem cause: %v", report.Failure)
+			}
+		}
+		if tc.name == "r5-uncommitted" || tc.name == "r5-evidence-tamper" {
+			committed := 0
+			for _, a := range report.Snapshot.Attempts {
+				if a.Output != nil && a.Output.SchemaID == ReportSchema && a.State == engine.Succeeded && a.Key == "report-"+stateRef.AttemptID {
+					committed++
+				}
+			}
+			if committed != 1 {
+				t.Fatal("postcommit rejection lost the exact report-producing Step")
+			}
+		}
+		if want != "" && tc.name != "r5-artifact-kind" && tc.name != "r5-file-path" {
+			var f *engine.Failure
+			var c *contract.Error
+			if errors.As(report.Failure, &f) || errors.As(report.Failure, &c) {
+				t.Fatalf("report semantic rejection replaced by execution/Store error: %v", report.Failure)
+			}
+		}
+		if tc.name == "r5-uncommitted" {
+			var f *engine.Failure
+			if !errors.As(report.Failure, &f) || f.Code != engine.ReferenceInvalid || f.Phase != "resolve" || !strings.Contains(f.Message, "exact committed publication") {
+				t.Fatalf("wrong uncommitted report rejection: %v", report.Failure)
+			}
+		}
+		if tc.name == "r5-evidence-tamper" {
+			var c *contract.Error
+			if !errors.As(report.Failure, &c) || c.Code != contract.ReferenceInvalid || c.Phase != "read" || !strings.Contains(c.Message, "digest mismatch") {
+				t.Fatalf("wrong postcommit report tamper rejection: %v", report.Failure)
+			}
+		}
+		if tc.name == "r5-cancel" || tc.name == "r5-renderer-collision" || tc.name == "r5-cleanup-failure" {
+			code, origin := engine.Cancelled, engine.OriginControllerUser
+			if tc.name == "r5-renderer-collision" {
+				code, origin = engine.CompactionFailed, engine.OriginCompaction
+			} else if tc.name == "r5-cleanup-failure" {
+				code, origin = engine.CleanupFailed, engine.OriginProtocol
+			}
+			var f *engine.Failure
+			if !errors.As(report.Failure, &f) || f.Code != code || f.Origin != origin {
+				t.Fatalf("wrong report execution boundary: %v", report.Failure)
+			}
+			if tc.name == "r5-cancel" && report.Outcome != engine.CancelledState {
+				t.Fatal("report cancellation swallowed")
+			}
 		}
 		if tc.name == "r5-cleanup-failure" && len(report.CleanupErrors) == 0 {
 			t.Fatal("cleanup failure was not retained")
@@ -3302,19 +3361,19 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 		}
 	}
 	beforeRejectedRetries := r.Snapshot()
-	if _, e := p.workReady(ctx, models); e == nil {
+	if _, e := p.workReady(ctx, models); e == nil || m3 && e.Error() != "worker batch requires an accepted state and usable planner" {
 		t.Error("failed caller allowed another batch")
 	}
-	if _, e := p.step(ctx); e == nil {
+	if _, e := p.step(ctx); e == nil || m3 && e.Error() != "planner session is stopped" {
 		t.Error("failed caller allowed another Planner Step")
 	}
-	if _, e := p.searchWiki(ctx, models); e == nil {
+	if _, e := p.searchWiki(ctx, models); e == nil || m3 && e.Error() != "wiki dispatch requires an accepted state and usable planner" {
 		t.Error("failed caller allowed another wiki search")
 	}
-	if _, e := p.handoff(ctx); e == nil {
+	if _, e := p.handoff(ctx); e == nil || m3 && e.Error() != "planner handoff requires an accepted state and usable session" {
 		t.Error("failed caller allowed fresh handoff")
 	}
-	if _, e := p.support(ctx, models); e == nil {
+	if _, e := p.support(ctx, models); e == nil || m3 && e.Error() != "supporting dispatch requires an accepted state and usable planner" {
 		t.Error("failed caller allowed supporting work")
 	}
 	if m3 && (len(r.Snapshot().Attempts) != len(beforeRejectedRetries.Attempts) || len(r.Snapshot().Sessions) != len(beforeRejectedRetries.Sessions)) {
@@ -3558,11 +3617,15 @@ func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref cont
 					t.Fatal("fatal was not injected after sibling retry exhaustion")
 				}
 			case strings.HasPrefix(tc.name, "m5-policy-"):
-				want = "requires an explicit"
+				role := strings.Split(strings.TrimPrefix(tc.name, "m5-policy-"), "-")[0]
+				want = role + " requires an explicit model and nonnegative retry budget"
+				if tc.name == "m5-policy-no-recovery" {
+					want = "verification requires an explicit Planner recovery policy"
+				}
 			case tc.name == "m5-claim-projection", tc.name == "m5-claim-context":
-				want = "candidate projection"
+				want = "pure claim must equal its parent state's candidate projection"
 			case tc.name == "m5-claim-parent":
-				want = "claim"
+				want = "claim must be produced by the proposing Planner role/model"
 			case tc.name == "m5-claim-ledger", tc.name == "m5-verifier-schema":
 				want = "ContractInvalid"
 			case tc.name == "m5-verifier-role", tc.name == "m5-verifier-claim", tc.name == "m5-verifier-evidence", tc.name == "m5-new-version-cross-reject":
@@ -3592,6 +3655,22 @@ func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref cont
 			}
 			if want == "" || !strings.Contains(fmt.Sprint(report.Failure), want) {
 				t.Fatalf("M5 wrong failure, want %s: %v", want, report.Failure)
+			}
+			var failure *engine.Failure
+			var contractErr *contract.Error
+			switch want {
+			case "ContractInvalid", "ProviderFailed", "RetryExhausted", "LimitExceeded", "CleanupFailed", "StorageFailed", "JournalFailed", "Cancel":
+				code := engine.Code(want)
+				if want == "Cancel" {
+					code = engine.Cancelled
+				}
+				if !errors.As(report.Failure, &failure) || failure.Code != code {
+					t.Fatalf("M5 wrong typed rejection, want %s: %v", code, report.Failure)
+				}
+			default:
+				if errors.As(report.Failure, &failure) && (failure.Code != engine.WorkflowFailed || failure.Origin != engine.OriginDefinition || failure.Phase != "") || errors.As(report.Failure, &contractErr) || errors.Is(report.Failure, context.Canceled) || errors.Is(report.Failure, context.DeadlineExceeded) {
+					t.Fatalf("M5 semantic rejection replaced by execution/Store error: %v", report.Failure)
+				}
 			}
 			if tc.name == "m5-verifier-attempt-limit" || tc.name == "m5-verifier-live-limit" {
 				// Limits can lock the run before already allocated siblings reach
@@ -4444,6 +4523,15 @@ func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref cont
 				if !errors.As(report.Failure, &failure) || failure.Code != want || len(states) != 1 || len(barrier.stats) != 1 || len(workers) != 0 {
 					t.Fatalf("M3 stats failure lost classification/accepted state: want %s, got %v", want, report.Failure)
 				}
+				if failure.Code == engine.ProtocolFailed && tc.name != "m3-stats-fatal" {
+					message := "get_session_stats has malformed context usage or identity"
+					if tc.name == "m3-stats-reject" {
+						message = "fixture stats rejected"
+					}
+					if failure.Origin != engine.OriginProtocol || !strings.Contains(failure.Message, message) {
+						t.Fatalf("wrong stats diagnostic: %v", report.Failure)
+					}
+				}
 				if tc.name == "m3-stats-cancel" && failure.Origin != engine.OriginControllerUser {
 					t.Fatal("stats cancellation lost its origin")
 				}
@@ -4643,7 +4731,7 @@ func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref cont
 			"m2-wiki-partial-runtime": "completed investigation wiki prerequisite", "m2-wiki-partial-drop-gap": "cannot hide investigation wiki gaps", "m2-wiki-drop-ref": "exact wiki deliveries",
 			"m2-wiki-previous-terms": "previous_terms differ", "m2-wiki-basis-owner": "exact input owner/file",
 			"m2-wiki-binding-proposal": "expected triage.planner.v1", "m2-wiki-binding-context": "proposal/task/context/history mismatch", "m2-wiki-binding-task": "proposal/task/context/history mismatch", "m2-wiki-binding-inputs": "wiki inputs mismatch", "m2-wiki-binding-intake": "wiki search provenance missing", "m2-wiki-omitted-term": "omitted a dispatched search term",
-			"m2-branch-binding": "proposal/context/task/inputs mismatch", "m2-query-utc": "UTC", "m2-incomplete-no-gap": "complete/incomplete delivery with gaps",
+			"m2-branch-binding": "proposal/context/task/inputs mismatch", "m2-query-utc": "supporting query requires a nonzero UTC window", "m2-incomplete-no-gap": "complete/incomplete delivery with gaps",
 		}
 		if message, ok := messages[tc.name]; ok && !strings.Contains(report.Failure.Error(), message) {
 			t.Fatalf("wrong M2 rejection, want %q: %v", message, report.Failure)
@@ -4991,7 +5079,7 @@ var triageCases = []triageCase{
 	{"refresh-issue-partial", 6, false, false}, {"refresh-issue-missing", 6, false, false}, {"refresh-issue-repeat", 9, false, false},
 	{"refresh-page", 6, false, true}, {"refresh-attachment", 6, false, true}, {"refresh-invalidated", 6, false, true},
 	{"refresh-historical-wiki", 6, false, true}, {"refresh-wiki-partial", 6, false, false}, {"refresh-repeat", 9, false, true}, {"refresh-then-resolve", 8, false, true},
-	{"refresh-unselected-copy", 4, true, false}, {"refresh-foreign-ref", 4, true, false}, {"refresh-wrong-previous", 4, true, false}, {"refresh-work-changed", 4, true, false}, {"refresh-no-metadata", 4, true, false}, {"refresh-dropped-source", 4, true, false}, {"refresh-false-complete", 4, true, false},
+	{"refresh-unselected-copy", 4, true, false}, {"refresh-foreign-ref", 4, true, false}, {"refresh-wrong-previous", 4, true, false}, {"refresh-work-changed", 4, true, false}, {"refresh-work-binding", 4, true, false}, {"refresh-no-metadata", 4, true, false}, {"refresh-dropped-source", 4, true, false}, {"refresh-false-complete", 4, true, false},
 	{"refresh-old-wiki-binding", 5, true, false}, {"refresh-false-no-matches", 5, true, false}, {"refresh-drop-gap", 6, true, false}, {"refresh-dropped-history", 6, true, false}, {"refresh-context-foreign-ref", 6, true, false},
 	{"refresh-provider-failure", 4, true, false}, {"refresh-cancel", 4, true, false}, {"refresh-timeout", 4, true, false}, {"refresh-cleanup-failure", 4, true, false}, {"refresh-attempt-cap", 3, true, false}, {"refresh-uncommitted-input", 3, true, false},
 	{"missing-attachment-size", 1, true, false},
@@ -5315,6 +5403,28 @@ func validationError(name string) string {
 		return "unrequested source added"
 	case "update-new-ref":
 		return "source work needs a new local result"
+	case "refresh-work-changed":
+		return "source work needs a new local result or an update removal: fields"
+	case "refresh-work-binding", "refresh-escalated-task", "update-wrong-task":
+		return "intake revision changed dispatched task/work/previous"
+	case "initial-update":
+		return "initial intake cannot declare revision work"
+	case "refresh-old-wiki-binding", "update-old-wiki-binding":
+		return "wiki search provenance missing"
+	case "refresh-false-no-matches":
+		return "wiki completion inconsistent"
+	case "refresh-drop-gap", "update-drop-gap", "resolve-drop-gap":
+		return "context revision dropped gap without resolution evidence"
+	case "refresh-dropped-history", "resolve-dropped-history", "support-resolve-dropped-history", "support-resolve-altered-query", "support-resolve-retag-basis":
+		return "context revision dropped resolution history"
+	case "refresh-context-foreign-ref", "resolve-foreign-evidence":
+		return "evidence is not an exact committed input"
+	case "resolve-replace-valid-time":
+		return "local resolution replaced valid incident anchors"
+	case "resolve-wrong-previous":
+		return "context revision must bind exact previous input"
+	case "resolve-old-evidence":
+		return "gap resolution requires new evidence"
 	}
 	return ""
 }
@@ -6673,6 +6783,8 @@ func TestIntakeToContext(t *testing.T) {
 			go func() { report = r.Execute(); close(done) }()
 			count := 0
 			m4Phases := map[string]int{}
+			dispatched := map[string][]contract.Request{}
+			sentReplies := map[string]string{}
 			hellos := map[string]protocol.Control{}
 			var intake Intake
 			var wiki WikiSearch
@@ -6949,6 +7061,7 @@ func TestIntakeToContext(t *testing.T) {
 					if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
 						t.Fatal(err)
 					}
+					dispatched[task.Stage] = append(dispatched[task.Stage], req)
 					if product {
 						if strings.HasPrefix(task.Stage, "intake") || strings.HasPrefix(task.Stage, "wiki") || strings.HasPrefix(task.Stage, "context") || task.Stage == "planner" || task.Stage == "planner-report" {
 							if task.Request != originalRequest {
@@ -7987,6 +8100,7 @@ func TestIntakeToContext(t *testing.T) {
 					if err := e.Reply(protocol.Control{Type: ack}); err != nil {
 						t.Fatal(err)
 					}
+					sentReplies[req.Identity.AttemptID] = ack
 				}
 			}
 			if product {
@@ -8060,13 +8174,266 @@ func TestIntakeToContext(t *testing.T) {
 			if m6Name == "m6-review-worker-owner-handled" {
 				t.Logf("worker failure with receiving Planner owner, empty basis: Final=%v native-error=%v", report.Final != nil, m6Err)
 			}
+			assertFault := func(stage string, index int, code engine.Code, origin engine.Origin) {
+				t.Helper()
+				requests := dispatched[stage]
+				if len(requests) < index {
+					t.Fatalf("missing fault target %s attempt %d", stage, index)
+				}
+				req := requests[index-1]
+				a := report.Snapshot.Attempts[req.Identity.AttemptID]
+				prefix := stage
+				switch stage {
+				case "planner-claim":
+					prefix = "claim-"
+				case "planner-report":
+					prefix = "report-"
+				case "planner":
+					prefix = "planner-"
+				case "intake-revision":
+					prefix = "refresh-"
+				case "intake-update":
+					prefix = "update-"
+				case "wiki-investigation":
+					prefix = "investigation-wiki-"
+				case "context-resolution", "wiki-resolution":
+					prefix = "resolution-"
+				case "wiki-revision", "context-revision":
+					prefix = "update-"
+				}
+				if strings.HasPrefix(stage, "worker-") {
+					prefix = "worker-"
+				}
+				if code == engine.TimedOut && sentReplies[req.Identity.AttemptID] != "hold" {
+					t.Fatalf("timeout target %s[%d] did not receive its hold reply", stage, index)
+				}
+				if strings.HasPrefix(stage, "verify-") {
+					prefix = "verify-"
+					if !strings.HasSuffix(a.Key, "-"+strings.TrimPrefix(stage, "verify-")) {
+						t.Fatalf("fault targeted wrong verifier key: %s", a.Key)
+					}
+				}
+				phase := "Step"
+				if code == engine.Cancelled && origin == engine.OriginControllerUser {
+					phase = "run"
+				}
+				if a.Identity != req.Identity || !strings.HasPrefix(a.Key, prefix) || a.Output != nil || a.State == engine.Succeeded || a.Failure == nil || a.Failure.Code != code || a.Failure.Origin != origin || a.Failure.Phase != phase || a.Failure.AttemptID != req.Identity.AttemptID || a.Failure.StepID != req.Identity.InvocationID {
+					t.Fatalf("wrong fault %s[%d] key=%s: want %s/%s/%s, got %+v", stage, index, a.Key, code, origin, phase, a.Failure)
+				}
+			}
+			if m5 {
+				role := "verify-con"
+				if m6 && m6Spec.fault == "cross-missing" {
+					role = "verify-cross"
+				}
+				switch tc.name {
+				case "m5-verifier-compaction-retry", "m5-supplement-reframe-wiki", "m5-supplement-reframe-inspection-resume":
+					assertFault(role, 1, engine.CompactionFailed, engine.OriginCompaction)
+				case "m5-verifier-timeout-retry":
+					assertFault(role, 1, engine.TimedOut, engine.OriginAttemptDeadline)
+				case "m5-verifier-unavailable", "m5-same-version-missing-only":
+					code, origin := engine.TimedOut, engine.OriginAttemptDeadline
+					if m6 && m6Spec.fault == "wrong-result-role" {
+						code, origin = engine.CompactionFailed, engine.OriginCompaction
+					}
+					for i := 1; i <= 2; i++ {
+						assertFault(role, i, code, origin)
+					}
+				case "m5-claim-timeout-retry":
+					assertFault("planner-claim", 1, engine.TimedOut, engine.OriginAttemptDeadline)
+				case "m5-claim-retry-exhausted":
+					for i := 1; i <= 2; i++ {
+						assertFault("planner-claim", i, engine.TimedOut, engine.OriginAttemptDeadline)
+					}
+					var f *engine.Failure
+					if !errors.As(report.Failure, &f) || f.Code != engine.RetryExhausted || f.Phase != "Retry" || f.Origin != engine.OriginDefinition {
+						t.Fatalf("lost claim retry exhaustion: %v", report.Failure)
+					}
+				case "m5-planner-feedback-timeout":
+					assertFault("planner", 2, engine.TimedOut, engine.OriginAttemptDeadline)
+				}
+				if tc.name == "m5-supplement-reframe-inspection-resume" {
+					assertFault("wiki-investigation", 1, engine.TimedOut, engine.OriginAttemptDeadline)
+				}
+				if strings.HasPrefix(tc.name, "m5-supplement-exhausted-") {
+					role := "verify-pro"
+					if strings.HasSuffix(tc.name, "fatal-pro") {
+						role = "verify-cross"
+					}
+					for i := 1; i <= 2; i++ {
+						assertFault(role, i, engine.CompactionFailed, engine.OriginCompaction)
+					}
+				}
+			}
+			switch tc.name {
+			case "m4-worker-timeout", "m4-capacity-fresh-worker-timeout":
+				assertFault("worker-code-evidence-only", 1, engine.TimedOut, engine.OriginAttemptDeadline)
+			case "m4-wiki-timeout-partial-resume":
+				assertFault("wiki-investigation", 1, engine.TimedOut, engine.OriginAttemptDeadline)
+			case "m4-support-resolve-wiki-timeout":
+				assertFault("wiki-resolution", 1, engine.TimedOut, engine.OriginAttemptDeadline)
+			case "m4-support-resolve-context-timeout":
+				if m6 && m6Name == "m6-support-resolve-reserve" {
+					if len(dispatched["context-resolution"]) != 0 {
+						t.Fatal("reserve rejection dispatched the context fault target")
+					}
+				} else {
+					assertFault("context-resolution", 1, engine.TimedOut, engine.OriginAttemptDeadline)
+				}
+			case "m4-support-update-wiki-timeout":
+				assertFault("wiki-revision", 1, engine.TimedOut, engine.OriginAttemptDeadline)
+			case "m4-support-update-context-timeout":
+				if m6 && m6Name == "m6-support-revise-reserve" {
+					if len(dispatched["context-revision"]) != 0 {
+						t.Fatal("reserve rejection dispatched the context fault target")
+					}
+				} else {
+					assertFault("context-revision", 1, engine.TimedOut, engine.OriginAttemptDeadline)
+				}
+			case "m4-planner-user-cancel":
+				assertFault("planner", 1, engine.Cancelled, engine.OriginControllerUser)
+			}
+			if m6 && m6Spec.fault == "provider" {
+				assertFault("planner-report", 1, engine.ProviderFailed, engine.OriginProvider)
+			}
+			if r5 && tc.name == "r5-cancel" || m6 && m6Spec.fault == "r5-cancel" {
+				assertFault("planner-report", 1, engine.Cancelled, engine.OriginControllerUser)
+			}
+			if tc.name == "m4-mixed-cleanup-fatal" {
+				var f *engine.Failure
+				owner := report.Snapshot.Attempts[barrier.attempts["w2"]]
+				if !errors.As(report.Failure, &f) || f.Code != engine.CleanupFailed || f.Origin != engine.OriginProtocol || !slices.ContainsFunc(report.Cleanup, func(c runtime.CleanupReport) bool {
+					return c.Identity.HandleID == owner.HandleID && c.DiscoveryError == "owned discovery has a recovery claim" && c.WaitCompleted && c.ProcessExited && !c.ConfirmsLocalClose(c.Identity.SessionID)
+				}) {
+					t.Fatalf("mixed cleanup lost exact w2 failure: %v", report.Failure)
+				}
+			}
+			if tc.name == "m4-planner-first-compaction" {
+				assertFault("planner", 1, engine.CompactionFailed, engine.OriginCompaction)
+			}
+			if m6 && (strings.HasPrefix(m6Spec.fault, "timeout-") || strings.HasPrefix(m6Spec.fault, "compaction-") || m6Spec.fault == "retry-echo") {
+				code, origin := engine.CompactionFailed, engine.OriginCompaction
+				if strings.HasPrefix(m6Spec.fault, "timeout-") {
+					code, origin = engine.TimedOut, engine.OriginAttemptDeadline
+				}
+				count := 1
+				if strings.HasSuffix(m6Spec.fault, "always") {
+					count = 2
+				}
+				for i := 1; i <= count; i++ {
+					assertFault("planner-report", i, code, origin)
+				}
+			}
+			if !m2 && !r5 && !m6 && tc.failure {
+				var f *engine.Failure
+				if strings.HasSuffix(tc.name, "-provider-failure") || strings.HasSuffix(tc.name, "-timeout") || strings.HasSuffix(tc.name, "-cancel") {
+					code, origin := engine.ProviderFailed, engine.OriginProvider
+					if strings.HasSuffix(tc.name, "-timeout") {
+						code, origin = engine.TimedOut, engine.OriginAttemptDeadline
+					} else if strings.HasSuffix(tc.name, "-cancel") {
+						code, origin = engine.Cancelled, engine.OriginControllerUser
+					}
+					if !errors.As(report.Failure, &f) || f.Code != code || f.Origin != origin {
+						t.Fatalf("wrong execution failure: want %s/%s, got %v", code, origin, report.Failure)
+					}
+					stage, index := "planner", 2
+					switch {
+					case strings.HasPrefix(tc.name, "work-worker-"):
+						stage, index = "intake-update", 1
+					case strings.HasPrefix(tc.name, "work-planner-"):
+						index = 2
+					case resolving:
+						stage, index = "wiki-resolution", 1
+						if strings.HasPrefix(tc.name, "support-resolve-") {
+							stage = "context-resolution"
+						}
+					case revising:
+						stage, index = "intake-revision", 1
+						if updating {
+							stage = "intake-update"
+						}
+					}
+					if !m1 && tc.name != "attempt-timeout" {
+						assertFault(stage, index, code, origin)
+					}
+				}
+				if strings.HasSuffix(tc.name, "attempt-cap") || tc.name == "work-final-cap" || strings.HasSuffix(tc.name, "session-cap") {
+					phase := "Step"
+					if strings.HasSuffix(tc.name, "session-cap") {
+						phase = "OpenSession"
+					}
+					if !errors.As(report.Failure, &f) || f.Code != engine.LimitExceeded || f.Phase != phase || f.LimitScope != "run" || len(report.Snapshot.Attempts) != count {
+						t.Fatalf("wrong run cap boundary: %v", report.Failure)
+					}
+				}
+				if strings.HasSuffix(tc.name, "cleanup-failure") {
+					if !errors.As(report.Failure, &f) || f.Code != engine.CleanupFailed || f.Origin != engine.OriginProtocol || len(report.CleanupErrors) == 0 {
+						t.Fatalf("wrong cleanup failure: %v", report.Failure)
+					}
+					stage := "wiki-resolution"
+					if strings.HasPrefix(tc.name, "support-resolve-") {
+						stage = "context-resolution"
+					} else if revising {
+						stage = "intake-revision"
+						if updating {
+							stage = "intake-update"
+						}
+					}
+					if tc.name == "work-cleanup-failure" {
+						stage = "planner"
+					}
+					if resolving || revising {
+						requests := dispatched[stage]
+						if len(requests) != 1 {
+							t.Fatalf("cleanup target %s dispatches=%d, want 1", stage, len(requests))
+						}
+						req := requests[0]
+						attempt := report.Snapshot.Attempts[req.Identity.AttemptID]
+						if attempt.State != engine.Succeeded || attempt.Output == nil || !slices.ContainsFunc(report.Cleanup, func(c runtime.CleanupReport) bool {
+							return c.Identity.HandleID == attempt.HandleID && c.WaitCompleted && c.ProcessExited && c.DiscoveryError == "owned discovery has a recovery claim" && !c.ConfirmsLocalClose(c.Identity.SessionID)
+						}) {
+							t.Fatal("cleanup failure lost committed target/owned discovery fault/Wait")
+						}
+					}
+				}
+				if strings.HasSuffix(tc.name, "uncommitted-input") {
+					if !errors.As(report.Failure, &f) || f.Code != engine.ReferenceInvalid || f.Phase != "resolve" || !strings.Contains(f.Message, "exact committed publication") || len(report.Snapshot.Attempts) != count {
+						t.Fatalf("wrong uncommitted input rejection: %v", report.Failure)
+					}
+				}
+				if strings.HasPrefix(tc.name, "work-tamper-") || tc.name == "planner-tampered-handoff" {
+					var c *contract.Error
+					if !errors.As(report.Failure, &c) || c.Code != contract.ReferenceInvalid || c.Phase != "read" || c.Identity.AttemptID == "" {
+						t.Fatalf("wrong committed tamper rejection: %v", report.Failure)
+					}
+					owner := report.Snapshot.Attempts[c.Identity.AttemptID]
+					if owner.Output == nil || owner.State != engine.Succeeded {
+						t.Fatal("tamper failure lost committed evidence owner")
+					}
+				}
+			}
 			limitBeforePrompt := tc.name == "m5-verifier-attempt-limit" || tc.name == "m5-verifier-live-limit"
 			if count != tc.stages && !limitBeforePrompt || (report.ExitCode != 0) != tc.failure {
 				t.Fatalf("stages=%d outcome=%s failure=%v", count, report.Outcome, report.Failure)
 			}
-			if tc.name == "truncated-attachment" || tc.name == "update-history-alias" || tc.name == "work-blank-reason" {
+			if tc.failure && validationError(tc.name) != "" {
 				if err := validationRejection(tc.name, report.Failure); err != nil {
 					t.Fatal(err)
+				}
+				var c *contract.Error
+				if !errors.As(report.Failure, &c) {
+					for _, attempt := range report.Snapshot.Attempts {
+						if attempt.Output == nil || attempt.State != engine.Succeeded {
+							t.Fatal("semantic rejection did not follow committed publication")
+						}
+					}
+				}
+			}
+			if field := map[string]string{"m5-claim-ledger": "additional properties 'ledger' not allowed", "m5-verifier-schema": "/role", "m4-allfail-caller-bool": "additional properties 'remote_job_safe' not allowed", "m4-support-unsafe-no-basis": "/recovery_choices/0/basis"}[tc.name]; field != "" {
+				var f *engine.Failure
+				var c *contract.Error
+				if !errors.As(report.Failure, &f) || f.Code != engine.ContractInvalid || f.Origin != engine.OriginContract || f.Phase != "schema" || !errors.As(report.Failure, &c) || c.Code != contract.ContractInvalid || c.Phase != "schema" || !strings.Contains(c.Message, field) {
+					t.Fatalf("wrong schema field rejection, want %s: %v", field, report.Failure)
 				}
 			}
 			if tc.name == "update-wrong-task" && !strings.Contains(fmt.Sprint(report.Failure), "intake revision changed dispatched task/work/previous") {
@@ -8131,6 +8498,44 @@ func TestIntakeToContext(t *testing.T) {
 					}
 				}
 			}
+			if m6 && (m6Name == "m6-capacity-handoff" || m6Name == "m6-capacity-unknown") {
+				requests := dispatched["planner"]
+				if len(requests) != 2 || len(barrier.stats) != 1 {
+					t.Fatalf("capacity lost exact snapshots/stats: planner=%d stats=%d", len(requests), len(barrier.stats))
+				}
+				first := report.Snapshot.Attempts[requests[0].Identity.AttemptID]
+				last := report.Snapshot.Attempts[requests[1].Identity.AttemptID]
+				handoff := m6Name == "m6-capacity-handoff"
+				if first.Output == nil || last.Output == nil || barrier.stats[0] != *first.Output || (first.HandleID != last.HandleID) != handoff {
+					t.Fatal("capacity did not sample the exact committed state or retain/switch its handle")
+				}
+				var state publication[PlannerState]
+				if err := protocol.ReadJSON(last.Output.Path, &state); err != nil {
+					t.Fatal(err)
+				}
+				if state.Data.Previous == nil || *state.Data.Previous != *first.Output || state.Data.Checkpoint == nil || len(state.Data.Checkpoint.ControllerFeedback) != 1 {
+					t.Fatal("capacity lost exact previous state/sample feedback")
+				}
+				feedback := state.Data.Checkpoint.ControllerFeedback[0]
+				_, raw, ok := strings.Cut(feedback.Note, "On-demand sample: ")
+				var usage runtime.ContextUsage
+				owner := report.Snapshot.Sessions[first.HandleID]
+				if !ok || json.Unmarshal([]byte(raw), &usage) != nil || usage.Identity.SessionID != owner.Identity.SessionID || usage.SampledAt.IsZero() || usage.Seq == 0 || feedback.After != *first.Output {
+					t.Fatal("capacity dropped observed usage or exact sample owner")
+				}
+				if handoff {
+					if usage.Percent == nil || *usage.Percent != 80 || !strings.Contains(feedback.Note, "strict close") {
+						t.Fatal("handoff lost the threshold sample")
+					}
+				} else if usage.Percent != nil || !strings.Contains(feedback.Note, "unknown") || !strings.Contains(feedback.Note, "without treating it as zero") {
+					t.Fatal("unknown capacity became zero or forced a handoff")
+				}
+				if owner.State != "Closed" || !slices.ContainsFunc(report.Cleanup, func(c runtime.CleanupReport) bool {
+					return c.Identity.HandleID == first.HandleID && c.ConfirmsLocalClose(owner.Identity.SessionID)
+				}) {
+					t.Fatal("capacity owner lacks strict close/Wait")
+				}
+			}
 			if m6 {
 				if m6Name == "m6-ordinary-cleanup-priority" {
 					if barrier.settledAbort == nil || !barrier.abortReleased {
@@ -8182,6 +8587,28 @@ func TestIntakeToContext(t *testing.T) {
 					var f *engine.Failure
 					if !errors.As(report.Failure, &f) || f.Code != wantCode {
 						t.Fatalf("lost priority %s: %v", wantCode, report.Failure)
+					}
+				}
+				if m6Spec.fault == "schema" {
+					var f *engine.Failure
+					if !errors.As(report.Failure, &f) || f.Code != engine.ContractInvalid || f.Phase != "schema" || f.Origin != engine.OriginContract || !strings.Contains(f.Message, "missing properties") || !strings.Contains(f.Message, "'state'") {
+						t.Fatalf("wrong report schema rejection: %v", report.Failure)
+					}
+				}
+				if m6Name == "m6-ordinary-schema-no-report" {
+					if report.Snapshot.Failure == nil || report.Snapshot.Failure.Code != engine.WorkflowFailed || !strings.Contains(fmt.Sprint(report.Failure), "Planner must assess the delivered verification and declare next action") {
+						t.Fatalf("wrong ordinary semantic rejection: %v", report.Failure)
+					}
+					requests := dispatched["planner"]
+					last := report.Snapshot.Attempts[requests[len(requests)-1].Identity.AttemptID]
+					if last.Output == nil || last.State != engine.Succeeded {
+						t.Fatal("ordinary semantic rejection lost committed Planner output")
+					}
+				}
+				if m6Name == "m6-report-postcommit-evidence" {
+					var c *contract.Error
+					if !errors.As(report.Failure, &c) || c.Code != contract.ReferenceInvalid || c.Phase != "read" || !strings.Contains(c.Message, "digest mismatch") {
+						t.Fatalf("wrong report evidence tamper boundary: %v", report.Failure)
 					}
 				}
 				if strings.Contains(m6Name, "no-report") && len(m6Tasks) != 0 {
@@ -8743,7 +9170,7 @@ func TestIntakeToContext(t *testing.T) {
 					}
 					if want == engine.WorkflowFailed {
 						wantText := map[string]string{
-							"m1-incomplete-no-gap": "complete/incomplete delivery with gaps", "m1-planner-invent-committed": "distinct workflow-accepted refs", "m1-query-utc": "UTC",
+							"m1-incomplete-no-gap": "complete/incomplete delivery with gaps", "m1-planner-invent-committed": "distinct workflow-accepted refs", "m1-query-utc": "supporting query requires a nonzero UTC window",
 							"m1-pending": "explicit proposed task ID", "m1-unsatisfied": "has no accepted result", "m1-redispatch": "task ID already completed",
 							"m1-reuse-id": "unique, uncompleted IDs", "m1-planner-drop": "worker_results differ from accepted deliveries", "m1-planner-invent": "distinct workflow-accepted refs",
 							"m1-task-id": "proposal/context/task/inputs mismatch", "m1-proposal": "proposal/context/task/inputs mismatch", "m1-context": "proposal/context/task/inputs mismatch", "m1-inputs": "proposal/context/task/inputs mismatch",

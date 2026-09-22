@@ -106,7 +106,8 @@ func TestTriageReportProjection(t *testing.T) {
 	for _, action := range []string{"unresolved", "handled", "redirect", "budget"} {
 		t.Run("M6-"+action, func(t *testing.T) {
 			p := projection
-			failure := RecoveryFailure{Stage: "verify-con", Diagnostic: "preserved original diagnostic"}
+			failure := RecoveryFailure{Stage: "verify-con", Diagnostic: "preserved original diagnostic", StepID: "RETAINED_FAILURE_STEP", AttemptID: "RETAINED_FAILURE_ATTEMPT"}
+			failure.Identity.HandleID = "RETAINED_FAILURE_HANDLE"
 			disposition := ReportDisposition{Item: ReportFailure{Owner: assessmentRef, Kind: "verification", DeliveryID: "old-delivery", Claim: &claimRef, Role: "con", Failure: failure}, Action: action, Reason: special, Results: []contract.Ref{}, Basis: basis}
 			if action == "handled" {
 				disposition.Results = []contract.Ref{resultRef}
@@ -125,7 +126,7 @@ func TestTriageReportProjection(t *testing.T) {
 			if err != nil || !bytes.Equal(got, again) || !bytes.Equal(before, testJSON(p)) {
 				t.Fatalf("M6 projection changed input or output: %v", err)
 			}
-			for _, value := range []string{"preserved original diagnostic", "preserved report retry diagnostic", "old-delivery", "Planner 處置", "處置依據", "最初接收此項目的歷史 owner"} {
+			for _, value := range []string{"RETAINED_FAILURE_STEP", "RETAINED_FAILURE_ATTEMPT", "RETAINED_FAILURE_HANDLE", "preserved original diagnostic", "preserved report retry diagnostic", "old-delivery", "Planner 處置", "處置依據", "最初接收此項目的歷史 owner"} {
 				if !bytes.Contains(got, []byte(value)) {
 					t.Errorf("M6 projection omitted %s", value)
 				}
@@ -151,7 +152,7 @@ func TestTriageReportOutputBoundary(t *testing.T) {
 		Meta: testJSON(map[string]any{"run_id": "run"}),
 		Data: InvestigationReport{State: stateRef, Context: contextRef, Claims: []ReportClaim{}, Completeness: "incomplete", Closure: "closure retained", Gaps: []string{"gap retained"}, NextSteps: []string{"next retained"}},
 		Documents: []reportDocument{
-			{stateRef, testJSON(map[string]any{"rationale": "rationale retained", "hypotheses": []any{}, "ledger": "PRIVATE_LEDGER", "checkpoint": "PRIVATE_CHECKPOINT", "pending": "PRIVATE_PENDING", "recovery": "PRIVATE_RECOVERY"})},
+			{stateRef, testJSON(map[string]any{"rationale": "rationale retained", "hypotheses": []any{}, "ledger": "PRIVATE_LEDGER", "checkpoint": "PRIVATE_CHECKPOINT", "pending": "PRIVATE_PENDING", "recovery": "PRIVATE_RECOVERY", "handle_id": "PRIVATE_HANDLE", "step": "PRIVATE_STEP"})},
 			{contextRef, testJSON(map[string]any{"problem": "problem retained", "identity": Identity{}, "time": TimeResolution{}, "attempts": "PRIVATE_ATTEMPTS", "previous": "PRIVATE_CONTEXT_CHAIN"})},
 		},
 	}
@@ -177,7 +178,7 @@ func TestTriageReportBufferCopyLimit(t *testing.T) {
 			buffer := &reportBuffer{limit: 8}
 			n, err := io.Copy(buffer, io.LimitReader(strings.NewReader(strings.Repeat("x", size)), int64(size)))
 			if size > 8 {
-				if err == nil || n > 8 {
+				if err == nil || err.Error() != "report renderer output limit exceeded" || n != 0 || buffer.buffer.Len() != 0 {
 					t.Fatalf("io.Copy bypassed limit: copied=%d error=%v", n, err)
 				}
 			} else if err != nil || n != int64(size) {
@@ -290,6 +291,11 @@ func TestTriageReportRendererFailures(t *testing.T) {
 				var exit *exec.ExitError
 				if !errors.As(err, &exit) || !exit.ProcessState.Exited() {
 					t.Fatalf("lost waited renderer exit: %v", err)
+				}
+				projection := reportProjection{Meta: testJSON(map[string]any{}), Data: InvestigationReport{State: contract.Ref{AttemptID: "missing-state"}, Context: contract.Ref{AttemptID: "missing-context"}}, Documents: []reportDocument{}}
+				out, err = renderReport(ctx, projection)
+				if out != nil || !errors.As(err, &exit) || !exit.ProcessState.Exited() || !strings.Contains(err.Error(), "report requires one exact input owner") {
+					t.Fatalf("missing owner did not reach document boundary: %v", err)
 				}
 			}
 		})
