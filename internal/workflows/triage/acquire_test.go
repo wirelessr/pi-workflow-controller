@@ -14,6 +14,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -741,53 +743,350 @@ func TestAcquireUnsafeURLs(t *testing.T) {
 }
 
 func TestAcquireCancellationDuringBody(t *testing.T) {
-	ctx, cancel := context.WithCancelCause(context.Background())
-	cause := errors.New("cancel streaming fixture")
-	defer cancel(cause)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"key":`)
-		w.(http.Flusher).Flush()
-		<-r.Context().Done()
-	}))
-	defer server.Close()
-	root := acquireRoot(t)
-	done := make(chan error, 1)
-	go func() {
-		_, _, err := acquireIntake(ctx, root, testScope(), acquisitionOptions{BaseURL: server.URL})
-		done <- err
-	}()
-	deadline := time.After(3 * time.Second)
-	tick := time.NewTicker(time.Millisecond)
-	defer tick.Stop()
-waiting:
-	for {
-		select {
-		case <-deadline:
-			cancel(cause)
-			t.Fatal("body did not reach evidence")
-		case <-tick.C:
-			info, err := os.Stat(filepath.Join(root, "evidence", "issue"))
-			if err == nil && info.Size() > 0 {
-				break waiting
+	for _, mode := range []string{"pure", "joined", "metadata-write", "joined-metadata-write"} {
+		t.Run(mode, func(t *testing.T) {
+			metadataFault := strings.Contains(mode, "metadata-write")
+			if metadataFault && acquireFileSizeSubprocess(t) {
+				return
 			}
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cause := errors.New("cancel streaming fixture")
+			other := errors.New("joined cancellation detail")
+			if strings.HasPrefix(mode, "joined") {
+				cause = errors.Join(cause, other)
+			}
+			defer cancel(cause)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, `{"key":`)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			}))
+			defer server.Close()
+			root := acquireRoot(t)
+			done := make(chan error, 1)
+			go func() {
+				_, _, err := acquireIntake(ctx, root, testScope(), acquisitionOptions{BaseURL: server.URL})
+				done <- err
+			}()
+			joined := false
+			defer func() {
+				cancel(cause)
+				if !joined {
+					select {
+					case <-done:
+					case <-time.After(3 * time.Second):
+						t.Error("acquisition cleanup did not join")
+					}
+				}
+			}()
+			deadline := time.After(3 * time.Second)
+			tick := time.NewTicker(time.Millisecond)
+			defer tick.Stop()
+		waiting:
+			for {
+				select {
+				case <-deadline:
+					cancel(cause)
+					t.Fatal("body did not reach evidence")
+				case <-tick.C:
+					info, err := os.Stat(filepath.Join(root, "evidence", "issue"))
+					if err == nil && info.Size() > 0 {
+						break waiting
+					}
+				}
+			}
+			if metadataFault {
+				signal.Ignore(syscall.SIGXFSZ)
+				var limit syscall.Rlimit
+				if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
+					t.Fatal(err)
+				}
+				restricted := limit
+				restricted.Cur = 0
+				if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &restricted); err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
+						t.Error(err)
+					}
+				}()
+			}
+			cancel(cause)
+			select {
+			case err := <-done:
+				joined = true
+				if metadataFault {
+					var diskError *os.PathError
+					if !errors.Is(err, cause) || !errors.Is(err, syscall.EFBIG) || !errors.As(err, &diskError) || diskError.Op != "write" || diskError.Path != filepath.Join("evidence", "acquisition-metadata") {
+						t.Errorf("cancel/metadata write chain lost: %T %v", err, err)
+					}
+					t.Logf("cause=%t EFBIG=%t metadata=%+v", errors.Is(err, cause), errors.Is(err, syscall.EFBIG), diskError)
+				} else if err != cause {
+					t.Errorf("cause changed: %v", err)
+				}
+				if strings.HasPrefix(mode, "joined") && !errors.Is(err, other) {
+					t.Error("joined cause detail lost")
+				}
+				t.Logf("identity=%t cause=%t joined-detail=%t", err == cause, errors.Is(err, cause), errors.Is(err, other))
+			case <-time.After(3 * time.Second):
+				t.Fatal("cancellation did not join")
+			}
+			raw, err := os.ReadFile(filepath.Join(root, "evidence", "issue"))
+			if err != nil || string(raw) != `{"key":` {
+				t.Fatalf("partial raw lost: %q %v", raw, err)
+			}
+			t.Logf("raw-prefix=%q raw-bytes=%d", raw, len(raw))
+			if metadataFault {
+				info, err := os.Stat(filepath.Join(root, "evidence", "acquisition-metadata"))
+				if err != nil || info.Size() != 0 {
+					t.Fatalf("metadata write fault did not leave reserved empty file: %v %v", info, err)
+				}
+				t.Logf("metadata-bytes=%d", info.Size())
+				return
+			}
+			metadata := acquireMetadata(t, root)
+			if !metadata.Partial || len(metadata.Records) != 1 || metadata.Records[0].HTTPStatus != 200 || metadata.Records[0].Source.FileID != "issue" || metadata.Records[0].Source.Status != "partial" || metadata.Records[0].Source.Reason != "acquisition interrupted" {
+				t.Fatalf("cancelled HTTP metadata lost: %+v", metadata)
+			}
+		})
+	}
+}
+
+// Re-execute only this case so file-size limits and SIGXFSZ never affect peers.
+func acquireFileSizeSubprocess(t *testing.T) bool {
+	t.Helper()
+	if os.Getenv("TRIAGE_TEST_FSIZE_CHILD") == t.Name() {
+		return false
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before, after syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &before); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^"+strings.ReplaceAll(t.Name(), "/", "$/^")+"$", "-test.v", "-test.timeout=20s")
+	cmd.Env = append(os.Environ(), "TRIAGE_TEST_FSIZE_CHILD="+t.Name())
+	cmd.WaitDelay = time.Second
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("isolated file-size fault test: %v\n%s", err, output)
+	} else {
+		t.Logf("isolated file-size fault test:\n%s", output)
+	}
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &after); err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("child changed parent file-size limit: %+v -> %+v", before, after)
+	}
+	t.Logf("child-waited=true parent-limit-unchanged=%t", before == after)
+	return true
+}
+
+func TestAcquireCancellationBeforeBody(t *testing.T) {
+	for _, phase := range []string{"pre", "headers"} {
+		for _, joinedCause := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/joined-%t", phase, joinedCause), func(t *testing.T) {
+				cause := errors.New("cancel before body")
+				other := errors.New("joined cancellation detail")
+				if joinedCause {
+					cause = errors.Join(cause, other)
+				}
+				ctx, cancel := context.WithCancelCause(context.Background())
+				defer cancel(cause)
+				requested := make(chan struct{}, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requested <- struct{}{}
+					<-r.Context().Done()
+				}))
+				defer server.Close()
+				root := acquireRoot(t)
+				if phase == "pre" {
+					cancel(cause)
+				}
+				done := make(chan error, 1)
+				go func() {
+					_, _, err := acquireIntake(ctx, root, testScope(), acquisitionOptions{BaseURL: server.URL})
+					done <- err
+				}()
+				joined := false
+				defer func() {
+					cancel(cause)
+					if !joined {
+						select {
+						case <-done:
+						case <-time.After(3 * time.Second):
+							t.Error("acquisition cleanup did not join")
+						}
+					}
+				}()
+				if phase == "headers" {
+					select {
+					case <-requested:
+					case <-time.After(3 * time.Second):
+						t.Fatal("request did not reach header barrier")
+					}
+					cancel(cause)
+				}
+				select {
+				case err := <-done:
+					joined = true
+					if err != cause || !errors.Is(err, cause) || joinedCause && !errors.Is(err, other) {
+						t.Fatalf("cause identity changed: %T %v", err, err)
+					}
+					t.Logf("identity=%t cause=%t joined-detail=%t", err == cause, errors.Is(err, cause), errors.Is(err, other))
+				case <-time.After(3 * time.Second):
+					t.Fatal("cancellation did not join")
+				}
+				entries, err := os.ReadDir(filepath.Join(root, "evidence"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if phase == "pre" {
+					if len(entries) != 0 || len(requested) != 0 {
+						t.Fatal("pre-cancel performed acquisition")
+					}
+				} else {
+					metadata := acquireMetadata(t, root)
+					if len(entries) != 1 || !metadata.Partial || len(metadata.Records) != 1 || metadata.Records[0].HTTPStatus != 0 || metadata.Records[0].Source.FileID != "" || metadata.Records[0].Source.Reason != "acquisition interrupted" {
+						t.Fatalf("header cancellation receipt: %+v", metadata)
+					}
+				}
+			})
 		}
 	}
-	cancel(cause)
-	select {
-	case err := <-done:
-		if err != cause {
-			t.Fatalf("cause changed: %v", err)
+}
+
+// Cancel only after the real external body supplies bytes, before the FS write.
+type cancellingAcquisitionBody struct {
+	io.Reader
+	cancel context.CancelCauseFunc
+	cause  error
+	bytes  int
+}
+
+func (r *cancellingAcquisitionBody) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.bytes += n
+	if n > 0 {
+		r.cancel(r.cause)
+	}
+	return n, err
+}
+
+func TestAcquireSaveCancellation(t *testing.T) {
+	for _, mode := range []string{"pure", "joined", "write-fault"} {
+		t.Run(mode, func(t *testing.T) {
+			if mode == "write-fault" && acquireFileSizeSubprocess(t) {
+				return
+			}
+			root := acquireRoot(t)
+			dir, err := os.OpenRoot(filepath.Join(root, "evidence"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer dir.Close()
+			options := acquisitionOptions{}
+			if err := options.limits(); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, "raw-prefix")
+			}))
+			defer server.Close()
+			base, _ := url.Parse(server.URL)
+			client := acquisitionClient(base, "")
+			defer client.CloseIdleConnections()
+			response, err := client.Get(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			cause := errors.New("cancel save fixture")
+			other := errors.New("joined save detail")
+			if mode == "joined" {
+				cause = errors.Join(cause, other)
+			}
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(cause)
+			a := intakeAcquirer{ctx: ctx, root: dir, options: options}
+			body := &cancellingAcquisitionBody{Reader: response.Body, cancel: cancel, cause: cause}
+			if mode == "write-fault" {
+				signal.Ignore(syscall.SIGXFSZ)
+				var limit syscall.Rlimit
+				if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
+					t.Fatal(err)
+				}
+				restricted := limit
+				restricted.Cur = 4
+				if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &restricted); err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
+						t.Error(err)
+					}
+				}()
+			}
+			source, err := a.save("body", body)
+			if context.Cause(ctx) != cause || body.bytes != len("raw-prefix") || source != acquired("body") || len(a.files) != 1 || a.files[0].Path != "evidence/body" {
+				t.Fatalf("save did not reach cancellation/write boundary: source=%+v bytes=%d cause=%v files=%v", source, body.bytes, context.Cause(ctx), a.files)
+			}
+			want := "raw-prefix"
+			if mode == "write-fault" {
+				var diskError *os.PathError
+				if !errors.Is(err, syscall.EFBIG) || !errors.As(err, &diskError) || diskError.Op != "write" || diskError.Path != filepath.Join(root, "evidence", "body") {
+					t.Errorf("save write error lost: %T %v", err, err)
+				}
+				want = "raw-"
+				t.Logf("EFBIG=%t write=%+v context-cause-identity=%t", errors.Is(err, syscall.EFBIG), diskError, context.Cause(ctx) == cause)
+			} else if err != cause || !errors.Is(err, cause) || mode == "joined" && !errors.Is(err, other) {
+				t.Errorf("pure save cancellation identity changed: %T %v", err, err)
+			}
+			raw, readErr := os.ReadFile(filepath.Join(root, "evidence", "body"))
+			if readErr != nil || string(raw) != want || a.total != int64(len(want)) {
+				t.Fatalf("save raw/accounting changed: raw=%q total=%d err=%v", raw, a.total, readErr)
+			}
+			t.Logf("identity=%t cause=%t raw=%q total=%d", err == cause, errors.Is(err, cause), raw, a.total)
+		})
+	}
+}
+
+func TestAcquireMetadataClosedFile(t *testing.T) {
+	root := acquireRoot(t)
+	dir, err := os.OpenRoot(filepath.Join(root, "evidence"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	options := acquisitionOptions{}
+	if err := options.limits(); err != nil {
+		t.Fatal(err)
+	}
+	a := intakeAcquirer{ctx: context.Background(), root: dir, options: options}
+	if err := a.reserveMetadata(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.metadata.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err = a.finishMetadata(&Intake{})
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok || len(joined.Unwrap()) != 2 || !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("metadata Write/Close errors lost: %T %v", err, err)
+	}
+	for i, op := range []string{"write", "close"} {
+		branch := joined.Unwrap()[i]
+		var pathError *os.PathError
+		if !errors.Is(branch, os.ErrClosed) || !errors.As(branch, &pathError) || pathError.Op != op || pathError.Path != a.metadata.Name() {
+			t.Errorf("metadata %s native error lost: %T %v", op, branch, branch)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("cancellation did not join")
-	}
-	raw, err := os.ReadFile(filepath.Join(root, "evidence", "issue"))
-	if err != nil || string(raw) != `{"key":` {
-		t.Fatalf("partial raw lost: %q %v", raw, err)
-	}
-	metadata := acquireMetadata(t, root)
-	if !metadata.Partial || len(metadata.Records) != 1 || metadata.Records[0].HTTPStatus != 200 || metadata.Records[0].Source.FileID != "issue" || metadata.Records[0].Source.Status != "partial" || metadata.Records[0].Source.Reason != "acquisition interrupted" {
-		t.Fatalf("cancelled HTTP metadata lost: %+v", metadata)
+		t.Logf("branch=%d op=%s ErrClosed=%t native=%+v", i, op, errors.Is(branch, os.ErrClosed), pathError)
 	}
 }
 

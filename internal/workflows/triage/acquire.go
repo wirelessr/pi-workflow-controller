@@ -221,7 +221,11 @@ func (a *intakeAcquirer) save(id string, r io.Reader) (s Source, err error) {
 	}
 	s = acquired(id)
 	a.files = append(a.files, file{ID: id, Kind: "evidence", Path: "evidence/" + id})
-	defer func() { err = errors.Join(err, f.Close()) }()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	remaining := min(a.options.MaxBytes, a.options.MaxTotalBytes-a.total)
 	buffer := make([]byte, 32<<10)
 	for {
@@ -433,10 +437,16 @@ func acquireIntake(ctx context.Context, root string, scope Scope, options acquis
 		return
 	}
 	defer func() {
-		err = errors.Join(err, a.finishMetadata(&v))
+		if metadataErr := a.finishMetadata(&v); metadataErr != nil {
+			err = errors.Join(err, metadataErr)
+		}
 		files = a.files
 		if cause := context.Cause(ctx); cause != nil {
-			err = cause
+			if err == nil {
+				err = cause
+			} else if !errors.Is(err, cause) {
+				err = errors.Join(err, cause)
+			}
 		}
 	}()
 	canonical := base.Scheme + "://" + base.Host
