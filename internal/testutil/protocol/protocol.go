@@ -9,10 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"testing"
 	"time"
 
 	"pi-workflow-controller/internal/contract"
@@ -22,10 +25,61 @@ type Control struct {
 	Type          string
 	PID           int
 	History       string
+	CWD           string
 	SessionID     string
 	RequestPath   string
 	CandidatePath string
 	Data          json.RawMessage `json:",omitempty"`
+}
+
+// SourceWorkspace checks plumbing only, not an Agent filesystem sandbox.
+func SourceWorkspace(t testing.TB) string {
+	t.Helper()
+	parent := t.TempDir()
+	for _, name := range []string{"service", "sibling"} {
+		dir := filepath.Join(parent, name)
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		for file, body := range map[string]string{"AGENTS.md": "Anonymous read-only source context. Write only to the supplied run workspace.\n", "source.txt": name + " sentinel\n"} {
+			if err := os.WriteFile(filepath.Join(dir, file), []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	snapshot := func() map[string]string {
+		result := map[string]string{}
+		err := filepath.WalkDir(parent, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			value := info.Mode().String()
+			if !entry.IsDir() {
+				body, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				value += fmt.Sprintf(":%x", sha256.Sum256(body))
+			}
+			result[path] = value
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	before := snapshot()
+	t.Cleanup(func() {
+		if !reflect.DeepEqual(before, snapshot()) {
+			t.Error("source workspace or sibling shape/content/modes changed")
+		}
+	})
+	return filepath.Join(parent, "service")
 }
 
 type Data struct {
@@ -76,7 +130,11 @@ func Serve() error {
 	}
 	defer func(file *os.File) { _ = file.Close() }(file)
 	historyOut := json.NewEncoder(file)
-	if err := controlOut.Encode(Control{Type: "hello", PID: os.Getpid(), History: history, SessionID: sid}); err != nil {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	if err := controlOut.Encode(Control{Type: "hello", PID: os.Getpid(), History: history, CWD: cwd, SessionID: sid}); err != nil {
 		return err
 	}
 	in, out := json.NewDecoder(os.Stdin), json.NewEncoder(os.Stdout)

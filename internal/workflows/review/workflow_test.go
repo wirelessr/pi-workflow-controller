@@ -206,7 +206,7 @@ func newWorkflowFixtureFromSeed(t *testing.T, scenario workflowScenario, seed *a
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.run, err = engine.New(ctx, definition, engine.Input{Prompt: "https://github.com/owner/repo/pull/17/", LaunchCWD: dir}, engine.Options{BaseDir: baseDir, Schemas: registry, Runtime: f.runtime, PiVersion: "0.84.3"})
+	f.run, err = engine.New(ctx, definition, engine.Input{Prompt: "https://github.com/owner/repo/pull/17/", LaunchCWD: dir}, engine.Options{BaseDir: baseDir, Schemas: registry, Runtime: f.runtime, PiVersion: "0.84.3", PiDefaultCWD: filepath.Join(dir, "unused-missing-default")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,6 +227,9 @@ func (f *workflowFixture) next(kind string) workflowControl {
 			}
 			if event.Message.Type == "hello" {
 				hello := event.Message
+				if hello.CWD != filepath.Join(f.run.Dir(), "review-work") {
+					f.t.Fatal("review explicit cwd was replaced by default")
+				}
 				if f.hellos[hello.SessionID].SessionID != "" {
 					f.t.Fatal("session reused")
 				}
@@ -244,6 +247,11 @@ func (f *workflowFixture) next(kind string) workflowControl {
 			if kind == "prompt" {
 				if err := protocol.ReadJSON(event.Message.RequestPath, &event.request); err != nil {
 					f.t.Fatal(err)
+				}
+				snapshot := f.run.Snapshot()
+				handle := snapshot.Attempts[event.request.Identity.AttemptID].HandleID
+				if snapshot.Sessions[handle].Role.CWD != filepath.Join(f.run.Dir(), "review-work") {
+					f.t.Fatal("review persisted Role.CWD differs from explicit workspace")
 				}
 				prompt := event.request.Prompt
 				if err := json.Unmarshal([]byte(prompt[strings.LastIndex(prompt, "\n")+1:]), &event.task); err != nil {

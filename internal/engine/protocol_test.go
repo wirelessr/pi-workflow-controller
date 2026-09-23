@@ -154,7 +154,280 @@ func TestEngineProtocolPreflightAccounting(t *testing.T) {
 	}
 }
 
+func TestEngineProtocolLegacyNULCWD(t *testing.T) {
+	for _, name := range []string{"explicitabsNUL", "LaunchabsNUL"} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			bridge := filepath.Join(base, "bridge")
+			if err := os.Mkdir(bridge, 0700); err != nil {
+				t.Fatal(err)
+			}
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			schemas, err := contract.NewRegistry(nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			badCWD := base + "\x00"
+			input := engine.Input{Prompt: "anonymous legacy cwd", LaunchCWD: base}
+			role := engine.RoleSpec{Name: "worker", Model: runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}}
+			if name == "explicitabsNUL" {
+				role.CWD = badCWD
+			} else {
+				input.LaunchCWD = badCWD
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			definition := engine.Definition{Name: "legacy-cwd", Version: "v1", Policy: engine.DefaultRunPolicy(), Execute: func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
+				h, err := r.OpenSession(ctx, role)
+				if h != nil || err == nil {
+					return engine.Result{}, fmt.Errorf("invalid cwd accepted: handle=%v error=%v", h, err)
+				}
+				return engine.Result{}, err
+			}}
+			r, err := engine.New(ctx, definition, input, engine.Options{BaseDir: base, Schemas: schemas, RuntimeOptions: runtime.Options{
+				Executable: executable, Args: []string{"-test.run=^TestEngineProtocolSubprocess$", "--"}, Env: []string{"PWC_ENGINE_PROTOCOL=1", "GORACE=atexit_sleep_ms=0"}, BridgeDir: bridge,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			report := r.Execute()
+			var failure *runtime.Failure
+			if !errors.As(report.Failure, &failure) {
+				t.Fatalf("missing typed failure: %+v", report)
+			}
+			var persisted engine.Snapshot
+			if err := protocol.ReadJSON(filepath.Join(r.Dir(), "run.json"), &persisted); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(filepath.Join(r.Dir(), "events.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoder := json.NewDecoder(strings.NewReader(string(raw)))
+			var starts, closes []string
+			for {
+				var event struct {
+					Kind    string `json:"kind"`
+					Details struct {
+						HandleID string          `json:"handle_id"`
+						Role     engine.RoleSpec `json:"role"`
+					} `json:"details"`
+				}
+				if err := decoder.Decode(&event); errors.Is(err, io.EOF) {
+					break
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if event.Kind == "SessionStarting" {
+					starts = append(starts, event.Details.HandleID)
+					if event.Details.Role.CWD != badCWD {
+						t.Fatal("journal changed legacy cwd")
+					}
+				}
+				if event.Kind == "SessionClosed" {
+					closes = append(closes, event.Details.HandleID)
+				}
+			}
+			observed, err := json.Marshal(map[string]any{
+				"typedCode": failure.Code, "phase": failure.Phase, "origin": failure.Origin, "dispatchAccepted": failure.DispatchAccepted,
+				"sessionstarting": len(starts), "closed": len(closes), "sessions": len(persisted.Sessions), "attempts": len(persisted.Attempts), "cleanup": report.Cleanup,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("legacy cwd observation: %s", observed)
+			if report.Outcome != engine.Failed || report.ExitCode != 1 || len(report.CleanupErrors) != 0 || len(report.FinalizationErrors) != 0 {
+				t.Fatalf("legacy cwd outcome: %+v", report)
+			}
+			if failure.Code != runtime.StartFailed || failure.Phase != "spawn" || failure.Origin != runtime.Protocol || failure.DispatchAccepted != runtime.AcceptedNo || failure.HandleID == "" || failure.Cause == nil {
+				t.Fatalf("legacy cwd failure moved before runtime spawn: %+v", failure)
+			}
+			if !reflect.DeepEqual(persisted.Sessions, report.Snapshot.Sessions) || persisted.Input != input || len(persisted.Attempts) != 0 || len(persisted.Sessions) != 1 {
+				t.Fatal("legacy cwd lost persisted input/session/attempt accounting")
+			}
+			if len(starts) != 1 || len(closes) != 1 || starts[0] != failure.HandleID || closes[0] != failure.HandleID || persisted.Sessions[failure.HandleID].State != "Closed" || persisted.Sessions[failure.HandleID].Role.CWD != badCWD {
+				t.Fatal("legacy cwd lost allocated and closed handle")
+			}
+			if info, err := os.Stat(filepath.Join(r.Dir(), "sessions", failure.HandleID, "pi")); err != nil || !info.IsDir() {
+				t.Fatalf("legacy cwd did not reach persistent spawn: %v", err)
+			}
+			if len(report.Cleanup) != 1 {
+				t.Fatalf("legacy cwd cleanup count: %d", len(report.Cleanup))
+			}
+			for _, cleanup := range report.Cleanup {
+				if cleanup.WaitCompleted || cleanup.ProcessExited || cleanup.Identity.PID != 0 || len(cleanup.Unconfirmed) != 0 || cleanup.WaitError != "" || cleanup.KillError != "" || cleanup.DiscoveryError != "" {
+					t.Fatalf("legacy cwd invented process cleanup/Wait: %+v", cleanup)
+				}
+			}
+		})
+	}
+}
+
+func TestEngineProtocolCWD(t *testing.T) {
+	for _, name := range []string{"launch", "default", "explicit", "relative", "space", "tilde", "null", "missing", "file", "nul", "nul-clean", "unused-missing", "unused-file", "unused-nul"} {
+		t.Run(name, func(t *testing.T) {
+			service := protocol.SourceWorkspace(t)
+			launch := filepath.Dir(service)
+			base := t.TempDir()
+			bridge := filepath.Join(base, "bridge")
+			if err := os.Mkdir(bridge, 0700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			host, err := protocol.NewHost(ctx, 8)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := host.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			schemas, err := contract.NewRegistry(nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defaultCWD, explicit, want := service, "", service
+			bad := ""
+			switch name {
+			case "launch":
+				defaultCWD, want = "", launch
+			case "explicit":
+				explicit, want = filepath.Join(launch, "sibling"), filepath.Join(launch, "sibling")
+			case "relative":
+				defaultCWD = "service"
+			case "space", "tilde", "null":
+				defaultCWD = map[string]string{"space": " service ", "tilde": "~", "null": "null"}[name]
+				// These names are literal, not configuration sentinels.
+				launch = t.TempDir()
+				want = filepath.Join(launch, defaultCWD)
+				if err := os.Mkdir(want, 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "missing", "unused-missing":
+				defaultCWD, bad = filepath.Join(base, "absent"), "spawn"
+			case "file", "unused-file":
+				defaultCWD, bad = filepath.Join(service, "source.txt"), "spawn"
+			case "nul", "unused-nul":
+				defaultCWD, bad = service+"\x00", "definition"
+			case "nul-clean":
+				defaultCWD, bad = "\x00/../service", "definition"
+			}
+			if strings.HasPrefix(name, "unused-") {
+				explicit, want, bad = service, service, ""
+			}
+			role := engine.RoleSpec{Name: "worker", CWD: explicit, Model: runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}}
+			originalRole := role
+			input := engine.Input{Prompt: "anonymous cwd", LaunchCWD: launch}
+			originalInput := input
+			policy := engine.DefaultRunPolicy()
+			var hellos []protocol.Control
+			definition := engine.Definition{Name: "cwd", Version: "v1", Policy: policy, Execute: func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
+				for range 2 {
+					h, err := r.OpenSession(ctx, role)
+					if bad != "" {
+						var f *runtime.Failure
+						if h != nil || !errors.As(err, &f) {
+							return engine.Result{}, fmt.Errorf("bad cwd accepted: %v", err)
+						}
+						if bad == "spawn" && (f.Code != runtime.StartFailed || f.Phase != "spawn" || f.DispatchAccepted != runtime.AcceptedNo || f.HandleID == "" || f.Cause == nil) {
+							return engine.Result{}, fmt.Errorf("lost spawn failure: %+v", f)
+						}
+						if bad == "definition" && f.Code != runtime.InvalidDefinition {
+							return engine.Result{}, fmt.Errorf("invalid NUL: %+v", f)
+						}
+						return engine.Result{}, err
+					}
+					if err != nil {
+						return engine.Result{}, err
+					}
+					select {
+					case event := <-host.Events():
+						if event.Err != nil || event.Message.Type != "hello" || event.Message.CWD != want {
+							return engine.Result{}, fmt.Errorf("actual child cwd: %+v %v, want %q", event.Message, event.Err, want)
+						}
+						hellos = append(hellos, event.Message)
+					case <-ctx.Done():
+						return engine.Result{}, context.Cause(ctx)
+					}
+					closed, err := r.CloseSessionReport(ctx, h)
+					if err != nil || !closed.ConfirmsLocalClose(hellos[len(hellos)-1].SessionID) {
+						return engine.Result{}, fmt.Errorf("close/Wait not confirmed: %+v %v", closed, err)
+					}
+				}
+				return engine.Result{}, nil
+			}}
+			opts := engine.Options{BaseDir: base, Schemas: schemas, PiDefaultCWD: defaultCWD, RuntimeOptions: runtime.Options{Executable: executable, Args: []string{"-test.run=^TestEngineProtocolSubprocess$", "--"}, Env: []string{"PWC_ENGINE_PROTOCOL=1", "PWC_ENGINE_CONTROL=" + host.Addr().String(), "GORACE=atexit_sleep_ms=0"}, BridgeDir: bridge}}
+			t.Chdir(t.TempDir())
+			r, err := engine.New(ctx, definition, input, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts.PiDefaultCWD, input.LaunchCWD = "changed-after-New", base
+			t.Setenv("PWC_PI_CWD", "engine-must-not-read-env")
+			t.Chdir(t.TempDir())
+			report := r.Execute()
+			if (report.ExitCode != 0) != (bad != "") || len(report.CleanupErrors) != 0 || len(report.FinalizationErrors) != 0 {
+				t.Fatalf("cwd outcome: %+v", report)
+			}
+			if bad != "" {
+				var failure *runtime.Failure
+				wantCode := runtime.StartFailed
+				if bad == "definition" {
+					wantCode = runtime.InvalidDefinition
+				}
+				if !errors.As(report.Failure, &failure) || failure.Code != wantCode {
+					t.Fatalf("incorrect cwd rejection: %v", report.Failure)
+				}
+			}
+			if role != originalRole || report.Snapshot.Input != originalInput {
+				t.Fatal("caller role or immutable input changed")
+			}
+			var persisted engine.Snapshot
+			if err := protocol.ReadJSON(filepath.Join(r.Dir(), "run.json"), &persisted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(persisted.Sessions, report.Snapshot.Sessions) || persisted.Input != originalInput || len(persisted.Attempts) != 0 {
+				t.Fatal("persisted effective role/input/accounting mismatch")
+			}
+			count := 2
+			if bad == "spawn" {
+				count, want = 1, defaultCWD
+			} else if bad == "definition" {
+				count = 0
+			}
+			if len(persisted.Sessions) != count {
+				t.Fatalf("session count=%d, want %d", len(persisted.Sessions), count)
+			}
+			for _, session := range persisted.Sessions {
+				if session.Role.CWD != want || session.State != "Closed" {
+					t.Fatalf("persisted session cwd/close: %+v", session)
+				}
+			}
+			if bad == "" && (len(hellos) != 2 || hellos[0].SessionID == hellos[1].SessionID) {
+				t.Fatal("fresh session not exercised")
+			}
+			if bad != "" {
+				for _, cleanup := range report.Cleanup {
+					if cleanup.WaitCompleted || cleanup.ProcessExited || cleanup.Identity.PID != 0 {
+						t.Fatal("spawn rejection invented process Wait")
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestEngineProtocolHandoff(t *testing.T) {
+	service := protocol.SourceWorkspace(t)
 	for _, mode := range []string{"usage", "attempt-timeout", "cleanup-error"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
@@ -286,7 +559,7 @@ func TestEngineProtocolHandoff(t *testing.T) {
 				}
 				return engine.Result{Outputs: map[string]contract.Ref{"final": resumed.Output}}, nil
 			}}
-			run, err = engine.New(ctx, definition, engine.Input{Prompt: "handoff", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: schemas, Runtime: pi})
+			run, err = engine.New(ctx, definition, engine.Input{Prompt: "handoff", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: schemas, Runtime: pi, PiDefaultCWD: service})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -330,6 +603,9 @@ func TestEngineProtocolHandoff(t *testing.T) {
 					return c
 				}
 				hello := next("hello")
+				if hello.CWD != service {
+					t.Fatalf("handoff child cwd=%q, want %q", hello.CWD, service)
+				}
 				hellos = append(hellos, hello)
 				if session == 1 {
 					select {

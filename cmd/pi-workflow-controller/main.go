@@ -81,6 +81,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, opts cliOptio
 	signals := make(chan os.Signal, 8)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
+	opts.engine.PiDefaultCWD = os.Getenv("PWC_PI_CWD")
 	opts.engine.Schemas = schemas
 	opts.engine.ControllerVersion = "M6"
 	opts.engine.PiVersion = "0.84.3"

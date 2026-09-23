@@ -17,6 +17,7 @@ import (
 )
 
 func TestCLIPreflightDoesNotCreateTaskOrStartPi(t *testing.T) {
+	t.Setenv("PWC_PI_CWD", filepath.Join(t.TempDir(), "missing"))
 	for _, tc := range []struct {
 		name   string
 		args   []string
@@ -31,6 +32,7 @@ func TestCLIPreflightDoesNotCreateTaskOrStartPi(t *testing.T) {
 		{name: "extra prompt", args: []string{"run", "protocol", "hello", "extra"}, want: "Usage:"},
 		{name: "task flag", args: []string{"run", "protocol", "hello", "--task", "named"}, want: "Usage:"},
 		{name: "input flag", args: []string{"run", "protocol", "--input", "task.json"}, want: "Usage:"},
+		{name: "cwd flag", args: []string{"run", "--pi-cwd", "/source", "protocol", "hello"}, want: "Usage:"},
 		{name: "unknown workflow", args: []string{"run", "unknown", "hello"}, want: "unknown workflow"},
 		{name: "empty registry", args: []string{"run", "protocol", "hello"}, change: func(o *cliOptions) { o.definitions = nil }, want: "unknown workflow"},
 		{name: "empty prompt", args: []string{"run", "protocol", ""}, want: "nonempty"},
@@ -152,6 +154,7 @@ func TestCLITriageMalformedInput(t *testing.T) {
 }
 
 func TestCLIList(t *testing.T) {
+	t.Setenv("PWC_PI_CWD", filepath.Join(t.TempDir(), "missing"))
 	for _, empty := range []bool{true, false} {
 		name := "sorted and safe"
 		if empty {

@@ -51,6 +51,7 @@ type reportOwner struct {
 }
 
 type reportTask struct {
+	Workspace    string              `json:"workspace"`
 	Request      string              `json:"request,omitempty"`
 	Stage        string              `json:"stage"`
 	State        contract.Ref        `json:"state"`
@@ -64,7 +65,7 @@ type reportTask struct {
 
 // reportInputs follows committed lineage, not directory order or session memory.
 func (p *plannerCaller) reportInputs(a *acceptance) (reportTask, []contract.Ref, error) {
-	task := reportTask{Request: p.request, Stage: "planner-report", State: *p.last, Context: p.history.ref, Assessments: []ReportClaim{}, Owners: []reportOwner{}}
+	task := reportTask{Workspace: filepath.Join(p.r.Dir(), "triage-work"), Request: p.request, Stage: "planner-report", State: *p.last, Context: p.history.ref, Assessments: []ReportClaim{}, Owners: []reportOwner{}}
 	inputs := []contract.Ref{*p.last, p.history.ref}
 	seen := map[contract.Ref]bool{}
 	for ref := p.last; ref != nil; {
@@ -173,6 +174,7 @@ func (p *plannerCaller) reportInScope(ctx context.Context, executionScope *engin
 		task.Requirements += "\nM6 finalization: reconstruct every supplied historical owner and pending recovery/verification/controller feedback, including failures for claims you do not select. Supply m6.dispositions for every exact item in m6.failures once, without changing owner, delivery, claim, role, index or failure. Declare action unresolved (retain incomplete and no results), handled (cite subsequent supplied results of the same failed work: the actual Planner/claim retry key and claim parent; the original worker task or wiki task through an explicit resume proposal; or the successful support delivery retaining original proposal/context/work, accepted phases and resume authorization; verification retains the exact claim version and role. A receiving Planner snapshot or an unrelated result is not a worker/wiki/support completion. If this continuation cannot be shown, use unresolved or evidence-backed redirect), or redirect (explain why no longer needed using nonempty supplied evidence basis, without claiming success). Include reason, results and basis arrays for each. Necessity and applicability are your judgments; do not infer confirmation from support text, source schemas or votes. Echo m6.report_failures and m6.budget exactly. These report retry failures remain history even when this report succeeds. A nonnull budget requires resource-limited incomplete closure using the last accepted state, not a new ledger yield or a new claim. A handled disposition does not alter any historical diagnostic or assessment. No extra planning, acquisition or verification is authorized by this report task."
 		p.reporting.pending.Inputs = slices.Clone(inputs)
 	}
+	task.Requirements += "\n" + triageWorkspaceRequirements
 	prompt, err := json.Marshal(task)
 	if err != nil {
 		return contract.Ref{}, err

@@ -28,6 +28,14 @@ Agent 先載入既有領域 skill，沿用其中的 scripts、CLI、REST 與其�
 
 完整任務內的取得與更新由 Agent 自主處理，不把新發現的附件或 linked issue 拆成逐項審批。Controller 接版本、ownership、歷史與下游 dependencies；Agent 判斷替換意義、分析適用性及剩餘工作。明列 selectors 的局部補取仍可使用，但不是所有更新工作的唯一入口。
 
+## Pi source cwd 與輸出 workspace
+
+Triage 的 slice、worker、Planner、claim／report 所重用的 Planner，以及 fresh／recovery／pro／con／cross session 均沿 engine 的一般 cwd fallback。CLI `PWC_PI_CWD` 可指定 source cwd；未設定時使用 Controller LaunchCWD，不再將 Pi 強制放在 `run/triage-work`。正常 AGENTS／skills 發現仍由 Pi 負責，不新增 loader、共通 runtime prompt 或工具權限層。
+
+`executeSlice` 仍實際建立 `run/triage-work`。各角色任務 payload 的 `workspace` 明交該絕對目錄，用於 scratch／downloads；既有 requirements 說明 cwd 與 sibling repositories 唯讀，且不得擴張本角色的 evidence／acquisition scope。Verifier 仍只讀原 claim／allowed evidence。這些欄位是工作資料，不更改業務 output contracts，也不使 scratch 成為 committed evidence。
+
+Step request／candidate／evidence、renderer 與 committed Refs 繼續使用原本的絕對 run-owned paths。Fresh task 同樣明交 workspace，不靠前一 session 記憶或 cwd 猜路徑。匿名 subprocess 測試只證明 cwd、workspace、持久化及原交接接線，不證明真 Agent 永不寫來源 repository；唯讀要求不是 sandbox。
+
 ## 產品輸入與原始 request
 
 既有 CLI `run jira-triage "Prompt"` 的單一 Prompt 是 workflow-local JSON envelope，包含 `scope` 與 `request`；不新增 CLI config/input-file flags 或 launcher。Scope 欄位為 `ticket`、`stack`、`pop`、`binding`、`tenant_ids`，代表 caller 授權邊界而非已確認身份。自然語言 request 必須非空白，其內容、首尾空白、Unicode 與 JSON escape 解碼後的換行原樣保留。

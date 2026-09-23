@@ -20,6 +20,7 @@
 | 能力 | 現有入口／位置 | 決策 |
 |---|---|---|
 | Run、session、Step 與 limits | `engine/api.go`、`session.go`、`step.go`、`policy.go`；`Run.SessionIdentity` 讀 owned committed identity；`Run.WorkflowInput` 以值回傳 immutable workflow/input | 直接重用；M4 dispatch 前身份沿中性入口，不另造 session driver／會計；`callerRequest` 使用 input 投影，無需複製歷史 |
+| Pi 預設 cwd | `engine.Options.PiDefaultCWD`／`Run.OpenSession` → `runtime.SessionSpec.CWD` | CLI run 讀 `PWC_PI_CWD`，engine 在 New 依 LaunchCWD 固定相對值；triage／smoke 沿 fallback，review explicit workspace 保留，僅選用的 default NUL 提前拒絕，explicit Role.CWD／fallback LaunchCWD 保留原 runtime 驗證與會計。Task workspace 與來源唯讀要求留 triage，不新增 runtime prompt 或 sandbox |
 | Child、Parallel、Retry、Decision | `engine/scope.go` | 直接重用；workflow 決定批次、依賴及可重做分支 |
 | Stage／Confirm／Publish、committed resolver | `contract/`、`engine/resolve.go`、`step.go` | 直接重用；禁止第二個 Store／commit／journal |
 | Result／FinalSelection／FinalDelivery | `engine/api.go`、`resolve.go`、`run.go` | 直接重用；禁止另一個 final artifact registry |

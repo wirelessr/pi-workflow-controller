@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"slices"
 
 	"pi-workflow-controller/internal/contract"
@@ -174,13 +175,14 @@ func (p *plannerCaller) searchWiki(ctx context.Context, models sliceModels) (con
 	}
 	inputs := appendSourceInputs([]contract.Ref{*p.last, p.history.ref}, sources)
 	request := struct {
+		Workspace    string                `json:"workspace"`
 		Stage        string                `json:"stage"`
 		Scope        Scope                 `json:"scope"`
 		Intake       contract.Ref          `json:"intake"`
 		Task         InvestigationWikiTask `json:"task"`
 		Binding      WikiTaskBinding       `json:"binding"`
 		Requirements string                `json:"requirements"`
-	}{"wiki-investigation", p.scope, p.history.value.Intake, *state.Data.WikiTask, WikiTaskBinding{*p.last, p.history.ref, state.Data.WikiTask.ID, inputs}, investigationWikiRequirements}
+	}{filepath.Join(p.r.Dir(), "triage-work"), "wiki-investigation", p.scope, p.history.value.Intake, *state.Data.WikiTask, WikiTaskBinding{*p.last, p.history.ref, state.Data.WikiTask.ID, inputs}, investigationWikiRequirements}
 	key := "investigation-wiki-" + p.last.AttemptID
 	if err := p.r.Root().Decision(ctx, key+"-dispatch", "Dispatch explicit investigation wiki task", inputs); err != nil {
 		return contract.Ref{}, err
@@ -188,6 +190,7 @@ func (p *plannerCaller) searchWiki(ctx context.Context, models sliceModels) (con
 	if p.recovery != nil {
 		request.Requirements += "\nRead the exact proposal recovery metadata and choices. Do not repeat a failed search or submit remote work unless the Agent has supplied an evidence-backed safe resume or nonoverlapping redirect. Preserve the original failed proposal/task and diagnostic binding in recovery metadata; this attempt has its own binding."
 	}
+	request.Requirements += "\n" + triageWorkspaceRequirements
 	ref, err := taskStepRecovery(ctx, p.r, p.r.Root(), models.Analysis, request.Stage, key, request, WikiSchema, inputs, p.recovery != nil)
 	if err != nil {
 		if p.recovery == nil {

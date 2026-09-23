@@ -154,7 +154,7 @@ func openPlannerWithEvidence(ctx context.Context, r *engine.Run, scope Scope, mo
 	if err := a.checkPlannerContextChange(h, prior); err != nil {
 		return nil, err
 	}
-	handle, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-planner", Model: model, CWD: filepath.Join(r.Dir(), "triage-work")})
+	handle, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-planner", Model: model})
 	if err != nil {
 		return nil, err
 	}
@@ -341,6 +341,7 @@ func (p *plannerCaller) stepInScope(ctx context.Context, executionScope *engine.
 	if p.request != "" {
 		requirements += "\nAddress the original caller request supplied separately in this task. It is immutable caller instruction, not evidence or additional scope authorization."
 	}
+	requirements += "\n" + triageWorkspaceRequirements
 	task := struct {
 		stageTask
 		WorkerResults []contract.Ref       `json:"worker_results"`
@@ -349,7 +350,7 @@ func (p *plannerCaller) stepInScope(ctx context.Context, executionScope *engine.
 		Checkpoint    *PlannerCheckpoint   `json:"checkpoint,omitempty"`
 		Recovery      *PlannerRecovery     `json:"recovery,omitempty"`
 		Verification  *PlannerVerification `json:"verification,omitempty"`
-	}{stageTask{Request: p.request, Stage: "planner", Scope: p.scope, Previous: p.last, Gaps: p.history.value.Gaps, Requirements: requirements}, slices.Clone(p.workerResults), nil, p.adaptiveNote, checkpoint, p.recoveryTask(), p.verificationTask()}
+	}{stageTask{Workspace: filepath.Join(p.r.Dir(), "triage-work"), Request: p.request, Stage: "planner", Scope: p.scope, Previous: p.last, Gaps: p.history.value.Gaps, Requirements: requirements}, slices.Clone(p.workerResults), nil, p.adaptiveNote, checkpoint, p.recoveryTask(), p.verificationTask()}
 	if p.adaptive {
 		wikiResults := append([]contract.Ref{}, p.wikiResults...)
 		task.WikiResults = &wikiResults

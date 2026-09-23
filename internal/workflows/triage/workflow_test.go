@@ -1815,7 +1815,7 @@ func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stag
 		if delivered.Recovery == nil || !strings.Contains(task.Requirements, recoveryRequirements) || (!product && delivered.Checkpoint != nil) {
 			t.Fatal("M6 omitted explicit recovery or invented capacity")
 		}
-	} else if task.Requirements != plannerRequirements+"\n\n"+adaptiveRequirements || delivered.Checkpoint != nil {
+	} else if task.Requirements != plannerRequirements+"\n\n"+adaptiveRequirements+"\n"+triageWorkspaceRequirements || delivered.Checkpoint != nil {
 		t.Fatal("adaptive Planner lost its requirements or nil policy gained checkpoint requirements")
 	}
 	previousWorkers, previousWikis := len(v.WorkerResults), len(v.WikiResults)
@@ -2386,7 +2386,7 @@ func m2WikiFixture(t *testing.T, name string, req contract.Request) (WikiSearch,
 	if strings.HasPrefix(name, "m4-") || strings.HasPrefix(name, "m5-supplement-reframe-") {
 		requirements += "\nRead the exact proposal recovery metadata and choices. Do not repeat a failed search or submit remote work unless the Agent has supplied an evidence-backed safe resume or nonoverlapping redirect. Preserve the original failed proposal/task and diagnostic binding in recovery metadata; this attempt has its own binding."
 	}
-	if !slices.Equal(task.Binding.Inputs, req.Inputs) || !slices.Contains(req.Inputs, task.Binding.Proposal) || !slices.Contains(req.Inputs, task.Binding.Context) || task.Requirements != requirements {
+	if !slices.Equal(task.Binding.Inputs, req.Inputs) || !slices.Contains(req.Inputs, task.Binding.Proposal) || !slices.Contains(req.Inputs, task.Binding.Context) || task.Requirements != requirements+"\n"+triageWorkspaceRequirements {
 		t.Fatal("wiki task lost exact binding/requirements")
 	}
 	mode := "complete"
@@ -2772,6 +2772,7 @@ func r5Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, input 
 			return state, contract.Ref{}, openErr
 		}
 		task.Renderer = renderer
+		task.Requirements += "\n" + triageWorkspaceRequirements
 		out, stepErr := r.Root().Step(ctx, engine.StepSpec{Key: "report-" + state.AttemptID, Session: foreign.handle, Prompt: string(testJSON(task)), Inputs: inputs, Output: contract.Spec{SchemaID: ReportSchema}, Timeout: time.Minute})
 		if stepErr != nil {
 			return state, contract.Ref{}, stepErr
@@ -3057,7 +3058,7 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 				if strings.Contains(name, "verifier-owner") {
 					model, role, key = verification.Pro.Model, "triage-verify-pro", "verify-"+validClaim.AttemptID+"-pro"
 					inputs = claimInputs(validClaim, claim)
-					task := map[string]any{"stage": "verify-pro", "role": "pro", "claim": validClaim, "allowed_evidence": claim.Candidate.AllowedEvidence, "requirements": verifierRequirements}
+					task := map[string]any{"stage": "verify-pro", "role": "pro", "claim": validClaim, "allowed_evidence": claim.Candidate.AllowedEvidence, "requirements": verifierRequirements + "\n" + triageWorkspaceRequirements, "workspace": filepath.Join(r.Dir(), "triage-work")}
 					valid, err := taskStepRecovery(ctx, r, r.Root(), model, "verify-pro", key, task, VerificationSchema, inputs, true)
 					if err != nil {
 						return contract.Ref{}, err
@@ -3077,7 +3078,7 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 						return contract.Ref{}, err
 					}
 					parent.Data.VerificationRequest.Candidate.Statement = "A different unaccepted proposal"
-					prompt := string(testJSON(map[string]any{"stage": "m5-supplement-publication", "data": m2PlannerData(t, parent.Data)}))
+					prompt := string(testJSON(map[string]any{"stage": "m5-supplement-publication", "data": m2PlannerData(t, parent.Data), "workspace": filepath.Join(r.Dir(), "triage-work"), "requirements": triageWorkspaceRequirements}))
 					out, err := r.Root().Step(ctx, engine.StepSpec{Key: "unaccepted-proposal", Session: p.handle, Prompt: prompt, Inputs: inputs, Output: contract.Spec{SchemaID: PlannerSchema}, Timeout: time.Minute})
 					if err != nil {
 						return contract.Ref{}, err
@@ -3104,7 +3105,7 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 				if err != nil {
 					return contract.Ref{}, err
 				}
-				prompt := string(testJSON(map[string]any{"stage": "m5-supplement-publication", "data": data}))
+				prompt := string(testJSON(map[string]any{"stage": "m5-supplement-publication", "data": data, "workspace": filepath.Join(r.Dir(), "triage-work"), "requirements": triageWorkspaceRequirements}))
 				out, err := attackScope.Step(ctx, engine.StepSpec{Key: key, Session: handle, Prompt: prompt, Inputs: inputs, Output: contract.Spec{SchemaID: schema}, Timeout: time.Minute})
 				if err != nil {
 					return contract.Ref{}, err
@@ -3228,7 +3229,9 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 				// production hook. This is primitive/consumer integration, not a
 				// deterministic reproduction inside taskStepRecovery itself.
 				model := runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: models.FetchThinking}
-				h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + work.request.Stage, CWD: filepath.Join(r.Dir(), "triage-work"), Model: model})
+				work.request.Workspace = filepath.Join(r.Dir(), "triage-work")
+				work.request.Requirements += "\n" + triageWorkspaceRequirements
+				h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + work.request.Stage, Model: model})
 				if err != nil {
 					return engine.Result{}, err
 				}
@@ -3510,7 +3513,7 @@ func m2AssertWorkerInputs(t *testing.T, r *engine.Run, req contract.Request, req
 	if strings.HasPrefix(name, "m4-support-") || name == "m4-wiki-timeout-partial-resume" || (strings.HasPrefix(name, "m4-reframe-") || name == "m5-supplement-reframe-inspection-resume") && strings.HasPrefix(request.Task.ID, "inspection") {
 		requirements += "\nRecovery inspection only: inspect authorized read-only status/evidence for the uncertain remote work in the exact proposal recovery metadata. Do not create, resubmit or restart that work. Record job identity, actual status, limitations and evidence-backed safety assessment."
 	}
-	if request.Requirements != requirements || (!strings.HasPrefix(name, "m3-") && request.Context != original.Context) || !slices.Contains(req.Inputs, request.Proposal) || !slices.Contains(req.Inputs, request.Context) {
+	if request.Requirements != requirements+"\n"+triageWorkspaceRequirements || (!strings.HasPrefix(name, "m3-") && request.Context != original.Context) || !slices.Contains(req.Inputs, request.Proposal) || !slices.Contains(req.Inputs, request.Context) {
 		t.Fatal("M2 worker changed original context or lost explicit proposal/requirements")
 	}
 	var state publication[PlannerState]
@@ -6352,6 +6355,7 @@ func TestIntakeToContext(t *testing.T) {
 					acquisition.MaxBytes = 2048
 				}
 			}
+			service := protocol.SourceWorkspace(t)
 			dir := t.TempDir()
 			bridge := filepath.Join(dir, "bridge")
 			if err := os.Mkdir(bridge, 0700); err != nil {
@@ -6536,6 +6540,7 @@ func TestIntakeToContext(t *testing.T) {
 								return engine.Result{}, err
 							}
 							task.Renderer = renderer
+							task.Requirements += "\n" + triageWorkspaceRequirements
 							if m6Spec.fault == "seam-foreign-producer" {
 								if err := p.close(ctx); err != nil {
 									return engine.Result{}, err
@@ -6937,7 +6942,7 @@ func TestIntakeToContext(t *testing.T) {
 			if product {
 				input.Prompt = string(testJSON(workflowInput{Scope: scope, Request: originalRequest}))
 			}
-			r, err = engine.New(runCtx, def, input, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport})
+			r, err = engine.New(runCtx, def, input, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport, PiDefaultCWD: service})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -7025,6 +7030,9 @@ func TestIntakeToContext(t *testing.T) {
 						t.Fatalf("fixture host event: %v", e.Err)
 					}
 					if e.Message.Type == "hello" {
+						if e.Message.CWD != service {
+							t.Fatalf("actual triage cwd=%q, want %q", e.Message.CWD, service)
+						}
 						if _, ok := hellos[e.Message.SessionID]; ok {
 							t.Fatal("session reused")
 						}
@@ -7224,6 +7232,15 @@ func TestIntakeToContext(t *testing.T) {
 					var task stageTask
 					if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
 						t.Fatal(err)
+					}
+					if task.Workspace != filepath.Join(r.Dir(), "triage-work") || !strings.Contains(task.Requirements, triageWorkspaceRequirements) {
+						t.Fatalf("%s lost run workspace/read-only task guidance", task.Stage)
+					}
+					if info, err := os.Stat(task.Workspace); err != nil || !info.IsDir() {
+						t.Fatalf("workspace not created: %v", err)
+					}
+					if !filepath.IsAbs(e.Message.RequestPath) || !filepath.IsAbs(e.Message.CandidatePath) || !strings.HasPrefix(e.Message.CandidatePath, r.Dir()+string(os.PathSeparator)) {
+						t.Fatal("Step paths escaped owned run")
 					}
 					dispatched[task.Stage] = append(dispatched[task.Stage], req)
 					if product {
@@ -7541,10 +7558,10 @@ func TestIntakeToContext(t *testing.T) {
 								if err := json.Unmarshal([]byte(req.Prompt), &prompt); err != nil {
 									t.Fatal(err)
 								}
-								if len(prompt) != 5 || req.Feedback != nil {
+								if len(prompt) != 6 || req.Feedback != nil {
 									t.Fatal("verifier prompt contains extra Planner state or retry feedback")
 								}
-								for _, key := range []string{"stage", "role", "claim", "allowed_evidence", "requirements"} {
+								for _, key := range []string{"stage", "role", "claim", "allowed_evidence", "requirements", "workspace"} {
 									if _, ok := prompt[key]; !ok {
 										t.Fatalf("missing verifier input %s", key)
 									}
@@ -7746,7 +7763,7 @@ func TestIntakeToContext(t *testing.T) {
 						if model != wantModel {
 							t.Fatal("worker responsibility/model binding changed")
 						}
-						if request.Requirements != workerRequirements {
+						if request.Requirements != workerRequirements+"\n"+triageWorkspaceRequirements {
 							t.Fatal("worker lost task requirements")
 						}
 						data, files = workerFixture(tc.name, request, req.Inputs)
@@ -7798,7 +7815,7 @@ func TestIntakeToContext(t *testing.T) {
 						default:
 							if task.Stage == "planner" {
 								plannerSteps++
-								if !planning || req.Output.SchemaID != PlannerSchema || task.Requirements != plannerRequirements || task.RuntimeResolutionAllowed {
+								if !planning || req.Output.SchemaID != PlannerSchema || task.Requirements != plannerRequirements+"\n"+triageWorkspaceRequirements || task.RuntimeResolutionAllowed {
 									t.Fatal("planner task/model contract mismatch")
 								}
 								for ref := range observedSupportingRefs {
@@ -8269,6 +8286,11 @@ func TestIntakeToContext(t *testing.T) {
 						t.Fatal(err)
 					}
 					sentReplies[req.Identity.AttemptID] = ack
+				}
+			}
+			for _, session := range report.Snapshot.Sessions {
+				if session.Role.CWD != service {
+					t.Fatal("triage persisted session cwd differs from configured source workspace")
 				}
 			}
 			if product {

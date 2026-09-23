@@ -58,6 +58,10 @@ Jira triage 的範例 Scope 值都是占位，執行前須替換為實際已授�
 
 不從 stdin 讀 Prompt，不接受 task naming、input-file 或 config flags。未知 workflow、空／多行／非法 UTF-8／超限 Prompt 在建立 task 或啟動 Pi 前拒絕。每個 Controller 執行一個 run，資料路徑由 Controller 自動產生並顯示：`~/WIP/<task-id>/runs/<run-id>/`。
 
+可用單次環境設定 `PWC_PI_CWD=/absolute/path/to/service pi-workflow-controller run ...` 指定 Pi 預設工作目錄。CLI 只在 `run` 讀此值並傳入 `engine.Options.PiDefaultCWD`；不新增 flags 或全域設定。優先序為 workflow 明設的 `Role.CWD` → 預設目錄 → 啟動 Controller 時的 `Input.LaunchCWD`。相對值在建立 Run 時依 LaunchCWD 固定；unset／空字串停用，不 trim 空白、不展開 `~`。僅選用的 default 含 NUL 時提前拒絕，explicit Role.CWD／fallback LaunchCWD 保留原 runtime 驗證與會計；不存在或非目錄在實際 spawn 時失敗，未使用的壞 default 不阻擋 explicit role，`list` 不使用此設定。
+
+Triage 採上述 fallback，讓正常 Pi 從所選 cwd 載入既有 AGENTS／skills；來源 repository 與 siblings 依任務要求唯讀。Scratch／downloads 仍寫 Run 的 `triage-work`，candidate／evidence／committed Refs 仍使用原 Step 的絕對 owned paths。Review 保留 explicit `review-work` 與 pinned `task.Worktree`，smoke 使用一般 fallback。這是 cwd／任務接線，不是阻止 Agent 寫入來源的 sandbox；也不改變 Input、discovery anchor 或 session ownership。
+
 **共享 discovery 安全前提：**啟動 persisted Pi 可能觸發 deployed WebUI 的 recovery。每次啟動或 resume 前，唯讀核對 deployed recovery 判準、discovery 的父 `pid`（不只 `piPid`）及 `.recovering`。可能 delete/resume 他人 stale session、父 process 不可確認或有異常 claim 時停止，不代清理。無 truthy pid 的 hub-state 類 JSON 僅按實際 recovery 規則略過。Controller 的共用 runtime 在每次 version probe 成功後、persisted child spawn 前執行程式化 preflight，涵蓋所有 workflow 的 Pi 啟動；它不能代替部署版本核對，也不涵蓋 Controller 外的手動 resume。**獨立 task 目錄不是 discovery 隔離，preflight 不是鎖。**請在受控時段執行。
 
 Runtime 建構時選定 `BridgeDir`（明示 option、`PI_BRIDGE_DIR`、home 預設依序），相對值依 Controller 當時 cwd 固定為絕對路徑；preflight、child 與 cleanup 共用該位置，不要求 Pi 與 Controller cwd 相同，也不自動建立 discovery 目錄。預檢拒絕為 `BridgeUnavailable`／`preflight`，發生在 Run 建立後；保留已消耗的 session 額度，但不建立 persistent session 或 attempt。

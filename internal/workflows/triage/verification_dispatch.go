@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 
 	"pi-workflow-controller/internal/contract"
@@ -140,12 +141,13 @@ func (p *plannerCaller) verify(ctx context.Context) (retErr error) {
 			key := "verify-" + claimRef.AttemptID + "-" + role.name
 			run := func(ctx context.Context, attemptScope *engine.Scope) (contract.Ref, error) {
 				task := struct {
+					Workspace       string       `json:"workspace"`
 					Stage           string       `json:"stage"`
 					Role            string       `json:"role"`
 					Claim           contract.Ref `json:"claim"`
 					AllowedEvidence []Evidence   `json:"allowed_evidence"`
 					Requirements    string       `json:"requirements"`
-				}{"verify-" + role.name, role.name, claimRef, claim.Candidate.AllowedEvidence, verifierRequirements}
+				}{filepath.Join(p.r.Dir(), "triage-work"), "verify-" + role.name, role.name, claimRef, claim.Candidate.AllowedEvidence, verifierRequirements + "\n" + triageWorkspaceRequirements}
 				ref, err := taskStepRecovery(ctx, p.r, attemptScope, role.policy.Model, task.Stage, key, task, VerificationSchema, inputs, true)
 				if err != nil {
 					return ref, err

@@ -117,6 +117,8 @@ func TestCLIRegisteredTriage(t *testing.T) {
 				t.Fatal(err)
 			}
 			base := t.TempDir()
+			service := protocol.SourceWorkspace(t)
+			t.Setenv("PWC_PI_CWD", service)
 			if err := os.Mkdir(filepath.Join(base, "bridge"), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -177,6 +179,9 @@ func TestCLIRegisteredTriage(t *testing.T) {
 						t.Fatal(event.Err)
 					}
 					if event.Message.Type == "hello" {
+						if event.Message.CWD != service {
+							t.Fatalf("Pi cwd=%q, want configured service %q", event.Message.CWD, service)
+						}
 						continue
 					}
 					if event.Message.Type != "prompt" {
@@ -186,6 +191,8 @@ func TestCLIRegisteredTriage(t *testing.T) {
 					cliReadJSON(t, event.Message.RequestPath, &req)
 					requests = append(requests, req)
 					var task struct {
+						Workspace      string                      `json:"workspace"`
+						Requirements   string                      `json:"requirements"`
 						Stage          string                      `json:"stage"`
 						Request        string                      `json:"request"`
 						Scope          triage.Scope                `json:"scope"`
@@ -199,6 +206,18 @@ func TestCLIRegisteredTriage(t *testing.T) {
 						M6             triage.ReportMetadata       `json:"m6"`
 					}
 					if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
+						t.Fatal(err)
+					}
+					if !filepath.IsAbs(task.Workspace) || filepath.Base(task.Workspace) != "triage-work" || !strings.Contains(task.Requirements, "Do not write to those repositories") {
+						t.Fatal("triage task lacks run-owned workspace guidance")
+					}
+					if info, err := os.Stat(task.Workspace); err != nil || !info.IsDir() {
+						t.Fatalf("triage workspace missing: %v", err)
+					}
+					if !strings.HasPrefix(event.Message.CandidatePath, filepath.Dir(task.Workspace)+string(os.PathSeparator)) || !filepath.IsAbs(event.Message.RequestPath) {
+						t.Fatal("Step paths left owned run")
+					}
+					if err := os.WriteFile(filepath.Join(task.Workspace, "scratch.txt"), []byte("anonymous scratch"), 0600); err != nil {
 						t.Fatal(err)
 					}
 					if task.Request != original {
@@ -287,6 +306,11 @@ func TestCLIRegisteredTriage(t *testing.T) {
 			}
 			var state engine.Snapshot
 			cliReadJSON(t, filepath.Join(runDir, "run.json"), &state)
+			for _, session := range state.Sessions {
+				if session.Role.CWD != service || session.State != "Closed" {
+					t.Fatal("persisted session cwd/close changed")
+				}
+			}
 			if state.Input.Prompt != string(raw) || len(state.Attempts) != 5 {
 				t.Fatal("CLI did not persist exact input/pipeline")
 			}
@@ -802,8 +826,21 @@ func assertCLICleanup(t *testing.T, p *cliProcess, dir string, hello protocol.Co
 }
 
 func TestCLIProtocolSuccess(t *testing.T) {
-	for _, mode := range []string{"json-only", "artifact"} {
+	for _, mode := range []string{"json-only", "artifact", "cwd-default", "cwd-relative"} {
 		t.Run(mode, func(t *testing.T) {
+			t.Setenv("PWC_PI_CWD", "")
+			wantCWD := ""
+			switch mode {
+			case "json-only":
+				if err := os.Unsetenv("PWC_PI_CWD"); err != nil {
+					t.Fatal(err)
+				}
+			case "cwd-default":
+				wantCWD = protocol.SourceWorkspace(t)
+				t.Setenv("PWC_PI_CWD", wantCWD)
+			case "cwd-relative":
+				t.Setenv("PWC_PI_CWD", ".")
+			}
 			prompt := " 中文 'quoted' $(touch PWNED) ; ../task \x1b[31mred\x1b[0m\x1b]52;c;SECRET\a "
 			p := startCLIProcess(t, prompt, mode, "", false)
 			control := p.accept(t, p.listener)
@@ -859,6 +896,17 @@ func TestCLIProtocolSuccess(t *testing.T) {
 			cwd, err := filepath.EvalSymlinks(p.home)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if wantCWD == "" {
+				wantCWD = cwd
+			}
+			if hello.CWD != wantCWD {
+				t.Fatalf("CLI child cwd=%q, want %q", hello.CWD, wantCWD)
+			}
+			for _, session := range s.Sessions {
+				if session.Role.CWD != wantCWD {
+					t.Fatal("CLI persisted Role.CWD differs from child")
+				}
 			}
 			if input.Prompt != prompt || input.LaunchCWD != cwd || s.Input.Prompt != prompt || s.Input.LaunchCWD != cwd || requests[0].Prompt != prompt || requests[1].Feedback.Message != prompt {
 				t.Fatalf("raw prompt/cwd altered: input=%+v snapshot=%+v requests=%+v", input, s.Input, requests)

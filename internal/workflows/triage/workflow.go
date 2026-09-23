@@ -19,6 +19,7 @@ type sliceModels struct {
 }
 
 type stageTask struct {
+	Workspace                string        `json:"workspace"`
 	Request                  string        `json:"request,omitempty"`
 	Stage                    string        `json:"stage"`
 	Scope                    Scope         `json:"scope"`
@@ -30,6 +31,9 @@ type stageTask struct {
 	SourceWork               []intakeWork  `json:"source_work,omitempty"`
 	ResolutionKinds          []string      `json:"resolution_kinds,omitempty"`
 }
+
+// This is triage task guidance, not an enforced filesystem sandbox.
+const triageWorkspaceRequirements = `Follow the existing AGENTS.md and relevant skills from the Pi working directory. Where this task permits repository inspection, read source context in that directory and sibling repositories without modifying them; this does not expand the task's allowed evidence or acquisition scope. Do not write to those repositories. Use the absolute workspace for scratch and downloads, and the explicit Step request/candidate/evidence paths for outputs. Do not resolve output paths relative to the Pi working directory. Scratch files are not committed evidence; downstream work consumes only supplied exact committed Refs.`
 
 // These are identity/time task requirements, not a tool wrapper or a separate
 // query-approval stage. Every context-producing task has the same receipt duties.
@@ -51,6 +55,8 @@ func sliceStepRecovery(ctx context.Context, r *engine.Run, models sliceModels, k
 		return contract.Ref{}, err
 	}
 	task.Request = request
+	task.Workspace = filepath.Join(r.Dir(), "triage-work")
+	task.Requirements += "\n" + triageWorkspaceRequirements
 	if request != "" {
 		task.Requirements += "\nThe request is the original caller instruction. Address it within the supplied scope; it does not add target authorization or constitute evidence."
 	}
@@ -69,7 +75,7 @@ func sliceStepRecovery(ctx context.Context, r *engine.Run, models sliceModels, k
 }
 
 func taskStepRecovery(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref, recovery bool) (contract.Ref, error) {
-	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + stage, CWD: filepath.Join(r.Dir(), "triage-work"), Model: model})
+	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + stage, Model: model})
 	if err != nil {
 		return contract.Ref{}, err
 	}

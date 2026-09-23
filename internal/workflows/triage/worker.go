@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"slices"
 
 	"pi-workflow-controller/internal/contract"
@@ -51,6 +52,7 @@ type WorkerResult struct {
 }
 
 type workerRequest struct {
+	Workspace    string         `json:"workspace"`
 	Stage        string         `json:"stage"`
 	Scope        Scope          `json:"scope"`
 	Proposal     contract.Ref   `json:"proposal"`
@@ -375,6 +377,7 @@ func prepareWorker(ctx context.Context, r *engine.Run, scope Scope, contextRef, 
 
 func runWorker(ctx context.Context, r *engine.Run, s *engine.Scope, models sliceModels, prepared preparedWorker) (contract.Ref, error) {
 	request, inputs, key := prepared.request, prepared.inputs, prepared.key
+	request.Workspace = filepath.Join(r.Dir(), "triage-work")
 	if err := s.Decision(ctx, key+"-dispatch", "Dispatch one explicit worker task: "+request.Task.ID, inputs); err != nil {
 		if prepared.recovery {
 			return contract.Ref{}, &taskFailure{cause: err, stage: request.Stage}
@@ -396,6 +399,7 @@ func runWorker(ctx context.Context, r *engine.Run, s *engine.Scope, models slice
 			}
 		}
 	}
+	request.Requirements += "\n" + triageWorkspaceRequirements
 	return taskStepRecovery(ctx, r, s, model, request.Stage, key, request, WorkerSchema, inputs, prepared.recovery)
 }
 

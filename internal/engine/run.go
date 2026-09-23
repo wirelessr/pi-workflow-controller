@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,9 @@ type Options struct {
 	RuntimeOptions    runtime.Options
 	ControllerVersion string
 	PiVersion         string
+	// PiDefaultCWD is used only when a role leaves CWD empty. Relative paths
+	// are anchored to Input.LaunchCWD, without changing persisted input.
+	PiDefaultCWD string
 }
 type publication struct {
 	Ref      contract.Ref
@@ -31,6 +35,7 @@ type Run struct {
 	mu                                   sync.Mutex
 	definition                           Definition
 	input                                Input
+	piDefaultCWD                         string
 	store                                *contract.Store
 	schemas                              *contract.Registry
 	fs                                   *os.Root
@@ -85,6 +90,12 @@ func New(ctx context.Context, def Definition, input Input, opts Options) (*Run, 
 	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
+	defaultCWD := opts.PiDefaultCWD
+	// Preserve invalid paths for selected-role validation, including NUL
+	// components that lexical cleaning could otherwise remove.
+	if defaultCWD != "" && !strings.ContainsRune(defaultCWD, '\x00') && !filepath.IsAbs(defaultCWD) {
+		defaultCWD = filepath.Join(input.LaunchCWD, defaultCWD)
+	}
 	created := time.Now()
 	p := def.Policy
 	store, err := contract.NewStore(opts.Schemas, contract.Options{BaseDir: opts.BaseDir, Prompt: input.Prompt, LaunchCWD: input.LaunchCWD, Workflow: def.Name, WorkflowVersion: def.Version, ControllerVersion: opts.ControllerVersion, PiVersion: opts.PiVersion, Limits: contract.Limits{MaxPromptBytes: p.MaxPromptBytes, MaxCandidateBytes: p.MaxCandidateBytes, MaxJSONDepth: p.MaxJSONDepth, MaxFileBytes: p.MaxFileBytes, MaxAttemptFileBytes: p.MaxAttemptFileBytes, MaxAttemptFiles: p.MaxAttemptFiles}})
@@ -106,6 +117,7 @@ func New(ctx context.Context, def Definition, input Input, opts Options) (*Run, 
 	}
 	life, cancel := context.WithCancelCause(timed)
 	r := &Run{definition: def, input: input, store: store, schemas: opts.Schemas, fs: fs, ctx: life, cancel: cancel, deadlineCancel: deadlineCancel, deadline: deadline, accepting: true, changed: make(chan struct{}, 1), handles: make(map[string]*SessionHandle), publications: make(map[string]publication), invocations: make(map[string]string), retryAncestors: make(map[string][]string), observations: make(chan runtime.Observation, p.Runtime.ObservationQueue), observationStop: make(chan struct{}), observationDone: make(chan struct{}), cleanupDone: make(chan struct{})}
+	r.piDefaultCWD = defaultCWD
 	r.workflowDone = make(chan struct{})
 	r.root = r.newScope("root", nil)
 	r.state = Snapshot{Version: 1, TaskID: store.TaskID(), RunID: store.RunID(), Workflow: def.Name, WorkflowVersion: def.Version, ControllerVersion: opts.ControllerVersion, PiVersion: opts.PiVersion, Input: input, Policy: p, CreatedAt: created, State: Created, StatePersisted: true, Attempts: make(map[string]AttemptState), Invocations: make(map[string]InvocationState), Sessions: make(map[string]SessionStatus), Retries: make(map[string]RetryStatus)}

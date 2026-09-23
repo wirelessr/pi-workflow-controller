@@ -394,7 +394,7 @@ scope 成功 → C：接收已通過的那一組 A Ref + B Ref → 最終驗收
 1. 檢查 `pi --version` 是目前列入支援表的 `0.84.3`；不靜默降級為 `agent_end`。新版本須先通過 protocol tests 再擴支援表。Version probe 成功後、建立 session 目錄及 persisted child 前，由共用 runtime 對有效 BridgeDir 執行唯讀 parent-pid／`.recovering` preflight；拒絕為 `BridgeUnavailable`、phase `preflight`、`DispatchAccepted=No`。OpenSession 已登記的 handle 仍消耗 total-session 額度，關閉該未啟動 handle 不虛構 Wait／process cleanup，也不產生 attempt。
 2. 使用 `exec.Command` argv，不經 shell 拼接 Prompt。macOS child 以 `Setpgid: true` 建立自己的 process group。
 3. 使用 `--mode rpc --provider ... --model <exact-id> --thinking ... --session-dir ... --name ...`，不在 CLI 帶 provider secret。
-4. 保留全域 Pi 設定、skills、context files 與 extension 載入；不使用 `--no-extensions`，不自動提升 project trust。Role cwd 預設 launch cwd，也可由 workflow 明確指定。
+4. 保留全域 Pi 設定、skills、context files 與 extension 載入；不使用 `--no-extensions`，不自動提升 project trust。Role cwd 依 `Role.CWD` → `engine.Options.PiDefaultCWD` → `Input.LaunchCWD` 選擇。Default 在 `engine.New` 依 immutable LaunchCWD 固定相對路徑；engine 不讀 env，CLI run 才將 `PWC_PI_CWD` 傳入。空字串停用，不 trim／展開 home，不在 constructor stat 目錄；僅選用的 PiDefaultCWD 含 NUL 時在 OpenSession 提前拒絕；explicit Role.CWD／fallback LaunchCWD 及其餘不可用目錄保留原 runtime 驗證與會計路徑。Effective Role 仍記入 SessionStarting／snapshot，Input 與 runtime identity 不改。
 5. 使用同一個已存在的 `PI_BRIDGE_DIR` 或 deployed WebUI 預設 discovery 目錄；不建立隔離的 discovery 目錄令 hub 看不到 session。Runtime.New 依明示 Options.BridgeDir、parent 環境、home 預設選定目錄；相對值依建構時 Controller cwd 固定為絕對路徑。Child env、preflight、owned discovery 及 cleanup 都使用此值，不受 role cwd 或 Options.Env 同名項目影響。避免繼承父 session 的固定 `PI_HTTP_PORT`，由 extension 尋找 port。
 6. 保持 stdin pipe 開啟。stdout 一個 reader，stderr 持續 drain 到有界檔案。
 7. 用 `get_state` 確認 RPC 可用、provider/model/thinking 與 session identity 正確。Model 模糊匹配或不支援的 thinking 不可靜默接受。

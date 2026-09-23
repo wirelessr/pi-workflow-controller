@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"time"
@@ -138,12 +139,14 @@ func (p *plannerCaller) claimStep(ctx context.Context, executionScope *engine.Sc
 	}
 	projection := PureClaim{ParentState: *p.last, Context: p.history.ref, Candidate: *request.Candidate}
 	task := struct {
+		Workspace          string            `json:"workspace"`
 		Stage              string            `json:"stage"`
 		Projection         PureClaim         `json:"projection"`
 		Recovery           *PlannerRecovery  `json:"recovery"`
 		ControllerFeedback []PlannerFeedback `json:"controller_feedback"`
 		Requirements       string            `json:"requirements"`
-	}{"planner-claim", projection, p.recoveryTask(), slices.Clone(p.pendingFeedback), "You are the same investigation Planner. Produce only the supplied pure claim projection, exactly: parent_state, context, candidate (ID, statement, premises, allowed_evidence). Read the exact committed parent state for the candidate; do not revise it. No acquisition, narrative, ledger, assessments, previous verdicts or files. This is a versioned candidate, not a confirmation. The Controller will deliver this claim and only its allowed evidence to fresh independent verifiers. Full investigation state remains at parent_state, not inside this output."}
+	}{filepath.Join(p.r.Dir(), "triage-work"), "planner-claim", projection, p.recoveryTask(), slices.Clone(p.pendingFeedback), "You are the same investigation Planner. Produce only the supplied pure claim projection, exactly: parent_state, context, candidate (ID, statement, premises, allowed_evidence). Read the exact committed parent state for the candidate; do not revise it. No acquisition, narrative, ledger, assessments, previous verdicts or files. This is a versioned candidate, not a confirmation. The Controller will deliver this claim and only its allowed evidence to fresh independent verifiers. Full investigation state remains at parent_state, not inside this output."}
+	task.Requirements += "\n" + triageWorkspaceRequirements
 	prompt, err := json.Marshal(task)
 	if err != nil {
 		return contract.Ref{}, err

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -43,10 +44,14 @@ func (r *Run) OpenSession(ctx context.Context, role RoleSpec) (*SessionHandle, e
 		r.mu.Unlock()
 		return nil, err
 	}
+	selectedDefault := role.CWD == "" && r.piDefaultCWD != ""
 	if role.CWD == "" {
-		role.CWD = r.input.LaunchCWD
+		role.CWD = r.piDefaultCWD
+		if role.CWD == "" {
+			role.CWD = r.input.LaunchCWD
+		}
 	}
-	if !validName(role.Name) || role.Model.Provider == "" || role.Model.ID == "" || role.Model.Thinking == "" || !filepath.IsAbs(role.CWD) {
+	if !validName(role.Name) || role.Model.Provider == "" || role.Model.ID == "" || role.Model.Thinking == "" || !filepath.IsAbs(role.CWD) || (selectedDefault && strings.ContainsRune(role.CWD, '\x00')) {
 		r.mu.Unlock()
 		return nil, newFailure(InvalidDefinition, "OpenSession", "explicit role/model/thinking and absolute cwd required")
 	}
