@@ -61,7 +61,7 @@ func TestTriageReportProjection(t *testing.T) {
 			break
 		}
 		header, body, ok := strings.Cut(tail[start+1:], "\n")
-		if !ok || !(strings.HasSuffix(header, "json") || strings.HasSuffix(header, "text")) {
+		if !ok || (!strings.HasSuffix(header, "json") && !strings.HasSuffix(header, "text")) {
 			t.Fatal("invalid fence")
 		}
 		fence := strings.TrimSuffix(strings.TrimSuffix(header, "json"), "text")
@@ -289,12 +289,12 @@ func TestTriageReportRendererFailures(t *testing.T) {
 			}
 			if name == "missing-document" {
 				var exit *exec.ExitError
-				if !errors.As(err, &exit) || !exit.ProcessState.Exited() {
+				if !errors.As(err, &exit) || !exit.Exited() {
 					t.Fatalf("lost waited renderer exit: %v", err)
 				}
 				projection := reportProjection{Meta: testJSON(map[string]any{}), Data: InvestigationReport{State: contract.Ref{AttemptID: "missing-state"}, Context: contract.Ref{AttemptID: "missing-context"}}, Documents: []reportDocument{}}
 				out, err = renderReport(ctx, projection)
-				if out != nil || !errors.As(err, &exit) || !exit.ProcessState.Exited() || !strings.Contains(err.Error(), "report requires one exact input owner") {
+				if out != nil || !errors.As(err, &exit) || !exit.Exited() || !strings.Contains(err.Error(), "report requires one exact input owner") {
 					t.Fatalf("missing owner did not reach document boundary: %v", err)
 				}
 			}

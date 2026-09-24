@@ -345,7 +345,7 @@ func (a *acceptance) checkRecoveryFailure(f RecoveryFailure) error {
 	if !ok || !owned || attempt.Failure == nil || attempt.Output != nil || f.RunID != a.run.ID() || attempt.Identity.InvocationID != f.StepID || attempt.HandleID != f.Identity.HandleID || !sameIdentity(owner.Identity, f.Identity) || f.Identity.SessionID == "" || attempt.Failure.Code != f.Code || attempt.Failure.Origin != f.Origin || attempt.DispatchAccepted != f.Dispatch || !reflect.DeepEqual(attempt.Execution, f.Execution) || f.Cleanup == nil || !sameIdentity(f.Cleanup.Identity, f.Identity) || !f.Cleanup.ConfirmsLocalClose(f.Identity.SessionID) {
 		return fmt.Errorf("recovery failure differs from owned failed attempt/cleanup")
 	}
-	if !(f.Code == engine.TimedOut && f.Origin == engine.OriginAttemptDeadline || f.Code == engine.CompactionFailed && f.Origin == engine.OriginCompaction || f.Code == engine.Cancelled && f.Origin == engine.OriginFailFastSibling) {
+	if (f.Code != engine.TimedOut || f.Origin != engine.OriginAttemptDeadline) && (f.Code != engine.CompactionFailed || f.Origin != engine.OriginCompaction) && (f.Code != engine.Cancelled || f.Origin != engine.OriginFailFastSibling) {
 		return fmt.Errorf("unapproved recovery failure")
 	}
 	return nil

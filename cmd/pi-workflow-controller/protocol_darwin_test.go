@@ -4,9 +4,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -180,6 +182,171 @@ func (p *cliPTY) restored(t *testing.T, atReport bool) {
 	}
 }
 
+func cliPTYReport(report string, onlcr bool) (string, error) {
+	if !onlcr {
+		return report, nil
+	}
+	// ONLCR can produce CRCRLF at a Darwin PTY queue boundary. This surface
+	// cannot attribute that extra CR to app or kernel; the literal TTY must
+	// independently pass assertCLIPlain on untouched application bytes.
+	for i := 0; i < len(report); i++ {
+		switch report[i] {
+		case '\r':
+			start := i
+			for i < len(report) && report[i] == '\r' {
+				i++
+			}
+			if i-start > 2 || i == len(report) || report[i] != '\n' {
+				return "", fmt.Errorf("terminal control U+000D outside cooked CRLF/CRCRLF at byte %d", start)
+			}
+		case '\n':
+			return "", fmt.Errorf("report was written without cooked newline processing at byte %d", i)
+		}
+	}
+	report = strings.ReplaceAll(report, "\r\r\n", "\r\n")
+	return strings.ReplaceAll(report, "\r\n", "\n"), nil
+}
+
+func TestCLIPTYReportProbe(t *testing.T) {
+	mode := os.Getenv("PWC_TEST_PTY_REPORT_MODE")
+	if mode == "" {
+		return
+	}
+	report, err := cliPTYReport(os.Getenv("PWC_TEST_PTY_REPORT"), mode == "onlcr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCLIPlain(t, report)
+}
+
+func TestCLIPTYReportRejectsUnsafeBytes(t *testing.T) {
+	for _, mode := range []string{"literal", "onlcr"} {
+		for _, tc := range []struct{ name, text, diagnostic string }{
+			{"bare CR", "x\ry", "terminal control U+000D"},
+			{"triple CR", "x\r\r\r\n", "terminal control U+000D"},
+			{"four CR", "x\r\r\r\r\n", "terminal control U+000D"},
+			{"ANSI", "x\x1b[31my", "terminal control U+001B"},
+			{"Cf", "x\u202ey", "terminal control U+202E"},
+			{"SECRET", "xSECRETy", "terminal control payload leaked"},
+			{"CRLF", "x\r\n", "terminal control U+000D"},
+			{"CRCRLF", "x\r\r\n", "terminal control U+000D"},
+			{"bare LF", "x\n", "without cooked newline processing"},
+			{"trailing CR", "x\r", "terminal control U+000D"},
+			{"unpaired double CR", "x\r\ry", "terminal control U+000D"},
+			{"invalid UTF8", "x\xff", "invalid UTF8"},
+		} {
+			if mode == "onlcr" && (tc.name == "CRLF" || tc.name == "CRCRLF") || mode == "literal" && tc.name == "bare LF" {
+				continue
+			}
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				executable, err := os.Executable()
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, executable, "-test.run=^TestCLIPTYReportProbe$")
+				cmd.Env = append(os.Environ(), "PWC_TEST_PTY_REPORT_MODE="+mode, "PWC_TEST_PTY_REPORT="+tc.text, "GORACE=atexit_sleep_ms=0")
+				output, err := cmd.CombinedOutput()
+				var exit *exec.ExitError
+				if ctx.Err() != nil || !errors.As(err, &exit) || exit.ExitCode() != 1 || !bytes.Contains(output, []byte(tc.diagnostic)) {
+					t.Fatalf("unsafe bytes were not rejected by the real assertion: err=%v output=%q", err, output)
+				}
+			})
+		}
+	}
+}
+
+func TestCLIPTYNewlineBoundary(t *testing.T) {
+	for _, offset := range []int{2046, 2047, 2048} {
+		for _, mode := range []struct {
+			name string
+			off  uint64
+		}{
+			{"onlcr", 0},
+			{"literal", unix.ONLCR},
+			{"opost-off", unix.OPOST},
+		} {
+			t.Run(fmt.Sprintf("LF%d/%s", offset, mode.name), func(t *testing.T) {
+				pty := newCLIPTY(t, false)
+				pty.before.Oflag &^= mode.off
+				if err := unix.IoctlSetTermios(int(pty.slave.Fd()), unix.TIOCSETA, &pty.before); err != nil {
+					t.Fatal(err)
+				}
+				input := strings.Repeat("A", offset) + "\nEND\n"
+				assertCLIPlain(t, input)
+				written := make(chan error, 1)
+				go func() {
+					n, err := unix.Write(int(pty.slave.Fd()), []byte(input))
+					if err == nil && n != len(input) {
+						err = fmt.Errorf("short PTY write: %d/%d", n, len(input))
+					}
+					written <- err
+				}()
+				t.Cleanup(func() {
+					pty.resume()
+					select {
+					case err := <-written:
+						if err != nil {
+							t.Error(err)
+						}
+					case <-time.After(3 * time.Second):
+						t.Error("PTY writer did not join")
+					}
+				})
+				deadline := time.Now().Add(3 * time.Second)
+				for {
+					queued, err := unix.IoctlGetInt(int(pty.slave.Fd()), unix.TIOCOUTQ)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if queued > 0 {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("PTY queue boundary deadline: queued=%d", queued)
+					}
+					time.Sleep(time.Millisecond)
+				}
+				pty.resume()
+				select {
+				case err := <-written:
+					written <- err
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(3 * time.Second):
+					t.Fatal("PTY boundary write deadline")
+				}
+				pty.join(t)
+				pty.restored(t, false)
+				raw := pty.text()
+				onlcr := mode.name == "onlcr"
+				want := input
+				if onlcr {
+					want = strings.ReplaceAll(input, "\n", "\r\n")
+					if offset == 2047 {
+						want = strings.Repeat("A", offset) + "\r\r\nEND\r\n"
+					}
+				}
+				t.Logf("pure LF syscall input=%d raw=%d boundary=%q CRCRLF=%d", len(input), len(raw), raw[max(0, len(raw)-10):], strings.Count(raw, "\r\r\n"))
+				t.Logf("raw PTY hex: %x", []byte(raw))
+				if raw != want {
+					t.Fatalf("unexpected transport bytes: %q", raw)
+				}
+				report, err := cliPTYReport(raw, onlcr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertCLIPlain(t, report)
+				if report != input {
+					t.Fatal("transport decoding did not preserve application bytes")
+				}
+			})
+		}
+	}
+}
+
 func TestCLIRealTTY(t *testing.T) {
 	for _, tc := range []struct {
 		name, key, fault string
@@ -193,125 +360,140 @@ func TestCLIRealTTY(t *testing.T) {
 		{name: "SIGTERM", signal: syscall.SIGTERM, exit: 143, origin: engine.OriginSignalTERM},
 		{name: "SIGTERM cleanup and finalization warnings", signal: syscall.SIGTERM, exit: 143, origin: engine.OriginSignalTERM, fault: "result cleanup discovery"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pty := newCLIPTY(t)
-			p := startCLIProcess(t, "real terminal", tc.fault, "", false, cliProcessOptions{
-				stdin: pty.slave, stdout: pty.slave, cleanupBarrier: true,
-				env: []string{"TERM=xterm-256color", "NO_COLOR=1"},
-			})
-			control := p.accept(t, p.listener)
-			hello := control.next(t, "hello")
-			dir := cliRunDir(hello)
-			message := control.next(t, "prompt")
-			request := assertCLIUnsettled(t, p, dir, message)
-			pty.ready(t, p)
-			if tc.exit == 0 {
-				control.send(t, "settle")
-				assertCLIUnsettled(t, p, dir, control.next(t, "prompt"))
-				control.send(t, "settle")
-			} else {
-				control.send(t, "hold")
-				control.next(t, "held")
-				if tc.key != "" {
-					// ISIG is off at the ready barrier: 0x03 exercises UV's key
-					// decoder, not the kernel's SIGINT delivery path.
-					if _, err := pty.master.Write([]byte(tc.key)); err != nil {
+		for _, mode := range []struct {
+			name  string
+			onlcr bool
+		}{{"literal", false}, {"onlcr", true}} {
+			t.Run(tc.name+"/"+mode.name, func(t *testing.T) {
+				pty := newCLIPTY(t, false)
+				if !mode.onlcr {
+					pty.before.Oflag &^= unix.ONLCR
+					if err := unix.IoctlSetTermios(int(pty.slave.Fd()), unix.TIOCSETA, &pty.before); err != nil {
 						t.Fatal(err)
 					}
-				} else if err := p.cmd.Process.Signal(tc.signal); err != nil {
+				}
+				pty.restored(t, false)
+				pty.resume()
+				p := startCLIProcess(t, "real terminal", tc.fault, "", false, cliProcessOptions{
+					stdin: pty.slave, stdout: pty.slave, cleanupBarrier: true,
+					env: []string{"TERM=xterm-256color", "NO_COLOR=1"},
+				})
+				control := p.accept(t, p.listener)
+				hello := control.next(t, "hello")
+				dir := cliRunDir(hello)
+				message := control.next(t, "prompt")
+				request := assertCLIUnsettled(t, p, dir, message)
+				pty.ready(t, p)
+				if tc.exit == 0 {
+					control.send(t, "settle")
+					assertCLIUnsettled(t, p, dir, control.next(t, "prompt"))
+					control.send(t, "settle")
+				} else {
+					control.send(t, "hold")
+					control.next(t, "held")
+					if tc.key != "" {
+						// ISIG is off at the ready barrier: 0x03 exercises UV's key
+						// decoder, not the kernel's SIGINT delivery path.
+						if _, err := pty.master.Write([]byte(tc.key)); err != nil {
+							t.Fatal(err)
+						}
+					} else if err := p.cmd.Process.Signal(tc.signal); err != nil {
+						t.Fatal(err)
+					}
+				}
+				cleanup := p.accept(t, p.cleanupListener)
+				cleanup.next(t, "cleanup-blocked")
+				state, err := unix.IoctlGetTermios(int(pty.slave.Fd()), unix.TIOCGETA)
+				if err != nil {
 					t.Fatal(err)
 				}
-			}
-			cleanup := p.accept(t, p.cleanupListener)
-			cleanup.next(t, "cleanup-blocked")
-			state, err := unix.IoctlGetTermios(int(pty.slave.Fd()), unix.TIOCGETA)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if state.Lflag&(unix.ICANON|unix.ECHO|unix.ISIG) != 0 {
-				t.Fatalf("terminal restored before cleanup acknowledgment: %+v", state)
-			}
-			select {
-			case <-p.done:
-				t.Fatal("CLI exited before cleanup acknowledgment")
-			default:
-			}
-			if text := pty.text(); strings.Contains(text, "  Exit code:") || strings.Contains(text, "\x1b[?1049l") {
-				t.Fatalf("report/terminal teardown bypassed cleanup barrier: %q", text)
-			}
-			cleanup.send(t, "release")
-			p.wait(t, tc.exit)
-			pty.join(t)
-			pty.restored(t, true)
-			if p.stderr.Len() != 0 {
-				t.Fatalf("stderr=%s", &p.stderr)
-			}
-			text := pty.text()
-			outcome := engine.CancelledState
-			if tc.exit == 0 {
-				outcome = engine.Succeeded
-			}
-			header := fmt.Sprintf("Outcome: %s  Exit code: %d", outcome, tc.exit)
-			reportAt := strings.Index(text, header)
-			exitAlt := strings.LastIndex(text, "\x1b[?1049l")
-			if reportAt < 0 || exitAlt < 0 || exitAlt >= reportAt || strings.Count(text, header) != 1 {
-				t.Fatalf("final report must follow alt-screen exit exactly once: %q", text)
-			}
-			report := text[reportAt:]
-			// CRLF is additional evidence that OPOST/ONLCR were restored when
-			// the report was written, not just by the time the parent read it.
-			if strings.Contains(strings.ReplaceAll(report, "\r\n", ""), "\n") {
-				t.Fatalf("report was written without cooked newline processing: %q", report)
-			}
-			report = strings.ReplaceAll(report, "\r\n", "\n")
-			assertCLIPlain(t, report)
-			for _, want := range []string{"Run path: " + dir + "\n", "Cleanup report 1:", "Wait completed=true", "Process exited=true"} {
-				if !strings.Contains(report, want) {
-					t.Errorf("missing %q in report=%s", want, report)
+				if state.Lflag&(unix.ICANON|unix.ECHO|unix.ISIG) != 0 {
+					t.Fatalf("terminal restored before cleanup acknowledgment: %+v", state)
 				}
-			}
-			var s engine.Snapshot
-			cliReadJSON(t, filepath.Join(dir, "run.json"), &s)
-			if s.State != outcome || s.WorkflowOutcome != outcome {
-				t.Fatalf("wrong terminal outcome: %+v", s)
-			}
-			if tc.exit != 0 {
-				a := s.Attempts[request.Identity.AttemptID]
-				if len(s.Attempts) != 1 || s.Failure == nil || s.Failure.Code != engine.Cancelled || s.Failure.Origin != tc.origin || a.State != engine.CancelledState || a.Output != nil || a.Failure == nil || a.Failure.Origin != tc.origin || a.DispatchAccepted != engine.AcceptedYes {
-					t.Fatalf("key/signal provenance or cancellation lost: %+v", s)
+				select {
+				case <-p.done:
+					t.Fatal("CLI exited before cleanup acknowledgment")
+				default:
 				}
-				if !strings.Contains(report, "origin="+string(tc.origin)) {
-					t.Fatalf("report lost cancellation origin: %s", report)
+				if text := pty.text(); strings.Contains(text, "  Exit code:") || strings.Contains(text, "\x1b[?1049l") {
+					t.Fatalf("report/terminal teardown bypassed cleanup barrier: %q", text)
 				}
-			} else {
-				if len(s.Attempts) != 2 || s.Failure != nil {
-					t.Fatalf("success lost committed attempts: %+v", s)
+				cleanup.send(t, "release")
+				p.wait(t, tc.exit)
+				pty.join(t)
+				pty.restored(t, true)
+				if p.stderr.Len() != 0 {
+					t.Fatalf("stderr=%s", &p.stderr)
 				}
-				for _, a := range s.Attempts {
-					if a.State != engine.Succeeded || a.Output == nil {
-						t.Fatalf("uncommitted successful attempt: %+v", a)
+				text := pty.text()
+				outcome := engine.CancelledState
+				if tc.exit == 0 {
+					outcome = engine.Succeeded
+				}
+				header := fmt.Sprintf("Outcome: %s  Exit code: %d", outcome, tc.exit)
+				reportAt := strings.Index(text, header)
+				exitAlt := strings.LastIndex(text, "\x1b[?1049l")
+				if reportAt < 0 || exitAlt < 0 || exitAlt >= reportAt || strings.Count(text, header) != 1 || strings.Count(text, "\x1b[?1049l") != 1 {
+					t.Fatalf("final report must follow alt-screen exit exactly once: %q", text)
+				}
+				report := text[reportAt:]
+				if mode.onlcr {
+					// Keep write-time cooked newline evidence separate from the
+					// exact termios snapshot taken when the report is read.
+					report, err = cliPTYReport(report, true)
+					if err != nil {
+						t.Fatal(err)
 					}
 				}
-				if !strings.Contains(report, "  final: ") {
-					t.Fatalf("missing final Ref: %s", report)
-				}
-			}
-			if tc.fault != "" {
-				if s.StatePersisted || len(s.FinalizationErrors) != 2 || len(s.CleanupErrors) != 1 {
-					t.Fatalf("warning state missing: %+v", s)
-				}
-				for _, want := range []string{"FinalizationFailed", "phase=failed_result", "phase=cleanup", "state_persisted=false", "Cleanup warning: CleanupFailed", "Discovery warning:"} {
+				assertCLIPlain(t, report)
+				for _, want := range []string{"Run path: " + dir + "\n", "Cleanup report 1:", "Wait completed=true", "Process exited=true"} {
 					if !strings.Contains(report, want) {
-						t.Errorf("warning lost after terminal restore: %q in %s", want, report)
+						t.Errorf("missing %q in report=%s", want, report)
 					}
 				}
-			} else if !s.StatePersisted {
-				t.Fatalf("terminal state not persisted: %+v", s)
-			}
-			assertCLICleanup(t, p, dir, hello, !strings.Contains(tc.fault, "cleanup"), strings.Contains(tc.fault, "discovery"))
-			control.exited(t)
-			cleanup.exited(t)
-		})
+				var s engine.Snapshot
+				cliReadJSON(t, filepath.Join(dir, "run.json"), &s)
+				if s.State != outcome || s.WorkflowOutcome != outcome {
+					t.Fatalf("wrong terminal outcome: %+v", s)
+				}
+				if tc.exit != 0 {
+					a := s.Attempts[request.Identity.AttemptID]
+					if len(s.Attempts) != 1 || s.Failure == nil || s.Failure.Code != engine.Cancelled || s.Failure.Origin != tc.origin || a.State != engine.CancelledState || a.Output != nil || a.Failure == nil || a.Failure.Origin != tc.origin || a.DispatchAccepted != engine.AcceptedYes {
+						t.Fatalf("key/signal provenance or cancellation lost: %+v", s)
+					}
+					if !strings.Contains(report, "origin="+string(tc.origin)) {
+						t.Fatalf("report lost cancellation origin: %s", report)
+					}
+				} else {
+					if len(s.Attempts) != 2 || s.Failure != nil {
+						t.Fatalf("success lost committed attempts: %+v", s)
+					}
+					for _, a := range s.Attempts {
+						if a.State != engine.Succeeded || a.Output == nil {
+							t.Fatalf("uncommitted successful attempt: %+v", a)
+						}
+					}
+					if !strings.Contains(report, "  final: ") {
+						t.Fatalf("missing final Ref: %s", report)
+					}
+				}
+				if tc.fault != "" {
+					if s.StatePersisted || len(s.FinalizationErrors) != 2 || len(s.CleanupErrors) != 1 {
+						t.Fatalf("warning state missing: %+v", s)
+					}
+					for _, want := range []string{"FinalizationFailed", "phase=failed_result", "phase=cleanup", "state_persisted=false", "Cleanup warning: CleanupFailed", "Discovery warning:"} {
+						if !strings.Contains(report, want) {
+							t.Errorf("warning lost after terminal restore: %q in %s", want, report)
+						}
+					}
+				} else if !s.StatePersisted {
+					t.Fatalf("terminal state not persisted: %+v", s)
+				}
+				assertCLICleanup(t, p, dir, hello, !strings.Contains(tc.fault, "cleanup"), strings.Contains(tc.fault, "discovery"))
+				control.exited(t)
+				cleanup.exited(t)
+			})
+		}
 	}
 }
 

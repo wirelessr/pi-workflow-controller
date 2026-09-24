@@ -399,9 +399,10 @@ func TestEngineProtocolCWD(t *testing.T) {
 				t.Fatal("persisted effective role/input/accounting mismatch")
 			}
 			count := 2
-			if bad == "spawn" {
+			switch bad {
+			case "spawn":
 				count, want = 1, defaultCWD
-			} else if bad == "definition" {
+			case "definition":
 				count = 0
 			}
 			if len(persisted.Sessions) != count {
@@ -439,7 +440,7 @@ func TestEngineProtocolHandoff(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer listener.Close()
+			defer func() { _ = listener.Close() }()
 			deadline := time.Now().Add(20 * time.Second)
 			if err := listener.SetDeadline(deadline); err != nil {
 				t.Fatal(err)

@@ -173,14 +173,6 @@ func openPlannerWithEvidence(ctx context.Context, r *engine.Run, scope Scope, mo
 	return p, nil
 }
 
-func checkPlanner(ctx context.Context, r *engine.Run, ref contract.Ref, h contextHistory, previous *contract.Ref) error {
-	return newAcceptance(ctx, r).checkPlanner(ref, h, previous)
-}
-
-func (a *acceptance) checkPlanner(ref contract.Ref, h contextHistory, previous *contract.Ref) error {
-	return a.checkPlannerWithWorkers(ref, h, previous, nil)
-}
-
 func (a *acceptance) checkPlannerWithWorkers(ref contract.Ref, h contextHistory, previous *contract.Ref, records map[contract.Ref]workerRecord) error {
 	p, err := readAccepted[PlannerState](a, ref, PlannerSchema)
 	if err != nil {

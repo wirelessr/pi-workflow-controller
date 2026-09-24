@@ -16,19 +16,25 @@
 
 ## 2. Local suite 與 build gate
 
-前提：Go 1.25.0、macOS arm64、git、Python 3；完整環境依各測試所需工具確認。以下是可執行方法，不是執行紀錄；輸出／binary 放 repo 外的自有目錄。
+前提：Go 1.25.0、macOS arm64、git、Python 3.13 與 golangci-lint 2.11.4；完整環境依各測試所需工具確認。以下是可執行方法，不是執行紀錄；輸出／binary 放 repo 外的自有目錄。
 
 ```sh
 go mod verify
-go test -count=1 ./...
-go test -race -count=3 ./...
-go vet ./...
-go build ./...
+# Full normal and race/atomic coverage each use count=1, in exclusive partitions.
+python3 -B testdata/ci/suite.py inventory --plan "$OWNED_DIR/plan.json"
+python3 -B testdata/ci/suite.py matrix --plan "$OWNED_DIR/plan.json"
+# Run each returned (mode, group) exactly once. Targeted modes use count=3.
+python3 -B testdata/ci/suite.py run --plan "$OWNED_DIR/plan.json" \
+  --directory "$OWNED_DIR/sets" --mode "$MODE" --group "$GROUP"
+go vet -p 1 ./...
+go build -p 1 ./...
+python3 -B testdata/live/review_test.py
+python3 -B testdata/ci/suite_test.py
 git diff --check
 
 RELEASE_DIR="/path/to/owned/release-dir"
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
-  go build -trimpath -buildvcs=false -o "$RELEASE_DIR/pi-workflow-controller" ./cmd/pi-workflow-controller
+  go build -p 1 -trimpath -buildvcs=false -o "$RELEASE_DIR/pi-workflow-controller" ./cmd/pi-workflow-controller
 ```
 
 Gate：各必要 case 的預期行為成立，無 race；實際執行交付 binary 的 `list`，並用未知 workflow 核對 exit 2、無 task/Pi 啟動。從 source repo 外及不同可信 cwd 核對 embedded 資源不依賴原始路徑。Binary、logs、coverage/profile 不納入 Git。CGO-disabled macOS binary 不等於其他平台全靜態相容。
@@ -37,12 +43,19 @@ Gate：各必要 case 的預期行為成立，無 race；實際執行交付 bina
 
 [CI workflow](../.github/workflows/ci.yml) 在 `main` push、PR 與手動觸發時執行。使用 `macos-15` arm64，並檢查 runner、主機與 Go target 架構；不以 Linux 的 compile-only 結果代替 Darwin filesystem／PTY tests。
 
-- 獨立 jobs：format/vet/lint、一般 tests＋Python verifier＋race/coverage、module verification/build/CLI smoke。Go 版本讀取 `go.mod`；actions 固定 commit，golangci-lint 固定版本。
+- 獨立 jobs：format/vet/lint＋Python verifier/CI 工具 tests、Go inventory、有限 matrix 各一般/race/targeted 組、module/build/CLI smoke、最終 collection/coverage。Go 版本讀取 `go.mod`；actions 固定 commit，golangci-lint 固定版本。
 - Repository token 僅 `contents: read`，checkout 不保留 credentials；不使用 `pull_request_target`、外部 coverage service、模型 secrets 或自動 repository writes。
 - `PWC_BUNDLED_PI=0`、`PWC_LIVE_PI=0`；這些 opt-in 情境在 summary 明列排除，verbose test logs 保留逐項 skip 與原因。其餘 required command 失敗即 job 失敗，沒有 `continue-on-error` 或自動重試掩蓋失敗。
-- `go test -v -race -count=1 -timeout=15m -covermode=atomic -coverprofile=... ./...` 成功後才產生 coverage summary／HTML 與上傳報告。一般 tests 與 Python verifier 也必須先成功；失敗 run 的部分 profile 不包裝成成功 coverage。
+- `suite.py` 使用 Go 原生 `go list -p 1`／`go test -list .` 建立當前平台的 top-level inventory，再以 anchored `-run` 選擇互斥分組。Triage 分 pure、Store、其他 local；RPC 為 m1–3、m4、m5、m6、m7 與完整正向補集。其他 package 各一組；engine queue 的 default stress 與完整其餘 child 補集分開，不先重跑整個 parent。
+- `-list` **不列動態 leaf**。新 top-level 進 package/local 完整補集，新 RPC/queue child 由完整互斥 selectors 接住。CI 驗 run/terminal、group 聯集、唯一 leaf 歸屬、unfinished、parent-only、skip identity/reason 及 normal/race 聯集一致；無 test files 的 package 在 coverage 模式可由 Go 輸出 package PASS，仍只算無案例的編譯／coverage 記錄，不當作 case PASS。跨 shard 的共享 parent只列結構重複，不算重跑 leaf。不在 repo 放每案 expected registry；因此未來 CI 不自行證明已刪除的歷史 case 曾存在。修改測試時仍須在 repo 外逐案對照前次完整 raw，並 review 原 values、精確 assertions、順序／ownership／cleanup。
+- 全集合 normal、race/atomic coverage 各 `count=1`、`-p 1`。另以 normal/race `count=3` 分帳驗 fresh delivery handoff、兩個 reframe/history recovery 情境、settle-abortgate cleanup priority、slow intake、supplement exhausted、mixed timeout/fatal、Host cleanup、engine queue/finalization I/O/StageConfirm。Targeted 不產生或混入 coverage。歷史 FAIL 與未定位原因必須保留，重跑 PASS 不是根因修復。
+- Matrix `max-parallel=2`、`fail-fast=false`；每個 Go command 保留 `15m` watchdog，每 job `20m`（含 setup、artifact、cleanup 餘裕）。這不是提高原 Go timeout；主要減量来自互斥分組。校準須採同 tree 各組 normal/race/targeted 的實際 wall time，保留至少五分鐘 job 餘裕；超出組預算需重新切分，不 skip 或全開並行。本機預設串行，異硬體 hosted runner 仍須另外觀測，不由本機耗時宣稱 remote CI 已驗。
+- 每個 full race group 有唯一 `atomic` profile。以同 compiler/平台/來源 `-race -run '^$'` reference 建立每 package block/statement inventory；reference 不算 test PASS、counts 不加入。每份 profile 必須含全部零 hit blocks，拒 missing/extra/重複 profile、path/inode alias、symlink、截斷、mode、座標及 statement 衝突；同 block 的整數 counts 相加，不 OR 或平均。
+- 只有所有 normal/race/targeted、quality、build jobs 成功，且 collection 與 reference inventories 完整，才 merge 並執行 `go tool cover -func/-html`。失敗 run 的 raw JSON/診斷與部分 profiles 以測試 artifacts 留存，不包裝成成功 coverage。
 - Coverage 是 Go statement 統計，不是 branch coverage、不保證涵蓋全部 subprocess，也不量測 Python／TypeScript。沒有最低百分比或 patch coverage gate；成功百分比不能代替 skipped integration gates。
-- 只上傳明列的 `coverage.out`、`functions.txt`、`coverage.html`，artifact 保留 14 天；不包含 binary、temp HOME、session history 或 auth files。Actions 自身的 logs／retention 由 GitHub 設定管理。
+- Coverage artifact 明列 `coverage.out`、`functions.txt`、`coverage.html` 與匿名 collection `summary.json`；分組 artifacts 另存 raw JSON、stderr、command/source identity、elapsed 及各 race profile，保留 14 天。不包含 binary、temp HOME、session history 或 auth files。Actions 自身的 logs／retention 由 GitHub 設定管理。
+- Binary smoke 僅在 owned empty cwd 執行 `list` 與 `run unknown "CI smoke"`，分別驗 exit 0/2、cwd inode/path/content 不變。`env -i`、不含 Pi 的 PATH、自有 HOME/TMP/cache/logs 均在 cwd 外；不執行合法 workflow、不以此聲稱 Pi/provider/live 能力。
+- 發布來源重建另外使用明列 regular entries 的 USTAR，驗 source payload SHA/mode/size、無 PAX/xattrs/`._`/symlink/`.git`，還原至 fresh owned 目錄後同 target CGO-disabled build，再做上述 binary smoke。不得把工程 snapshots、archive 或 binary commit 回 repo。
 
 ### Runtime／RPC／process
 

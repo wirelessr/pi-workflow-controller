@@ -315,7 +315,7 @@ func TestAcquireRedirects(t *testing.T) {
 			foreign = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				record(r)
 				if mode == "return" {
-					http.Redirect(w, r, home.URL+"/end", 302)
+					http.Redirect(w, r, home.URL+"/end", http.StatusFound)
 				} else {
 					_, _ = io.WriteString(w, "foreign")
 				}
@@ -357,7 +357,7 @@ func TestAcquireRedirects(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer dir.Close()
+			defer func() { _ = dir.Close() }()
 			options := acquisitionOptions{Authorization: "Bearer test-secret"}
 			if err := options.limits(); err != nil {
 				t.Fatal(err)
@@ -502,7 +502,7 @@ func TestAcquireZIPReadFailure(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer dir.Close()
+			defer func() { _ = dir.Close() }()
 			options := acquisitionOptions{}
 			if err := options.limits(); err != nil {
 				t.Fatal(err)
@@ -524,7 +524,7 @@ func TestAcquireZIPReadFailure(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer f.Close()
+			defer func() { _ = f.Close() }()
 			fault := &os.PathError{Op: "read", Path: "bundle", Err: syscall.EIO}
 			s, err := a.extractZIP(failingArchiveReader{ReaderAt: f, header: header, fault: fault}, int64(buffer.Len()), content, "extracted")
 			if !errors.Is(err, fault) || s.Status == "available" {
@@ -723,7 +723,7 @@ func TestAcquireUnsafeURLs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer dir.Close()
+			defer func() { _ = dir.Close() }()
 			base, _ := url.Parse("https://jira.example.invalid")
 			options := acquisitionOptions{Authorization: "secret"}
 			if err := options.limits(); err != nil {
@@ -990,7 +990,7 @@ func TestAcquireSaveCancellation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer dir.Close()
+			defer func() { _ = dir.Close() }()
 			options := acquisitionOptions{}
 			if err := options.limits(); err != nil {
 				t.Fatal(err)
@@ -1006,7 +1006,7 @@ func TestAcquireSaveCancellation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer response.Body.Close()
+			defer func() { _ = response.Body.Close() }()
 			cause := errors.New("cancel save fixture")
 			other := errors.New("joined save detail")
 			if mode == "joined" {
@@ -1063,7 +1063,7 @@ func TestAcquireMetadataClosedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	options := acquisitionOptions{}
 	if err := options.limits(); err != nil {
 		t.Fatal(err)

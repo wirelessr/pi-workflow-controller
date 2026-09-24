@@ -303,7 +303,7 @@ func (a *acceptance) checkVerification(v, prior PlannerState, scope Scope, sourc
 		}
 		review := v.VerificationReview
 		if review == nil || review.DeliveryID != d.ID || review.Claim != d.Claim || review.NextAction != v.Ledger.Action {
-			return fmt.Errorf("Planner must assess the delivered verification and declare next action")
+			return fmt.Errorf("Planner must assess the delivered verification and declare next action") //nolint:staticcheck // Planner is the role's proper name; preserve the diagnostic.
 		}
 		if err := checkVerificationAssessment(review.Assessment, known[d.Claim].Candidate.AllowedEvidence); err != nil {
 			return err

@@ -47,16 +47,25 @@ jobs:
             exit 1
           fi
       - name: Go vet
-        run: go vet ./...
+        run: go vet -p 1 ./...
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+      - name: Python verifier and CI accounting tests
+        run: |
+          python3 -B testdata/live/review_test.py
+          python3 -B testdata/ci/suite_test.py
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.11.4
-          args: --timeout=5m --max-issues-per-linter=0 --max-same-issues=0 ./...
+          args: --timeout=5m --concurrency=1 --max-issues-per-linter=0 --max-same-issues=0 ./...
 
-  test:
-    name: Tests and coverage
+  inventory:
+    name: Native Go inventory
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -77,15 +86,93 @@ jobs:
             printf 'macOS arm64: Go tests, real subprocess/PTY fixtures, race detector, and Python verifier tests.\n\n'
             printf '**Excluded:** opt-in bundled Pi and live-provider/shared-hub tests. Their skips are not passes. No model credentials are supplied.\n'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Go tests
-        run: go test -v -count=1 -timeout=15m ./...
-      - name: Python verifier tests
-        run: python3 testdata/live/review_test.py
-      - name: Go race tests with statement coverage
+      - name: Enumerate compiled top-level tests and partitions
+        run: python3 -B testdata/ci/suite.py inventory --plan "$RUNNER_TEMP/plan.json"
+      - id: matrix
         run: |
-          mkdir -p "$RUNNER_TEMP/coverage"
-          go test -v -race -count=1 -timeout=15m -covermode=atomic \
-            -coverprofile="$RUNNER_TEMP/coverage/coverage.out" ./...
+          value=$(python3 -B testdata/ci/suite.py matrix --plan "$RUNNER_TEMP/plan.json")
+          printf 'value=%s\n' "$value" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: go-test-plan
+          path: ${{ runner.temp }}/plan.json
+          if-no-files-found: error
+          retention-days: 14
+
+  test:
+    name: ${{ matrix.mode }} / ${{ matrix.group }}
+    needs: inventory
+    runs-on: macos-15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: go-test-plan
+          path: ${{ runner.temp }}
+      - name: Verify target platform
+        run: |
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          test "$(go env GOOS)/$(go env GOARCH)" = darwin/arm64
+      - name: Run one native partition
+        env:
+          TEST_GROUP: ${{ matrix.group }}
+          TEST_MODE: ${{ matrix.mode }}
+        run: |
+          python3 -B testdata/ci/suite.py run --plan "$RUNNER_TEMP/plan.json" \
+            --directory "$RUNNER_TEMP/sets" --group "$TEST_GROUP" --mode "$TEST_MODE"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: go-tests-${{ matrix.mode }}-${{ matrix.group }}
+          path: ${{ runner.temp }}/sets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  coverage:
+    name: Complete collection and atomic coverage
+    needs: [inventory, test, lint, build]
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: go-test-plan
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: go-tests-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/coverage
+      - name: Compiler reference and full collection check
+        run: |
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          test "$(go env GOOS)/$(go env GOARCH)" = darwin/arm64
+          python3 -B testdata/ci/suite.py reference --plan "$RUNNER_TEMP/plan.json" --directory "$RUNNER_TEMP/coverage"
+          python3 -B testdata/ci/suite.py check --plan "$RUNNER_TEMP/plan.json" --directory "$RUNNER_TEMP/coverage"
       - name: Render coverage report
         run: |
           go tool cover -func="$RUNNER_TEMP/coverage/coverage.out" \
@@ -108,6 +195,7 @@ jobs:
             ${{ runner.temp }}/coverage/coverage.out
             ${{ runner.temp }}/coverage/functions.txt
             ${{ runner.temp }}/coverage/coverage.html
+            ${{ runner.temp }}/coverage/summary.json
           if-no-files-found: error
           retention-days: 14
 
@@ -131,7 +219,7 @@ jobs:
         run: |
           go mod download
           go mod verify
-          go build ./...
+          go build -p 1 ./...
       - name: Build executable
         env:
           CGO_ENABLED: '0'
@@ -139,14 +227,26 @@ jobs:
           GOARCH: arm64
         run: |
           mkdir -p "$RUNNER_TEMP/build"
-          go build -trimpath -buildvcs=false \
+          go build -p 1 -trimpath -buildvcs=false \
             -o "$RUNNER_TEMP/build/pi-workflow-controller" ./cmd/pi-workflow-controller
       - name: Smoke test outside the checkout
         run: |
           work=$(mktemp -d "$RUNNER_TEMP/pwc-smoke.XXXXXX")
+          isolation=$(mktemp -d "$RUNNER_TEMP/pwc-smoke-env.XXXXXX")
+          mkdir "$isolation/home" "$isolation/tmp" "$isolation/cache" "$isolation/logs"
           cd "$work"
-          "$RUNNER_TEMP/build/pi-workflow-controller" list
+          identity=$(stat -f '%d:%i' .)
+          export PATH=/usr/bin:/bin
+          if command -v pi; then exit 1; fi
+          env -i PATH="$PATH" HOME="$isolation/home" TMPDIR="$isolation/tmp" \
+            XDG_CACHE_HOME="$isolation/cache" \
+            "$RUNNER_TEMP/build/pi-workflow-controller" list > "$isolation/logs/list.stdout" 2> "$isolation/logs/list.stderr"
           status=0
-          "$RUNNER_TEMP/build/pi-workflow-controller" run unknown "CI smoke" || status=$?
+          env -i PATH="$PATH" HOME="$isolation/home" TMPDIR="$isolation/tmp" \
+            XDG_CACHE_HOME="$isolation/cache" \
+            "$RUNNER_TEMP/build/pi-workflow-controller" run unknown "CI smoke" \
+            > "$isolation/logs/unknown.stdout" 2> "$isolation/logs/unknown.stderr" || status=$?
           test "$status" -eq 2
+          test "$identity" = "$(stat -f '%d:%i' .)"
+          test "$(pwd -P)" = "$work"
           test -z "$(ls -A)"

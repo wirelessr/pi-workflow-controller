@@ -364,7 +364,7 @@ func (a *intakeAcquirer) decode(s Source, value any) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(f, a.options.MaxBytes+1))
 	if err != nil {
 		return false, err
@@ -418,7 +418,7 @@ func acquireIntake(ctx context.Context, root string, scope Scope, options acquis
 	if e != nil {
 		return v, nil, e
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	info, e := r.Lstat("evidence")
 	if e != nil {
 		return v, nil, e
@@ -430,7 +430,7 @@ func acquireIntake(ctx context.Context, root string, scope Scope, options acquis
 	if e != nil {
 		return v, nil, e
 	}
-	defer evidence.Close()
+	defer func() { _ = evidence.Close() }()
 	a := &intakeAcquirer{ctx: ctx, root: evidence, options: options, base: base, client: acquisitionClient(base, options.Authorization), files: []file{}}
 	defer a.client.CloseIdleConnections()
 	if err = a.reserveMetadata(); err != nil {
@@ -656,7 +656,7 @@ func (a *intakeAcquirer) text(s Source) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(f, a.options.MaxBytes+1))
 	if err != nil {
 		return false, err
@@ -690,7 +690,7 @@ func (a *intakeAcquirer) extract(content Source, id, mime string) (result Source
 	if err != nil {
 		return Source{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
 		return Source{}, err

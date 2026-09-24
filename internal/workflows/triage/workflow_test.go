@@ -1018,15 +1018,16 @@ func supportingHTTPFixture(t *testing.T, name string, requests *atomic.Int32) *h
 				t.Error("fixture did not narrow with observed trace")
 			}
 			mode := r.URL.Query().Get("mode")
-			if mode == "unavailable" {
+			switch mode {
+			case "unavailable":
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_, _ = w.Write([]byte(`{"error":"source unavailable"}`))
-			} else if mode == "partial" {
+			case "partial":
 				w.WriteHeader(http.StatusPartialContent)
 				_, _ = w.Write([]byte(`{"events":[],"partial":true}`))
-			} else if mode == "empty" {
+			case "empty":
 				_, _ = w.Write([]byte(`{"events":[],"partial":false}`))
-			} else {
+			default:
 				epoch := int64(1735770600000)
 				if name == "support-wrong-epoch" {
 					epoch += 1000
@@ -1898,18 +1899,20 @@ func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stag
 	switch {
 	case name == "m2-yield":
 	case slices.Contains([]string{"m2-parallel-batches-yield", "m2-batch-consumed-order", "m2-batch-results-order", "m2-batch-foreign-ref"}, name) || strings.HasPrefix(name, "m2-branch-"):
-		if step == 1 {
+		switch step {
+		case 1:
 			workers("w1", "w2", "w3", "w4", "w5")
 			v.WorkerTasks[3].DependsOn = []string{"w1"}
-		} else if step == 2 {
+		case 2:
 			workers("w4", "w5")
 			v.WorkerTasks[0].DependsOn = []string{"w1"}
 		}
 	case name == "m2-no-ready-feedback":
-		if step == 1 {
+		switch step {
+		case 1:
 			workers("waiting")
 			v.WorkerTasks[0].DependsOn = []string{"not-accepted"}
-		} else if step == 2 {
+		case 2:
 			if !strings.Contains(delivered.AdaptiveNote, "No declared task has all dependencies in accepted worker results") || l.Round != 0 || l.NoProgress != 0 {
 				t.Fatal("no-ready dispatch did not return mechanical feedback without progress")
 			}
@@ -1934,9 +1937,10 @@ func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stag
 			v.SupportingWork = &SupportingWork{Kind: "resolve", Reason: "Resolve the existing time gap", Basis: slices.Clone(basis), Sources: []intakeWork{}}
 		}
 	case strings.HasPrefix(name, "m2-wiki-"):
-		if step == 1 {
+		switch step {
+		case 1:
 			wiki(false)
-		} else if step == 2 {
+		case 2:
 			workers("w1")
 			v.WorkerTasks[0].Basis = []Evidence{{Ref: &v.WikiResults[0], FileID: "search"}}
 			if name == "m2-wiki-partial-runtime" || name == "m2-wiki-runtime" {
@@ -2828,7 +2832,7 @@ func r5RenderCandidate(t *testing.T, ctx context.Context, r *engine.Run, name st
 	output, err := cmd.CombinedOutput()
 	if name == "r5-renderer-collision" {
 		var exit *exec.ExitError
-		if !errors.As(err, &exit) || !exit.ProcessState.Exited() || !bytes.Contains(output, []byte("File exists")) || !bytes.Contains(output, []byte("triage-report.md")) {
+		if !errors.As(err, &exit) || !exit.Exited() || !bytes.Contains(output, []byte("File exists")) || !bytes.Contains(output, []byte("triage-report.md")) {
 			t.Fatalf("renderer did not reject the existing report: %v: %s", err, output)
 		}
 		got, readErr := os.ReadFile(reportPath)
@@ -2935,9 +2939,10 @@ func r5AssertOutcome(t *testing.T, tc triageCase, report engine.Report, stateRef
 		}
 		if tc.name == "r5-cancel" || tc.name == "r5-renderer-collision" || tc.name == "r5-cleanup-failure" {
 			code, origin := engine.Cancelled, engine.OriginControllerUser
-			if tc.name == "r5-renderer-collision" {
+			switch tc.name {
+			case "r5-renderer-collision":
 				code, origin = engine.CompactionFailed, engine.OriginCompaction
-			} else if tc.name == "r5-cleanup-failure" {
+			case "r5-cleanup-failure":
 				code, origin = engine.CleanupFailed, engine.OriginProtocol
 			}
 			var f *engine.Failure
@@ -7070,7 +7075,7 @@ func TestIntakeToContext(t *testing.T) {
 							continue
 						}
 						for _, s := range r.Snapshot().Sessions {
-							if s.Identity.SessionID != "" && s.Identity.SessionID != e.Message.SessionID && s.State != "Closed" && !(m1 && workerOpening && s.Role.Name == "triage-planner") {
+							if s.Identity.SessionID != "" && s.Identity.SessionID != e.Message.SessionID && s.State != "Closed" && (!m1 || !workerOpening || s.Role.Name != "triage-planner") {
 								t.Fatalf("new stage before old cleanup: %+v", s)
 							}
 						}
@@ -7512,7 +7517,7 @@ func TestIntakeToContext(t *testing.T) {
 								if product {
 									wantPlanner = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/glm-5p3", Thinking: "high"}
 								}
-								if owner.Identity != parent.Identity && !(product && parent.State == "Closed" && owner.Role == parent.Role) && tc.name != "m5-claim-timeout-retry" && tc.name != "m5-claim-retry-exhausted" || owner.Role.Model != wantPlanner || owner.Role.Name != "triage-planner" || !slices.Contains(req.Inputs, projection.ParentState) || !slices.Contains(req.Inputs, projection.Context) {
+								if owner.Identity != parent.Identity && (!product || parent.State != "Closed" || owner.Role != parent.Role) && tc.name != "m5-claim-timeout-retry" && tc.name != "m5-claim-retry-exhausted" || owner.Role.Model != wantPlanner || owner.Role.Name != "triage-planner" || !slices.Contains(req.Inputs, projection.ParentState) || !slices.Contains(req.Inputs, projection.Context) {
 									t.Fatal("claim lost proposing Planner/session/exact inputs")
 								}
 								switch tc.name {
@@ -7940,7 +7945,8 @@ func TestIntakeToContext(t *testing.T) {
 							if (!resolving && !revising) || req.Inputs[0] != expectedIntake || task.Previous == nil || requests.Load() != acquiredRequests {
 								t.Fatal("resolution reacquired intake or lost committed input")
 							}
-							if task.Stage == "wiki-resolution" {
+							switch task.Stage {
+							case "wiki-resolution":
 								if len(req.Inputs) < 3 || *task.Previous != req.Inputs[2] || req.Inputs[1].SchemaID != WikiSchema {
 									t.Fatal("wiki remediation inputs")
 								}
@@ -7950,7 +7956,7 @@ func TestIntakeToContext(t *testing.T) {
 								}
 								wiki, files = wikiFixture(wikiMode, req.Inputs[0])
 								data = wiki
-							} else if task.Stage == "context-resolution" {
+							case "context-resolution":
 								if len(req.Inputs) < 3 || *task.Previous != req.Inputs[2] {
 									t.Fatal("context remediation inputs")
 								}
@@ -7983,7 +7989,7 @@ func TestIntakeToContext(t *testing.T) {
 									}
 								}
 								data = expectedContext
-							} else {
+							default:
 								t.Fatal("unexpected extra step")
 							}
 						}

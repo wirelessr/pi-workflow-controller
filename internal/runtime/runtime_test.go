@@ -747,12 +747,12 @@ func TestContextUsageRejectsMalformedAndForeignStats(t *testing.T) {
 			f := mustFixture(t, "normal", nil)
 			f.send(control{Type: "stats", State: tc.fields})
 			usage, err := f.s.ContextUsage(f.ctx)
-			requireCode(t, err, tc.code)
+			_ = requireCode(t, err, tc.code)
 			if !reflect.DeepEqual(usage, ContextUsage{}) {
 				t.Fatalf("invalid stats returned usage: %+v", usage)
 			}
 			_, err = f.s.Snapshot(f.ctx)
-			requireCode(t, err, tc.code)
+			_ = requireCode(t, err, tc.code)
 		})
 	}
 }
@@ -781,7 +781,7 @@ func TestContextUsageBoundedLifecycle(t *testing.T) {
 			}
 			select {
 			case err := <-done:
-				requireCode(t, err, want)
+				_ = requireCode(t, err, want)
 			case <-f.ctx.Done():
 				t.Fatal("stats query did not return")
 			}
@@ -1127,7 +1127,7 @@ func TestCloseExitStatus(t *testing.T) {
 				if report.KillError != syscall.EPERM.Error() {
 					t.Fatalf("unexpected kill error: %+v", report)
 				}
-				requireCode(t, err, CleanupFailed)
+				_ = requireCode(t, err, CleanupFailed)
 			} else if err != nil {
 				t.Fatal(err)
 			}
