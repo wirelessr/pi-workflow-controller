@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,11 +58,23 @@ func TestCheckPreparedSemantics(t *testing.T) {
 	}{
 		{"valid", func(*Checkout, *Prepared, map[string]checkFile, string) {}, ""},
 		{"pin", func(_ *Checkout, p *Prepared, _ map[string]checkFile, _ string) { p.Pin.ContextID += "other" }, "pin mismatch"},
+		{"prepare-pin", func(_ *Checkout, p *Prepared, _ map[string]checkFile, _ string) { p.Pin.HeadSHA = p.Pin.BaseSHA }, "pin mismatch"},
+		{"prepare-empty", func(_ *Checkout, p *Prepared, _ map[string]checkFile, _ string) {
+			p.Requirements = []Requirement{}
+			p.OpenQuestions = []string{}
+		}, "empty requirements require an open question"},
 		{"duplicate source", func(_ *Checkout, p *Prepared, _ map[string]checkFile, _ string) {
 			p.Sources = append(p.Sources, p.Sources[0])
 		}, "source ID"},
 		{"unknown file", func(_ *Checkout, p *Prepared, _ map[string]checkFile, _ string) { p.Sources[0].FileID = "absent" }, "unknown file"},
-		{"omitted snapshot", func(_ *Checkout, p *Prepared, _ map[string]checkFile, _ string) { p.Sources = p.Sources[1:] }, "absent from sources"},
+		{"prepare-source-omitted", func(_ *Checkout, p *Prepared, _ map[string]checkFile, _ string) {
+			for i, source := range p.Sources {
+				if source.ID == "metadata" {
+					p.Sources = append(p.Sources[:i], p.Sources[i+1:]...)
+					break
+				}
+			}
+		}, "snapshot \"metadata\" absent from sources"},
 		{"wrong snapshot", func(_ *Checkout, p *Prepared, _ map[string]checkFile, _ string) { p.Sources[0].FileID = "diff" }, "bytes differ"},
 		{"controller mandatory missing", func(c *Checkout, _ *Prepared, _ map[string]checkFile, _ string) { delete(c.Snapshots, "diff") }, "controller snapshot"},
 		{"arbitrary file ID", func(_ *Checkout, p *Prepared, f map[string]checkFile, _ string) {
@@ -131,8 +144,74 @@ func TestCheckPreparedSemantics(t *testing.T) {
 			}
 			fixtureWrite(t, filepath.Join(dir, "context"), []byte("Context"))
 			files["context"] = checkFile{ID: "context", Kind: "artifact", Path: "context"}
+			var store *contract.Store
+			if strings.HasPrefix(tc.name, "prepare-") {
+				store = resourceTestStore(t)
+			}
+			publish := func() {
+				if store == nil {
+					return
+				}
+				attempt, _ := resourceTestCandidate(t, store, PrepareSchema, p)
+				entries := []contract.FileEntry{}
+				for _, file := range files {
+					raw, err := readPublishedFile(context.Background(), ref, file)
+					if err != nil {
+						t.Fatal(err)
+					}
+					prefix := "evidence"
+					if file.Kind == "artifact" {
+						prefix = "artifacts"
+					}
+					file.Path = filepath.Join(prefix, file.ID)
+					fixtureWrite(t, filepath.Join(attempt.Dir(), file.Path), raw)
+					entries = append(entries, file)
+				}
+				var request contract.Request
+				if err := protocol.ReadJSON(attempt.RequestPath(), &request); err != nil {
+					t.Fatal(err)
+				}
+				if err := protocol.WriteEnvelope(attempt.CandidatePath(), request, p, entries); err != nil {
+					t.Fatal(err)
+				}
+				staged, err := attempt.Stage(context.Background(), contract.Spec{SchemaID: PrepareSchema})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ref, err = attempt.Publish(context.Background(), staged)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw, err := store.Read(context.Background(), ref)
+				if err != nil {
+					t.Fatal(err)
+				}
+				envelope, err := contract.DecodePublication[Prepared](raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				p = envelope.Data
+				files = map[string]checkFile{}
+				for _, file := range envelope.Files {
+					files[file.ID] = file
+				}
+			}
+			publish()
+			checkError(t, preparedSemantics(context.Background(), ref, c, p, files), "")
 			tc.change(c, &p, files, dir)
-			checkError(t, preparedSemantics(context.Background(), ref, c, p, files), tc.want)
+			publish()
+			err := preparedSemantics(context.Background(), ref, c, p, files)
+			checkError(t, err, tc.want)
+			if strings.HasPrefix(tc.name, "prepare-") {
+				if err == nil || err.Error() != tc.want {
+					t.Fatalf("prepare mutation reached wrong rejection: %v, want %q", err, tc.want)
+				}
+				var failure *engine.Failure
+				var contractError *contract.Error
+				if errors.As(err, &failure) || errors.As(err, &contractError) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("prepare semantics replaced by execution/schema failure: %v", err)
+				}
+			}
 		})
 	}
 }

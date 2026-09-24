@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -174,7 +175,13 @@ func newWorkflowFixtureFromSeed(t *testing.T, scenario workflowScenario, seed *a
 	definition.Policy.Runtime.CleanupTimeout = 5 * time.Second
 	definition.Policy.Runtime.AbortGrace = 100 * time.Millisecond
 	definition.Execute = func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-		return executeSource(ctx, r, in, source.source)
+		result, err := executeSource(ctx, r, in, source.source)
+		if scenario.prepareError == "source" {
+			if _, readErr := engine.ReadContract(ctx, r, result.Outputs["prepare"]); readErr != nil {
+				return result, fmt.Errorf("rejected prepare lost committed authorization: %w", readErr)
+			}
+		}
+		return result, err
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -350,19 +357,13 @@ func (f *workflowFixture) prepare(event workflowControl) {
 		p.Requirements = []Requirement{}
 		p.OpenQuestions = []string{"No authoritative requirement was available"}
 	}
-	switch f.scenario.prepareError {
-	case "empty":
-		p.Requirements = []Requirement{}
-		p.OpenQuestions = []string{}
-	case "source":
+	if f.scenario.prepareError == "source" {
 		for i, source := range p.Sources {
 			if source.ID == "metadata" {
 				p.Sources = append(p.Sources[:i], p.Sources[i+1:]...)
 				break
 			}
 		}
-	case "pin":
-		p.Pin.HeadSHA = p.Pin.BaseSHA
 	}
 	f.candidate(event, p, files)
 	f.ack(event, "settle")
@@ -692,9 +693,7 @@ func TestWorkflowProductionRejectsInvalidResults(t *testing.T) {
 		scenario workflowScenario
 		want     string
 	}{
-		{"prepare-empty", workflowScenario{prepareError: "empty"}, "empty requirements"},
 		{"prepare-source-omitted", workflowScenario{prepareError: "source"}, "absent from sources"},
-		{"prepare-pin", workflowScenario{prepareError: "pin"}, "pin mismatch"},
 		{"reviewer-role", workflowScenario{reviewerError: "role"}, "role mismatch"},
 		{"reviewer-SHA", workflowScenario{reviewerError: "sha"}, "pin mismatch"},
 		{"reviewer-context-ref", workflowScenario{reviewerError: "context"}, "context Ref mismatch"},
@@ -723,6 +722,63 @@ func TestWorkflowProductionRejectsInvalidResults(t *testing.T) {
 				t.Fatalf("invalid result accepted: %s %v", report.Outcome, report.Failure)
 			}
 			checkError(t, report.Failure, tc.want)
+			if tc.scenario.prepareError == "source" {
+				cause := errors.Unwrap(report.Failure)
+				if report.Failure.Error() != "prepare acceptance: snapshot \"metadata\" absent from sources" || cause == nil || cause.Error() != "snapshot \"metadata\" absent from sources" {
+					t.Fatalf("prepare semantic rejection lost its acceptance wrapper/cause: %v", report.Failure)
+				}
+				failure := report.Snapshot.Failure
+				if failure == nil || failure.Code != engine.WorkflowFailed || failure.Origin != engine.OriginDefinition || failure.Phase != "" {
+					t.Fatalf("prepare semantic rejection became an execution/schema failure: %+v", failure)
+				}
+				if len(f.hellos) != 1 || len(report.Snapshot.Sessions) != 1 || len(report.Snapshot.Attempts) != 1 || len(report.Snapshot.Invocations) != 1 || len(report.Snapshot.Retries) != 0 || len(report.Cleanup) != 1 {
+					t.Fatalf("prepare rejection dispatched extra work or lost accounting: %+v", report)
+				}
+				ref, ok := report.Result.Outputs["prepare"]
+				attempt := report.Snapshot.Attempts[ref.AttemptID]
+				if !ok || len(report.Result.Outputs) != 1 || ref.RunID != f.run.ID() || ref.SchemaID != PrepareSchema || attempt.Key != "prepare" || attempt.State != engine.Succeeded || attempt.Failure != nil || attempt.Output == nil || *attempt.Output != ref {
+					t.Fatalf("rejected prepare must retain its exact successful Step publication: %+v / %+v", ref, attempt)
+				}
+				invocation := report.Snapshot.Invocations[attempt.Identity.InvocationID]
+				if invocation.Key != "prepare" || invocation.State != engine.Succeeded || invocation.Attempts != 1 || invocation.LastAttemptID != ref.AttemptID {
+					t.Fatalf("prepare invocation lost committed history: %+v", invocation)
+				}
+				owner := report.Snapshot.Sessions[attempt.HandleID]
+				hello := f.hellos[owner.Identity.SessionID]
+				cleanup := report.Cleanup[0]
+				cleanupIdentity, ownerIdentity := cleanup.Identity, owner.Identity
+				// Snapshot's JSON copy drops monotonic clock data.
+				cleanupIdentity.SpawnTime, ownerIdentity.SpawnTime = time.Time{}, time.Time{}
+				if owner.Role.Name != "review-prepare" || owner.State != "Closed" || owner.Identity.HandleID != attempt.HandleID || hello.SessionID != owner.Identity.SessionID || hello.PID != owner.Identity.PID || hello.History != owner.Identity.SessionFile || cleanupIdentity != ownerIdentity || !cleanup.Identity.SpawnTime.Equal(owner.Identity.SpawnTime) || !cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
+					t.Fatalf("prepare rejection lost process/history/cleanup ownership: owner=%+v hello=%+v cleanup=%+v", owner, hello, cleanup)
+				}
+				var persisted struct {
+					Outputs map[string]contract.Ref `json:"outputs"`
+				}
+				if err := protocol.ReadJSON(filepath.Join(f.run.Dir(), "result.json"), &persisted); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(persisted.Outputs, report.Result.Outputs) {
+					t.Fatalf("prepare publication lost from failed result history: %+v", persisted.Outputs)
+				}
+				journal, err := os.Open(filepath.Join(f.run.Dir(), "events.jsonl"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = journal.Close() }()
+				decoder := json.NewDecoder(journal)
+				for {
+					var event engine.Event
+					if err := decoder.Decode(&event); errors.Is(err, io.EOF) {
+						break
+					} else if err != nil {
+						t.Fatal(err)
+					}
+					if event.Kind == "Decision" {
+						t.Fatalf("semantic rejection recorded a downstream Decision: %+v", event)
+					}
+				}
+			}
 			if tc.scenario.reviewerError != "" {
 				if len(report.Snapshot.Sessions) != 5 || len(report.Snapshot.Attempts) != 5 {
 					t.Fatal("required reviewer failure silently skipped validation or reviewer")

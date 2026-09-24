@@ -2229,44 +2229,33 @@ func m2PlannerFixture(t *testing.T, name string, req contract.Request, task stag
 				l.Action = "plan"
 			}
 			if step == 3 {
-				switch name {
-				case "m3-retained-feedback-drop":
-					v.Checkpoint.ControllerFeedback = v.Checkpoint.ControllerFeedback[1:]
-				case "m3-retained-feedback-change":
-					v.Checkpoint.ControllerFeedback[0].Note = "rewritten committed feedback"
-				case "m3-retained-feedback-reorder":
-					slices.Reverse(v.Checkpoint.ControllerFeedback)
+				var prior publication[PlannerState]
+				if err := protocol.ReadJSON(v.Previous.Path, &prior); err != nil {
+					t.Fatal(err)
 				}
+				prefix := prior.Data.Checkpoint.ControllerFeedback
+				feedback := v.Checkpoint.ControllerFeedback
+				if len(prefix) != 1 || len(feedback) != len(prefix)+1 || !slices.Equal(feedback[:len(prefix)], prefix) || feedback[0].After != *prior.Data.Previous || feedback[1].After != *v.Previous || feedback[0].After == feedback[1].After || feedback[0].Note == feedback[1].Note {
+					t.Fatal("retained fixture lost accepted prefix or distinct new pending feedback")
+				}
+				mutateCheckpointFixture(t, name, &v)
 			}
 		}
 		if step == 1 && name == "m3-illegal-optin" {
 			v.Checkpoint = &PlannerCheckpoint{Policy: PlannerCapacityPolicy{HandoffPercent: 80}, ControllerFeedback: []PlannerFeedback{}}
 		}
 		if step == 2 {
+			if validationStage(name) == "checkpoint" && !strings.HasPrefix(name, "m3-retained-feedback-") {
+				mutateCheckpointFixture(t, name, &v)
+			}
 			c := v.Checkpoint
 			switch name {
-			case "m3-checkpoint-drop":
-				v.Checkpoint = nil
-			case "m3-policy-change":
-				c.Policy.HandoffPercent = 81
-			case "m3-cycle-backward":
-				c.DispatchCycle = 0
-			case "m3-cycle-skip":
-				c.DispatchCycle++
-			case "m3-checkpoint-forged":
-				c.CheckpointCycle = 3
-			case "m3-full-forged":
-				c.FullCheckpoint = true
 			case "m3-feedback-drop":
 				c.ControllerFeedback = []PlannerFeedback{}
 			case "m3-feedback-change":
 				c.ControllerFeedback[0].Note = "Agent rewrote controller diagnostic"
 			case "m3-feedback-reorder":
 				slices.Reverse(c.ControllerFeedback)
-			case "m3-feedback-owner":
-				c.ControllerFeedback[0].After = v.Context
-			case "m3-feedback-blank":
-				c.ControllerFeedback[0].Note = " "
 			case "m3-feedback-invent":
 				c.ControllerFeedback = append(c.ControllerFeedback, PlannerFeedback{After: *v.Previous, Note: "Invented diagnostic"})
 			case "m3-note-change":
@@ -3013,24 +3002,85 @@ func r5AssertOutcome(t *testing.T, tc triageCase, report engine.Report, stateRef
 	}
 }
 
+func verificationPolicyFixture(name string) *VerificationPolicy {
+	verification := &VerificationPolicy{
+		Pro:   VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "pro", Thinking: "high"}, Retries: 1},
+		Con:   VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "con", Thinking: "medium"}, Retries: 1},
+		Cross: VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "cross", Thinking: "low"}, Retries: 1},
+	}
+	for role, policy := range map[string]*VerifierPolicy{"pro": &verification.Pro, "con": &verification.Con, "cross": &verification.Cross} {
+		if name == "m5-policy-"+role+"-model" {
+			policy.Model = runtime.ModelSpec{}
+		}
+		if name == "m5-policy-"+role+"-retries" {
+			policy.Retries = -1
+		}
+	}
+	return verification
+}
+
+func capacityPolicyFixture(name string) *PlannerCapacityPolicy {
+	capacity := &PlannerCapacityPolicy{HandoffPercent: 80}
+	switch name {
+	case "m3-policy-invalid-zero":
+		capacity.HandoffPercent = 0
+	case "m3-policy-invalid-negative":
+		capacity.HandoffPercent = -1
+	case "m3-policy-invalid-above":
+		capacity.HandoffPercent = 101
+	case "m3-policy-invalid-nan":
+		capacity.HandoffPercent = math.NaN()
+	case "m3-policy-invalid-infinite":
+		capacity.HandoffPercent = math.Inf(1)
+	}
+	return capacity
+}
+
+func mutateCheckpointFixture(t *testing.T, name string, v *PlannerState) {
+	t.Helper()
+	c := v.Checkpoint
+	switch name {
+	case "m3-checkpoint-drop":
+		v.Checkpoint = nil
+	case "m3-policy-change":
+		c.Policy.HandoffPercent = 81
+	case "m3-cycle-backward":
+		c.DispatchCycle = 0
+	case "m3-cycle-skip":
+		c.DispatchCycle++
+	case "m3-checkpoint-forged":
+		c.CheckpointCycle = 3
+	case "m3-full-forged":
+		c.FullCheckpoint = true
+	case "m3-feedback-owner":
+		c.ControllerFeedback[0].After = v.Context
+	case "m3-feedback-blank":
+		c.ControllerFeedback[0].Note = " "
+	case "m3-retained-feedback-drop":
+		c.ControllerFeedback = c.ControllerFeedback[1:]
+	case "m3-retained-feedback-change":
+		c.ControllerFeedback[0].Note = "rewritten committed feedback"
+	case "m3-retained-feedback-reorder":
+		slices.Reverse(c.ControllerFeedback)
+	default:
+		t.Fatal("unknown checkpoint mutation", name)
+	}
+}
+
+func validationFullflowRepresentative(name string) bool {
+	switch name {
+	case "m5-policy-cross-retries", "m3-policy-invalid-nan", "m3-feedback-owner", "m3-retained-feedback-reorder":
+		return true
+	}
+	return false
+}
+
 func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models sliceModels, input contract.Ref, name string) (contract.Ref, error) {
 	t.Helper()
 	plannerModel := runtime.ModelSpec{Provider: "fixture", ID: "planner", Thinking: "high"}
 	if strings.HasPrefix(name, "m5-") {
-		verification := &VerificationPolicy{
-			Pro:   VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "pro", Thinking: "high"}, Retries: 1},
-			Con:   VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "con", Thinking: "medium"}, Retries: 1},
-			Cross: VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "cross", Thinking: "low"}, Retries: 1},
-		}
+		verification := verificationPolicyFixture(name)
 		recovery := &RecoveryPolicy{PlannerRetries: 1}
-		for role, policy := range map[string]*VerifierPolicy{"pro": &verification.Pro, "con": &verification.Con, "cross": &verification.Cross} {
-			if name == "m5-policy-"+role+"-model" {
-				policy.Model = runtime.ModelSpec{}
-			}
-			if name == "m5-policy-"+role+"-retries" {
-				policy.Retries = -1
-			}
-		}
 		if name == "m5-policy-no-recovery" {
 			recovery = nil
 		}
@@ -3306,20 +3356,8 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity, &RecoveryPolicy{PlannerRetries: 1}, nil)
 	}
 	m3 := strings.HasPrefix(name, "m3-")
-	capacity := &PlannerCapacityPolicy{HandoffPercent: 80}
+	capacity := capacityPolicyFixture(name)
 	if strings.HasPrefix(name, "m3-policy-invalid-") {
-		switch strings.TrimPrefix(name, "m3-policy-invalid-") {
-		case "zero":
-			capacity.HandoffPercent = 0
-		case "negative":
-			capacity.HandoffPercent = -1
-		case "above":
-			capacity.HandoffPercent = 101
-		case "nan":
-			capacity.HandoffPercent = math.NaN()
-		case "infinite":
-			capacity.HandoffPercent = math.Inf(1)
-		}
 		return executeInvestigation(ctx, r, scope, plannerModel, models, input, capacity, nil, nil)
 	}
 	if slices.Contains([]string{"m3-cycle-six", "m3-capacity-below", "m3-capacity-zero", "m3-capacity-at", "m3-capacity-at-plan", "m3-capacity-above", "m3-unknown", "m3-unknown-null", "m3-unknown-missing", "m3-unknown-tokens", "m3-plan-zero", "m3-no-ready-zero", "m3-support-no-sample", "m3-yield-no-sample"}, name) {
@@ -3461,6 +3499,28 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 			t.Error("batch failure replaced last accepted Planner state")
 		}
 	}
+	pending := slices.Clone(p.pendingFeedback)
+	if name == "m3-feedback-owner" || name == "m3-retained-feedback-reorder" {
+		if len(committed) != ordinal+1 || last == nil || len(pending) != 1 || pending[0].After != *last || !strings.HasPrefix(pending[0].Note, "Context usage percent is unknown;") {
+			t.Fatal("checkpoint rejection lost last accepted state or pending capacity feedback")
+		}
+		var accepted, rejected publication[PlannerState]
+		if err := protocol.ReadJSON(last.Path, &accepted); err != nil {
+			t.Fatal(err)
+		}
+		if err := protocol.ReadJSON(committed[ordinal].Output.Path, &rejected); err != nil {
+			t.Fatal(err)
+		}
+		feedback := append(slices.Clone(accepted.Data.Checkpoint.ControllerFeedback), pending...)
+		if name == "m3-feedback-owner" {
+			feedback[0].After = accepted.Data.Context
+		} else {
+			slices.Reverse(feedback)
+		}
+		if len(accepted.Data.Checkpoint.ControllerFeedback) != ordinal-1 || !slices.Equal(rejected.Data.Checkpoint.ControllerFeedback, feedback) {
+			t.Fatal("rejected publication did not preserve the exact targeted feedback mutation")
+		}
+	}
 	beforeRejectedRetries := r.Snapshot()
 	if _, e := p.workReady(ctx, models); e == nil || m3 && e.Error() != "worker batch requires an accepted state and usable planner" {
 		t.Error("failed caller allowed another batch")
@@ -3480,8 +3540,8 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 	if m3 && (len(r.Snapshot().Attempts) != len(beforeRejectedRetries.Attempts) || len(r.Snapshot().Sessions) != len(beforeRejectedRetries.Sessions)) {
 		t.Error("stopped M3 retries changed session/attempt accounting")
 	}
-	if p.last != last || !slices.Equal(workers, p.workerResults) || !slices.Equal(wikis, p.wikiResults) {
-		t.Error("rejected retries changed last/deliveries")
+	if p.last != last || !slices.Equal(workers, p.workerResults) || !slices.Equal(wikis, p.wikiResults) || !slices.Equal(pending, p.pendingFeedback) {
+		t.Error("rejected retries changed last/deliveries/pending feedback")
 	}
 	return contract.Ref{}, err
 }
@@ -3694,6 +3754,114 @@ func m2StoreSchema(t *testing.T, store *contract.Store, base validationInputs, n
 	var failure *contract.Error
 	if !errors.As(err, &failure) || failure.Code != contract.ContractInvalid || failure.Phase != "schema" || !strings.Contains(err.Error(), field) {
 		t.Fatalf("expected %s schema rejection: %v", field, err)
+	}
+}
+
+func assertValidationBoundary(t *testing.T, r *engine.Run, tc triageCase, report engine.Report, samples []contract.Ref) {
+	t.Helper()
+	wantStates, wantSessions := 0, 3
+	if tc.name == "m3-feedback-owner" {
+		wantStates, wantSessions = 2, 5
+	}
+	if tc.name == "m3-retained-feedback-reorder" {
+		wantStates, wantSessions = 3, 5
+	}
+	if report.Final != nil || report.Result.Final != nil || len(report.Result.Outputs) != 0 || len(report.Snapshot.Retries) != 0 || report.Snapshot.Policy.MaxLiveSessions != 4 || len(report.CleanupErrors) != 0 || len(report.FinalizationErrors) != 0 || len(report.Snapshot.Attempts) != tc.stages || len(report.Snapshot.Sessions) != wantSessions || len(report.Cleanup) != wantSessions {
+		t.Fatal("validation boundary changed outputs, accounting or cleanup")
+	}
+	states := []engine.AttemptState{}
+	schemas := map[string]int{}
+	decisions := map[string]contract.Ref{}
+	for _, a := range report.Snapshot.Attempts {
+		if a.State != engine.Succeeded || a.Output == nil || a.Output.AttemptID != a.Identity.AttemptID || a.Output.RunID != report.Snapshot.RunID {
+			t.Fatal("validation boundary lost original committed owner")
+		}
+		schemas[a.Output.SchemaID]++
+		switch a.Output.SchemaID {
+		case IntakeSchema:
+			decisions["intake-recorded"] = *a.Output
+		case WikiSchema:
+		case ContextSchema:
+			decisions["context-recorded"] = *a.Output
+		case PlannerSchema:
+			states = append(states, a)
+		case WorkerSchema:
+			if wantStates == 0 {
+				t.Fatal("invalid entry dispatched a worker")
+			}
+			decisions[a.Key+"-dispatch"] = contract.Ref{}
+			decisions[a.Key+"-recorded"] = *a.Output
+		default:
+			t.Fatal("validation rejection dispatched a later role", a.Output.SchemaID)
+		}
+	}
+	wantWorkers := 0
+	if wantStates != 0 {
+		wantWorkers = 1
+	}
+	if schemas[IntakeSchema] != 1 || schemas[WikiSchema] != 1 || schemas[ContextSchema] != 1 || schemas[WorkerSchema] != wantWorkers {
+		t.Fatal("validation boundary lost prerequisite Steps or added dispatch")
+	}
+	for _, s := range report.Snapshot.Sessions {
+		if s.State != "Closed" || s.Identity.SessionID == "" || (wantStates == 0 && s.Role.Name != "triage-intake" && s.Role.Name != "triage-wiki" && s.Role.Name != "triage-context") {
+			t.Fatal("validation rejection left an open or unexpected session")
+		}
+		matches := 0
+		for _, cleanup := range report.Cleanup {
+			if sameIdentity(cleanup.Identity, s.Identity) && cleanup.ConfirmsLocalClose(s.Identity.SessionID) {
+				matches++
+			}
+		}
+		if matches != 1 {
+			t.Fatalf("owned session lacks its exact strict-close/Wait receipt: owner=%+v matches=%d cleanup=%+v", s, matches, report.Cleanup)
+		}
+	}
+	slices.SortFunc(states, func(a, b engine.AttemptState) int {
+		if a.LastSeq < b.LastSeq {
+			return -1
+		}
+		if a.LastSeq > b.LastSeq {
+			return 1
+		}
+		return 0
+	})
+	if len(states) != wantStates || len(samples) != max(0, wantStates-1) {
+		t.Fatal("rejected snapshot was sampled or dispatched")
+	}
+	for i := 0; i < len(states)-1; i++ {
+		if samples[i] != *states[i].Output {
+			t.Fatal("stats receipt does not name the exact accepted snapshot in order")
+		}
+		decisions[states[i].Key+"-recorded"] = *states[i].Output
+	}
+	raw, err := os.ReadFile(filepath.Join(r.Dir(), "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	for decoder.More() {
+		var event struct {
+			Kind    string
+			Seq     uint64
+			Details struct {
+				Name string
+				Refs []contract.Ref
+			}
+		}
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind != "Decision" {
+			continue
+		}
+		ref, ok := decisions[event.Details.Name]
+		if !ok || ref != (contract.Ref{}) && !slices.Contains(event.Details.Refs, ref) || len(states) > 0 && event.Seq > states[len(states)-1].LastSeq {
+			t.Fatal("unexpected, ownerless or post-rejection Decision", event.Details.Name)
+		}
+		delete(decisions, event.Details.Name)
+	}
+	if len(decisions) != 0 {
+		t.Fatal("validation boundary lost accepted Decisions", decisions)
 	}
 }
 
@@ -5224,6 +5392,10 @@ var triageCases = []triageCase{
 // Truncated intake, blank proposal reason and history-alias negatives also stay
 // there to detect a production loader accidentally bypassing its validator.
 func validationStage(name string) string {
+	switch name {
+	case "m3-checkpoint-drop", "m3-policy-change", "m3-cycle-backward", "m3-cycle-skip", "m3-checkpoint-forged", "m3-full-forged", "m3-feedback-owner", "m3-feedback-blank", "m3-retained-feedback-drop", "m3-retained-feedback-change", "m3-retained-feedback-reorder":
+		return "checkpoint"
+	}
 	if name == "r5-artifact-kind" || name == "r5-file-path" {
 		return "report-files"
 	}
@@ -5304,6 +5476,104 @@ func storedPublication[T any](t *testing.T, store *contract.Store, ref contract.
 		t.Fatal("Store publication changed fixture data")
 	}
 	return p
+}
+
+// Reuse the provider data fixtures and real Store schema path, without dispatch
+// or engine authority. Published owners here are only comparison/file data.
+func testCheckpointValidation(t *testing.T, store *contract.Store, base validationInputs, name string) {
+	t.Helper()
+	contextData, files := contextFixture("complete", testScope(), []contract.Ref{base.intakeRef, base.wikiRef}, base.intake.Data, base.wiki.Data)
+	contextRef, err := storeFixture(t, store, ContextSchema, contextData, files, false)
+	if err != nil {
+		t.Fatal("invalid context prerequisite: ", err)
+	}
+	storedPublication[Context](t, store, contextRef, contextData)
+	checkpoint := &PlannerCheckpoint{Policy: *capacityPolicyFixture(""), ControllerFeedback: []PlannerFeedback{}}
+	var prior PlannerState
+	var previous *contract.Ref
+	workerResults := []contract.Ref{}
+	retained := strings.HasPrefix(name, "m3-retained-feedback-")
+	lastStep := 2
+	if retained {
+		lastStep = 3
+	}
+	for step := 1; step <= lastStep; step++ {
+		inputs := []contract.Ref{contextRef}
+		if previous != nil {
+			inputs = append(inputs, *previous)
+		}
+		inputs = append(inputs, base.intakeRef, base.wikiRef)
+		inputs = append(inputs, workerResults...)
+		// Worker evidence keeps its original proposal owner at the third snapshot.
+		if len(workerResults) > 0 {
+			worker := storedPublication[WorkerResult](t, store, workerResults[0])
+			inputs = appendUniqueRefs(inputs, worker.Data.Proposal)
+		}
+		task := stageTask{Stage: "planner", Previous: previous, Gaps: contextData.Gaps, Requirements: plannerRequirements + "\n\n" + adaptiveRequirements + "\n\nCopy the supplied checkpoint object exactly"}
+		req := contract.Request{Inputs: inputs, Prompt: string(testJSON(map[string]any{"worker_results": workerResults, "wiki_results": []contract.Ref{}, "checkpoint": checkpoint}))}
+		fixtureName := "m3-capacity-below"
+		if retained && step == 2 {
+			fixtureName = "m3-retained-feedback-reorder"
+		}
+		v := m2PlannerFixture(t, fixtureName, req, task, step)
+		ref, err := storeFixture(t, store, PlannerSchema, m2PlannerData(t, v), nil, false)
+		if err != nil {
+			t.Fatal("invalid checkpoint schema prerequisite: ", err)
+		}
+		v = storedPublication[PlannerState](t, store, ref, v).Data
+		if err := checkPlannerCheckpoint(v, prior); err != nil {
+			t.Fatal("invalid checkpoint semantic prerequisite: ", err)
+		}
+		if step > 1 {
+			prefix := prior.Checkpoint.ControllerFeedback
+			feedback := v.Checkpoint.ControllerFeedback
+			if len(feedback) != len(prefix)+1 || !slices.Equal(feedback[:len(prefix)], prefix) || feedback[len(prefix)].After != *previous {
+				t.Fatal("checkpoint prerequisite lost complete ordered feedback")
+			}
+			if retained && step == 3 && (len(prefix) != 1 || feedback[0].After == feedback[1].After || feedback[0].Note == feedback[1].Note) {
+				t.Fatal("retained checkpoint prerequisite lacks distinguishable prefix and pending item")
+			}
+		}
+		if step == lastStep {
+			before := testJSON(prior)
+			mutateCheckpointFixture(t, name, &v)
+			mutated, err := storeFixture(t, store, PlannerSchema, m2PlannerData(t, v), nil, false)
+			if err != nil {
+				t.Fatal("mutation rejected before checkpoint semantics: ", err)
+			}
+			v = storedPublication[PlannerState](t, store, mutated, v).Data
+			err = checkPlannerCheckpoint(v, prior)
+			var execution *engine.Failure
+			if errors.As(err, &execution) || err == nil || err.Error() != validationError(name) {
+				t.Fatalf("wrong checkpoint rejection: %v", err)
+			}
+			if err := validationRejection(name, err); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, testJSON(prior)) {
+				t.Fatal("checkpoint mutation changed prior snapshot")
+			}
+			return
+		}
+		if step == 1 {
+			request := workerRequest{Proposal: ref, Context: contextRef, Task: v.WorkerTasks[0]}
+			worker, files := workerFixture("complete", request, []contract.Ref{ref, contextRef, base.intakeRef, base.wikiRef})
+			workerRef, err := storeFixture(t, store, WorkerSchema, worker, files, false)
+			if err != nil {
+				t.Fatal("invalid worker prerequisite: ", err)
+			}
+			storedPublication[WorkerResult](t, store, workerRef, worker)
+			workerResults = []contract.Ref{workerRef}
+		}
+		prior, previous = v, &ref
+		copy := *v.Checkpoint
+		checkpoint = &copy
+		checkpoint.DispatchCycle = 1
+		checkpoint.ControllerFeedback = slices.Clone(v.Checkpoint.ControllerFeedback)
+		window := int64(100000)
+		usage := runtime.ContextUsage{ContextWindow: &window, SampledAt: time.Unix(int64(step), 0).UTC()}
+		checkpoint.ControllerFeedback = append(checkpoint.ControllerFeedback, PlannerFeedback{After: ref, Note: "Context usage percent is unknown; continue without treating it as zero. On-demand sample: " + string(testJSON(usage))})
+	}
 }
 
 type validationInputs struct {
@@ -5394,6 +5664,25 @@ func testIntakePublicationRevision(t *testing.T, store *contract.Store, name str
 }
 
 func validationError(name string) string {
+	if pureValidationStage(name) == "verification-policy" {
+		role := strings.Split(strings.TrimPrefix(name, "m5-policy-"), "-")[0]
+		return role + " requires an explicit model and nonnegative retry budget"
+	}
+	if pureValidationStage(name) == "capacity-policy" {
+		return "planner capacity requires an explicit finite handoff percentage in (0,100]"
+	}
+	switch name {
+	case "m3-checkpoint-drop":
+		return "planner must retain checkpoint metadata and adaptive ledger"
+	case "m3-policy-change":
+		return "planner cannot change checkpoint capacity policy"
+	case "m3-cycle-backward", "m3-cycle-skip", "m3-checkpoint-forged", "m3-full-forged":
+		return "planner dispatch/checkpoint counter echo mismatch"
+	case "m3-feedback-owner", "m3-feedback-blank":
+		return "planner feedback must bind the preceding accepted snapshot"
+	case "m3-retained-feedback-drop", "m3-retained-feedback-change", "m3-retained-feedback-reorder":
+		return "planner cannot drop or change controller feedback"
+	}
 	if name == "m1-store-file" {
 		return "unknown worker evidence file"
 	}
@@ -5815,6 +6104,10 @@ func TestTriageValidation(t *testing.T) {
 				key = "missing-page"
 			}
 			base := inputs(t, key)
+			if stage == "checkpoint" {
+				testCheckpointValidation(t, store, base, tc.name)
+				return
+			}
 			if stage == "m2-schema" {
 				m2StoreSchema(t, store, base, tc.name)
 				return
@@ -6129,7 +6422,7 @@ func TestIntakeToContext(t *testing.T) {
 		cases = append(cases, triageCase{name, v.stages, v.failure, true})
 	}
 	for _, tc := range cases {
-		if validationStage(tc.name) != "" || pureValidationStage(tc.name) != "" {
+		if (validationStage(tc.name) != "" || pureValidationStage(tc.name) != "") && !validationFullflowRepresentative(tc.name) {
 			continue
 		}
 		t.Run(tc.name, func(t *testing.T) {
@@ -9234,6 +9527,9 @@ func TestIntakeToContext(t *testing.T) {
 				return
 			}
 			if m2 {
+				if validationFullflowRepresentative(tc.name) {
+					assertValidationBoundary(t, r, tc, report, barrier.stats)
+				}
 				m2AssertOutcome(t, tc, report, plannerRef, result, expectedPlanner, barrier, count, len(hellos))
 				return
 			}

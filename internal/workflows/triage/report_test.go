@@ -19,6 +19,7 @@ import (
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/contract/reportresource"
+	"pi-workflow-controller/internal/engine"
 )
 
 // This is a pure projection test, not evidence of engine commit authority.
@@ -305,6 +306,10 @@ func TestTriageReportRendererFailures(t *testing.T) {
 // These routes test existing mechanical predicates, not the authority of synthetic Refs.
 func pureValidationStage(name string) string {
 	switch name {
+	case "m5-policy-pro-model", "m5-policy-con-model", "m5-policy-cross-model", "m5-policy-pro-retries", "m5-policy-con-retries", "m5-policy-cross-retries":
+		return "verification-policy"
+	case "m3-policy-invalid-zero", "m3-policy-invalid-negative", "m3-policy-invalid-above", "m3-policy-invalid-nan", "m3-policy-invalid-infinite":
+		return "capacity-policy"
 	case "m6-policy-negative-retry", "m6-policy-negative-session", "m6-policy-negative-attempt", "m6-policy-overflow", "m6-policy-retry-session-short", "m6-policy-retry-attempt-short":
 		return "policy"
 	case "m6-metadata-missing", "m6-history-missing-item", "m6-budget-echo":
@@ -339,6 +344,29 @@ func TestTriagePureValidation(t *testing.T) {
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			stage := pureValidationStage(name)
+			if stage == "verification-policy" || stage == "capacity-policy" {
+				var err error
+				if stage == "verification-policy" {
+					if err := verificationPolicyFixture("").check(); err != nil {
+						t.Fatal("invalid verification prerequisite: ", err)
+					}
+					err = verificationPolicyFixture(name).check()
+				} else {
+					if err := capacityPolicyFixture("").check(); err != nil {
+						t.Fatal("invalid capacity prerequisite: ", err)
+					}
+					// NaN/Inf must reach the policy, not a JSON encoder.
+					err = capacityPolicyFixture(name).check()
+				}
+				var execution *engine.Failure
+				if errors.As(err, &execution) || err == nil || err.Error() != validationError(name) {
+					t.Fatalf("wrong policy rejection: %v", err)
+				}
+				if err := validationRejection(name, err); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
 			if stage == "policy" {
 				policy := ReportPolicy{ReportRetries: 1, ReserveSessions: 1, ReserveAttempts: 2}
 				if err := policy.check(); err != nil {
