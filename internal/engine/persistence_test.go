@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,6 +86,322 @@ func engPersistUnregistered(ctx context.Context, run *Run) (contract.Ref, error)
 		return contract.Ref{}, fmt.Errorf("unregistered fixture is not otherwise valid: %w", err)
 	}
 	return ref, nil
+}
+
+func TestEnginePersistenceSyncFileConstruction(t *testing.T) {
+	for _, site := range []string{"schema", "run.json", "input.json", "journal", "snapshot"} {
+		for _, fail := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/fail=%t", site, fail), func(t *testing.T) {
+				base := t.TempDir()
+				injected := errors.New("synthetic constructor Sync failure")
+				var files []*os.File
+				callback := func(f *os.File) error {
+					name := filepath.Base(f.Name())
+					match := name == site
+					switch site {
+					case "schema":
+						sum := sha256.Sum256([]byte("https://engine.test/output.json"))
+						match = name == hex.EncodeToString(sum[:])+".json"
+					case "journal":
+						match = name == "events.jsonl"
+					case "snapshot":
+						match = strings.HasPrefix(name, ".engine-")
+					}
+					if !match {
+						return f.Sync()
+					}
+					files = append(files, f)
+					if info, err := f.Stat(); err != nil || info.Size() == 0 {
+						t.Errorf("Sync before constructor Write: %v %v", info, err)
+					}
+					if fail {
+						return injected
+					}
+					return nil
+				}
+				fake := &engTestRuntime{}
+				r, err := New(context.Background(), Definition{Name: "sync-construction", Version: "1", Policy: DefaultRunPolicy(), Execute: func(context.Context, *Run, Input) (Result, error) { return Result{}, nil }}, Input{Prompt: "constructor sync", LaunchCWD: base}, Options{BaseDir: base, Schemas: engTestSchemas(t), Runtime: fake, SyncFile: callback})
+				if len(files) != 1 {
+					t.Errorf("constructor target calls=%d, want 1", len(files))
+				}
+				for _, f := range files {
+					if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
+						t.Errorf("constructor descriptor not closed: %v", err)
+					}
+				}
+				if fail {
+					if r != nil {
+						_ = r.Execute()
+						t.Fatal("failed constructor returned Run")
+					}
+					want := StorageFailed
+					if site == "journal" {
+						want = JournalFailed
+					}
+					if !engTestCode(err, want) || !errors.Is(err, injected) {
+						t.Fatalf("constructor failure lost classification/cause: %v", err)
+					}
+					if len(fake.allSessions()) != 0 {
+						t.Error("constructor failure started session")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				events := engTestEvents(t, r)
+				if len(events) != 1 || events[0].Kind != "RunCreated" {
+					t.Errorf("missing first journal commit: %+v", events)
+				}
+				report := r.Execute()
+				engTestReport(t, report, Succeeded, 0)
+				engTestPersisted(t, r, report)
+			})
+		}
+	}
+}
+
+func TestEnginePersistenceSyncFileCommit(t *testing.T) {
+	for _, site := range []string{"journal", "snapshot"} {
+		for _, fail := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/fail=%t", site, fail), func(t *testing.T) {
+				base := t.TempDir()
+				fake := &engTestRuntime{}
+				injected := errors.New("synthetic publication Sync failure")
+				var armed atomic.Bool
+				var mu sync.Mutex
+				var files []*os.File
+				callback := func(f *os.File) error {
+					name := filepath.Base(f.Name())
+					match := site == "journal" && name == "events.jsonl" || site == "snapshot" && strings.HasPrefix(name, ".engine-")
+					if !armed.Load() || !match {
+						return f.Sync()
+					}
+					mu.Lock()
+					files = append(files, f)
+					mu.Unlock()
+					if fail {
+						return injected
+					}
+					return nil
+				}
+				var published contract.Ref
+				var producer, downstream StepResult
+				var stepErr, readErr, downstreamErr error
+				workflow := func(ctx context.Context, run *Run, _ Input) (Result, error) {
+					h, err := run.OpenSession(ctx, engTestRole("worker"))
+					if err != nil {
+						return Result{}, err
+					}
+					producer, stepErr = engTestStep(ctx, run.Root(), h, "producer")
+					_, readErr = Decode[engTestData](ctx, run, published)
+					if fail {
+						downstream, downstreamErr = engTestStep(ctx, run.Root(), h, "downstream", published)
+						return Result{}, nil
+					}
+					if stepErr != nil {
+						return Result{}, stepErr
+					}
+					if readErr != nil {
+						return Result{}, readErr
+					}
+					return engTestResult(producer), nil
+				}
+				r, err := New(context.Background(), Definition{Name: "sync-commit", Version: "1", Policy: DefaultRunPolicy(), Execute: workflow}, Input{Prompt: "commit sync", LaunchCWD: base}, Options{BaseDir: base, Schemas: engTestSchemas(t), Runtime: fake, SyncFile: callback})
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.afterPublish = func(ref contract.Ref) { published = ref; armed.Store(true) }
+				sentinel := filepath.Join(r.Dir(), ".engine-sentinel")
+				if err := os.WriteFile(sentinel, []byte("keep"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				report := r.Execute()
+				mu.Lock()
+				defer mu.Unlock()
+				if len(files) == 0 {
+					t.Fatal("publication did not reach injected Sync")
+				}
+				if fail && site == "journal" && len(files) != 1 {
+					t.Errorf("broken journal retried Sync: calls=%d", len(files))
+				}
+				for _, f := range files {
+					if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
+						t.Errorf("Sync descriptor not closed: %v", err)
+					}
+				}
+				if fail {
+					want := StorageFailed
+					if site == "journal" {
+						want = JournalFailed
+					}
+					for _, err := range []error{stepErr, readErr, downstreamErr, report.Failure} {
+						if !engTestCode(err, want) || !errors.Is(err, injected) {
+							t.Errorf("lost sticky Sync failure: %v", err)
+						}
+					}
+					if report.Outcome != Failed || report.ExitCode != 1 || report.Snapshot.StatePersisted || len(report.FinalizationErrors) == 0 {
+						t.Errorf("Sync failure reported durable success: %+v", report)
+					}
+					if producer.Output != (contract.Ref{}) || downstream != (StepResult{}) || len(r.publications) != 0 {
+						t.Error("rename-only publication authorized")
+					}
+				} else {
+					engTestReport(t, report, Succeeded, 0)
+					engTestPersisted(t, r, report)
+					if producer.Output != published || r.publications[published.AttemptID].Ref != published {
+						t.Error("successful Sync did not commit exact Ref")
+					}
+				}
+				raw, err := os.ReadFile(published.Path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sum := sha256.Sum256(raw)
+				if hex.EncodeToString(sum[:]) != published.SHA256 {
+					t.Error("fixture did not reach real Store.Publish")
+				}
+				engPersistClosed(t, fake, report, 1)
+				calls, _, confirms := fake.allSessions()[0].history()
+				if len(calls) != 1 || confirms != 1 || len(report.Snapshot.Attempts) != 1 {
+					t.Error("Sync failure changed dispatch/Confirm accounting")
+				}
+				entries, err := os.ReadDir(r.Dir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					if strings.HasPrefix(entry.Name(), ".engine-") && entry.Name() != ".engine-sentinel" {
+						t.Errorf("owned temp leaked: %s", entry.Name())
+					}
+				}
+				if raw, err := os.ReadFile(sentinel); err != nil || string(raw) != "keep" {
+					t.Errorf("foreign temp changed: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestEnginePersistenceSyncFileDefault(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit=%t", explicit), func(t *testing.T) {
+			base := t.TempDir()
+			fake := &engTestRuntime{}
+			opts := Options{BaseDir: base, Schemas: engTestSchemas(t), Runtime: fake}
+			if explicit {
+				opts.SyncFile = (*os.File).Sync
+			}
+			workflow := func(ctx context.Context, run *Run, _ Input) (Result, error) {
+				h, err := run.OpenSession(ctx, engTestRole("worker"))
+				if err != nil {
+					return Result{}, err
+				}
+				step, err := engTestStep(ctx, run.Root(), h, "producer")
+				return engTestResult(step), err
+			}
+			r, err := New(context.Background(), Definition{Name: "sync-default", Version: "1", Policy: DefaultRunPolicy(), Execute: workflow}, Input{Prompt: "real Sync", LaunchCWD: base}, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report := r.Execute()
+			engTestReport(t, report, Succeeded, 0)
+			engTestPersisted(t, r, report)
+			engPersistClosed(t, fake, report, 1)
+		})
+	}
+}
+
+func TestEnginePersistenceSyncFileInstances(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	t.Cleanup(cancel)
+	entered, release, joined := make(chan struct{}, 2), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(joined)
+		defer close(release)
+		for range 2 {
+			select {
+			case <-entered:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { cancel(); <-joined })
+	var workers sync.WaitGroup
+	for _, fail := range []bool{false, true} {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			t.Run(fmt.Sprintf("fail=%t", fail), func(t *testing.T) {
+				base := t.TempDir()
+				canonical, err := filepath.EvalSymlinks(base)
+				if err != nil {
+					t.Fatal(err)
+				}
+				injected := errors.New("instance-local Sync failure")
+				var inputHit atomic.Bool
+				callback := func(f *os.File) error {
+					name := f.Name()
+					if !filepath.IsAbs(name) {
+						name = filepath.Join(canonical, name)
+					}
+					rel, err := filepath.Rel(canonical, name)
+					if err != nil || !filepath.IsLocal(rel) {
+						return fmt.Errorf("foreign instance file: %s", f.Name())
+					}
+					opened, err := f.Stat()
+					if err != nil {
+						return err
+					}
+					owned, err := os.Stat(name)
+					if err != nil || !os.SameFile(opened, owned) {
+						return fmt.Errorf("foreign instance file %s: %v", f.Name(), err)
+					}
+					if filepath.Base(f.Name()) == "input.json" {
+						inputHit.Store(true)
+						entered <- struct{}{}
+						select {
+						case <-release:
+						case <-ctx.Done():
+							return context.Cause(ctx)
+						}
+					}
+					if fail && filepath.Base(f.Name()) == "request.json" {
+						return injected
+					}
+					return nil
+				}
+				fake := &engTestRuntime{}
+				workflow := func(ctx context.Context, run *Run, _ Input) (Result, error) {
+					h, err := run.OpenSession(ctx, engTestRole("worker"))
+					if err != nil {
+						return Result{}, err
+					}
+					step, err := engTestStep(ctx, run.Root(), h, "producer")
+					return engTestResult(step), err
+				}
+				r, err := New(ctx, Definition{Name: "sync-instance", Version: "1", Policy: DefaultRunPolicy(), Execute: workflow}, Input{Prompt: "instance sync", LaunchCWD: base}, Options{BaseDir: base, Schemas: engTestSchemas(t), Runtime: fake, SyncFile: callback})
+				if err != nil {
+					t.Fatal(err)
+				}
+				report := r.Execute()
+				if fail {
+					engTestReport(t, report, Failed, 1)
+					if !engTestCode(report.Failure, StorageFailed) || !errors.Is(report.Failure, injected) {
+						t.Errorf("instance failure missing: %v", report.Failure)
+					}
+				} else {
+					engTestReport(t, report, Succeeded, 0)
+				}
+				if !inputHit.Load() {
+					t.Error("constructor dependency not exercised")
+				}
+				engPersistClosed(t, fake, report, 1)
+			})
+		}()
+	}
+	workers.Wait()
 }
 
 func TestEnginePersistenceRefEntrypoints(t *testing.T) {

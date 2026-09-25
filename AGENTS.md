@@ -61,7 +61,7 @@ Planner Agent 可以提出下一步工作；Controller 依已批准的 contract�
 - 修改前讀現況、exports、立即 callers、contracts 與共用 utilities。先說明哪些是 workflow 接線，哪些留給 Agent；需要 Controller 新增領域推理時先停下確認。
 - 規格或既有文件衝突時，指出具體位置並確認必要變更；不得自行放寬本憲法，也不得沿錯誤架構追加 validators 補洞。
 - Tests 通過不能替架構選擇背書。合理單元需正式獨立 review、核實修正及對應驗證；runner 採證不能取代 code／scale-failure／simplicity review。
-- 使用真 engine／Store／protocol 路徑，只替代外部 API、provider 或 filesystem 故障邊界，不 mock Step、validator、內部編排或 parser 來製造成功。
+- 使用真 engine／Store／protocol 路徑，只替代外部 API、provider 或明確批准的 filesystem dependency boundary；OS File.Sync 可注入正常成功或故障結果，產品預設真 Sync，durability／storage-journal fault／持久化順序及 fsync queue 測試保真。這是正常 DI，不是產品 fast mode；其他 filesystem 操作不變。不 mock Step、validator、內部編排或 parser 來製造成功。
 - 驗收 exact 待提交 tree，清楚列出 skips、未執行與未驗 live 能力。匿名 fixtures、工具存在、skill 可載入、Agent 實際成功操作是不同層級的證據。
 - Repository 只保留通用 source、匿名 tests 與文件。真資料、認證、個人路徑、逐次工程報告及交接 metadata 留在 repo 外指定位置；不覆蓋不明來源變更，不自行發布。
 

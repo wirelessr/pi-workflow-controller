@@ -25,6 +25,9 @@ type Options struct {
 	// PiDefaultCWD is used only when a role leaves CWD empty. Relative paths
 	// are anchored to Input.LaunchCWD, without changing persisted input.
 	PiDefaultCWD string
+	// SyncFile is fixed at construction and shared with this run's Store.
+	// Nil uses os.File.Sync. Callers must support concurrent file syncs.
+	SyncFile func(*os.File) error
 }
 type publication struct {
 	Ref      contract.Ref
@@ -39,6 +42,7 @@ type Run struct {
 	store                                *contract.Store
 	schemas                              *contract.Registry
 	fs                                   *os.Root
+	syncFile                             func(*os.File) error
 	runtime                              runtime.Runtime
 	ctx                                  context.Context
 	cancel                               context.CancelCauseFunc
@@ -96,9 +100,12 @@ func New(ctx context.Context, def Definition, input Input, opts Options) (*Run, 
 	if defaultCWD != "" && !strings.ContainsRune(defaultCWD, '\x00') && !filepath.IsAbs(defaultCWD) {
 		defaultCWD = filepath.Join(input.LaunchCWD, defaultCWD)
 	}
+	if opts.SyncFile == nil {
+		opts.SyncFile = (*os.File).Sync
+	}
 	created := time.Now()
 	p := def.Policy
-	store, err := contract.NewStore(opts.Schemas, contract.Options{BaseDir: opts.BaseDir, Prompt: input.Prompt, LaunchCWD: input.LaunchCWD, Workflow: def.Name, WorkflowVersion: def.Version, ControllerVersion: opts.ControllerVersion, PiVersion: opts.PiVersion, Limits: contract.Limits{MaxPromptBytes: p.MaxPromptBytes, MaxCandidateBytes: p.MaxCandidateBytes, MaxJSONDepth: p.MaxJSONDepth, MaxFileBytes: p.MaxFileBytes, MaxAttemptFileBytes: p.MaxAttemptFileBytes, MaxAttemptFiles: p.MaxAttemptFiles}})
+	store, err := contract.NewStore(opts.Schemas, contract.Options{SyncFile: opts.SyncFile, BaseDir: opts.BaseDir, Prompt: input.Prompt, LaunchCWD: input.LaunchCWD, Workflow: def.Name, WorkflowVersion: def.Version, ControllerVersion: opts.ControllerVersion, PiVersion: opts.PiVersion, Limits: contract.Limits{MaxPromptBytes: p.MaxPromptBytes, MaxCandidateBytes: p.MaxCandidateBytes, MaxJSONDepth: p.MaxJSONDepth, MaxFileBytes: p.MaxFileBytes, MaxAttemptFileBytes: p.MaxAttemptFileBytes, MaxAttemptFiles: p.MaxAttemptFiles}})
 	if err != nil {
 		return nil, normalize(err, "New")
 	}
@@ -116,7 +123,7 @@ func New(ctx context.Context, def Definition, input Input, opts Options) (*Run, 
 		timed, deadlineCancel = context.WithDeadlineCause(ctx, deadline, deadlineCause)
 	}
 	life, cancel := context.WithCancelCause(timed)
-	r := &Run{definition: def, input: input, store: store, schemas: opts.Schemas, fs: fs, ctx: life, cancel: cancel, deadlineCancel: deadlineCancel, deadline: deadline, accepting: true, changed: make(chan struct{}, 1), handles: make(map[string]*SessionHandle), publications: make(map[string]publication), invocations: make(map[string]string), retryAncestors: make(map[string][]string), observations: make(chan runtime.Observation, p.Runtime.ObservationQueue), observationStop: make(chan struct{}), observationDone: make(chan struct{}), cleanupDone: make(chan struct{})}
+	r := &Run{definition: def, input: input, store: store, schemas: opts.Schemas, fs: fs, syncFile: opts.SyncFile, ctx: life, cancel: cancel, deadlineCancel: deadlineCancel, deadline: deadline, accepting: true, changed: make(chan struct{}, 1), handles: make(map[string]*SessionHandle), publications: make(map[string]publication), invocations: make(map[string]string), retryAncestors: make(map[string][]string), observations: make(chan runtime.Observation, p.Runtime.ObservationQueue), observationStop: make(chan struct{}), observationDone: make(chan struct{}), cleanupDone: make(chan struct{})}
 	r.piDefaultCWD = defaultCWD
 	r.workflowDone = make(chan struct{})
 	r.root = r.newScope("root", nil)

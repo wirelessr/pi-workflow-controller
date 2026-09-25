@@ -29,7 +29,7 @@ func (r *Run) writeLocked(path, phase string, value any) (err error) {
 	defer func() { _ = r.fs.Remove(tmp) }()
 	_, err = f.Write(raw)
 	if err == nil {
-		err = f.Sync()
+		err = r.syncFile(f)
 	}
 	err = errors.Join(err, f.Close())
 	if err != nil {
@@ -83,7 +83,7 @@ func (r *Run) appendLocked(kind string, details any, source []contract.Identity)
 				err = io.ErrShortWrite
 			}
 			if err == nil {
-				err = f.Sync()
+				err = r.syncFile(f)
 			}
 			err = errors.Join(err, f.Close())
 		}

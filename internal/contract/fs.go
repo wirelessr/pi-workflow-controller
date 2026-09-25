@@ -160,19 +160,19 @@ func readStable(ctx context.Context, root *os.Root, path string, max int64, barr
 	return buf.Bytes(), nil
 }
 
-func writeExclusive(root *os.Root, path string, raw []byte) error {
+func writeExclusive(root *os.Root, path string, raw []byte, syncFile func(*os.File) error) error {
 	f, err := root.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
 	_, err = f.Write(raw)
 	if err == nil {
-		err = f.Sync()
+		err = syncFile(f)
 	}
 	return errors.Join(err, f.Close())
 }
 
-func writeAtomic(root *os.Root, path string, raw []byte) (err error) {
+func writeAtomic(root *os.Root, path string, raw []byte, syncFile func(*os.File) error) (err error) {
 	temp := filepath.Join(filepath.Dir(path), ".tmp-"+NewID())
 	f, err := root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
@@ -185,7 +185,7 @@ func writeAtomic(root *os.Root, path string, raw []byte) (err error) {
 	}()
 	_, err = f.Write(raw)
 	if err == nil {
-		err = f.Sync()
+		err = syncFile(f)
 	}
 	err = errors.Join(err, f.Close())
 	if err != nil {

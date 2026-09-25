@@ -2416,6 +2416,7 @@ type m2Barrier struct {
 	held                 map[string]protocol.Event
 	attempts             map[string]string
 	order                []string
+	exhaustedReleases    []string
 	waiting              string
 	proved               bool
 	faulted              bool
@@ -2432,8 +2433,8 @@ func (b *m2Barrier) pending(name string) bool {
 	if b.reportFailureAttempt != "" {
 		return len(b.held) == 2
 	}
-	if strings.HasPrefix(name, "m5-supplement-exhausted-") {
-		return len(b.held) == 1
+	if name == "m5-supplement-exhausted-pro-fatal-cross" || name == "m5-supplement-exhausted-cross-fatal-pro" {
+		return len(b.held) >= 3
 	}
 	return len(b.held) == 3 && (len(b.order) < 3 || b.waiting != "")
 }
@@ -2476,26 +2477,102 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 		b.proved, b.faulted = true, true
 		return
 	}
-	if strings.HasPrefix(name, "m5-supplement-exhausted-") {
-		if len(b.held) != 1 || b.faulted {
+	if name == "m5-supplement-exhausted-pro-fatal-cross" || name == "m5-supplement-exhausted-cross-fatal-pro" {
+		if len(b.held) < 3 || b.faulted {
 			return
 		}
 		exhausted, fatal := "pro", "cross"
 		if strings.HasSuffix(name, "fatal-pro") {
 			exhausted, fatal = "cross", "pro"
 		}
-		for _, retry := range r.Snapshot().Retries {
-			if strings.HasSuffix(retry.Scope, "-"+exhausted+"-recovery") && !retry.Active {
-				if retry.RetryCount != 1 || retry.MaxRetries != 1 {
-					t.Fatal("fatal permutation did not exhaust the real role retry")
-				}
-				b.proved, b.faulted = true, true
-				b.order = []string{exhausted, fatal}
-				if err := b.held[fatal].Reply(protocol.Control{Type: "provider-error"}); err != nil {
-					t.Fatal(err)
-				}
+		replacement := exhausted + "-replacement"
+		snapshot := r.Snapshot()
+		if !snapshot.StatePersisted {
+			return
+		}
+		// These are prompt replies, not synthetic dispatch or retry completion.
+		// Keep con live until both required startups and faults have completed.
+		failed := []string{}
+		if b.waiting != "" {
+			failed = append(failed, exhausted)
+		}
+		if b.waiting == replacement || b.waiting == "con" {
+			failed = append(failed, replacement)
+		}
+		for _, key := range failed {
+			a := snapshot.Attempts[b.attempts[key]]
+			if a.Failure == nil {
 				return
 			}
+			if a.State != engine.Failed || a.Output != nil || a.Failure.Code != engine.CompactionFailed || a.Failure.Origin != engine.OriginCompaction || a.Failure.Phase != "Step" || a.Failure.AttemptID != a.Identity.AttemptID || a.Failure.StepID != a.Identity.InvocationID {
+				t.Fatalf("exhausted gate wrong fault: key=%s attempt=%s state=%s code=%s origin=%s phase=%s", key, a.Identity.AttemptID, a.State, a.Failure.Code, a.Failure.Origin, a.Failure.Phase)
+			}
+			if snapshot.Sessions[a.HandleID].State != "Closed" {
+				return
+			}
+		}
+		id, ack := exhausted, "compaction-error"
+		switch b.waiting {
+		case "":
+			for _, role := range []string{"pro", "con", "cross"} {
+				a, ok := snapshot.Attempts[b.attempts[role]]
+				owner := snapshot.Sessions[a.HandleID]
+				if !ok || a.Output != nil || a.Failure != nil || owner.State == "Closed" || owner.Identity.SessionID == "" || owner.Role.Name != "triage-verify-"+role {
+					t.Fatalf("exhausted gate missing live first prompt: role=%s attempt=%s", role, b.attempts[role])
+				}
+			}
+			b.proved = true
+		case exhausted:
+			if b.attempts[replacement] == "" {
+				return
+			}
+			first := snapshot.Attempts[b.attempts[exhausted]]
+			second := snapshot.Attempts[b.attempts[replacement]]
+			if first.Identity.AttemptID == second.Identity.AttemptID || first.HandleID == second.HandleID || first.Scope != second.Scope {
+				t.Fatal("exhausted gate replacement did not use a fresh actual attempt and session in the same retry")
+			}
+			id = replacement
+		case replacement, "con":
+			role := exhausted
+			if b.waiting == "con" {
+				role = "con"
+				a := snapshot.Attempts[b.attempts[role]]
+				if a.State != engine.Succeeded || a.Output == nil || snapshot.Sessions[a.HandleID].State != "Closed" {
+					return
+				}
+			}
+			finished := false
+			for _, retry := range snapshot.Retries {
+				if retry.Scope == snapshot.Attempts[b.attempts[role]].Scope && !retry.Active {
+					want := 1
+					if role == "con" {
+						want = 0
+					}
+					if retry.RetryCount != want || retry.MaxRetries != 1 {
+						t.Fatalf("exhausted gate wrong retry accounting: role=%s count=%d max=%d", role, retry.RetryCount, retry.MaxRetries)
+					}
+					finished = true
+				}
+			}
+			if !finished {
+				return
+			}
+			id, ack = "con", "settle"
+			if b.waiting == "con" {
+				id, ack = fatal, "provider-error"
+			}
+		default:
+			t.Fatalf("unexpected exhausted gate phase %q", b.waiting)
+		}
+		if err := b.held[id].Reply(protocol.Control{Type: ack}); err != nil {
+			t.Fatal(err)
+		}
+		b.exhaustedReleases = append(b.exhaustedReleases, id)
+		b.waiting = id
+		t.Logf("exhausted-gate release=%d role=%s actual_attempt=%s reply=%s snapshot_seq=%d", len(b.exhaustedReleases), id, b.attempts[id], ack, snapshot.LastSeq)
+		if id == fatal {
+			b.faulted = true
+			b.order = []string{exhausted, fatal}
 		}
 		return
 	}
@@ -7240,7 +7317,127 @@ func TestIntakeToContext(t *testing.T) {
 			if product {
 				input.Prompt = string(testJSON(workflowInput{Scope: scope, Request: originalRequest}))
 			}
-			r, err = engine.New(runCtx, def, input, engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport, PiDefaultCWD: service})
+			opts := engine.Options{BaseDir: dir, Schemas: registry, Runtime: transport, PiDefaultCWD: service}
+			var syncCalls atomic.Int64
+			switch productName {
+			case "m5-claim-parent", "m5-claim-ledger", "m5-agent-inference", "m6-history-wrong-owner",
+				"attempt-cap", "attempt-timeout", "cancel", "complete", "http-attachment-partial", "http-complete",
+				"http-linked-failure", "http-malformed-fields", "http-malformed-issue", "http-metadata-limit", "http-oversized",
+				"http-page-duplicate", "http-page-empty", "http-page-failure", "http-page-null", "http-page-offset",
+				"http-page-partial", "http-page-short", "http-page-total", "initial-update", "m1-analysis", "m1-complete",
+				"m1-context", "m1-dependencies", "m1-dependencies-incomplete", "m1-evidence-analysis", "m1-file",
+				"m1-handoff-after", "m1-handoff-before", "m1-incomplete", "m1-incomplete-no-gap", "m1-inputs", "m1-logs",
+				"m1-owner", "m1-pending", "m1-planner-drop", "m1-planner-invent", "m1-planner-invent-committed",
+				"m1-planner-provider-failure", "m1-proposal", "m1-query-utc", "m1-redispatch", "m1-reuse-id", "m1-schema",
+				"m1-support", "m1-task-duplicate", "m1-task-id", "m1-task-owner", "m1-task-utc", "m1-unsatisfied",
+				"m1-worker-cancel", "m1-worker-provider-failure", "m1-worker-timeout", "m3-capacity-above", "m3-capacity-at",
+				"m3-capacity-at-plan", "m3-capacity-below", "m3-capacity-zero", "m3-checkpoint-missing", "m3-cycle-six",
+				"m3-feedback-change", "m3-feedback-drop", "m3-feedback-invent", "m3-feedback-owner", "m3-feedback-reorder",
+				"m3-fresh-reconstruct", "m3-fresh-wiki-before-step", "m3-fresh-worker-before-step", "m3-illegal-optin",
+				"m3-no-ready-zero", "m3-note-change", "m3-plan-zero", "m3-policy-initial-echo", "m3-policy-invalid-nan",
+				"m3-retained-feedback-reorder", "m3-stats-cancel", "m3-stats-format", "m3-stats-history", "m3-stats-identity",
+				"m3-stats-missing-identity", "m3-stats-missing-percent", "m3-stats-percent-type", "m3-stats-reject",
+				"m3-stats-timeout", "m3-stats-tokens-type", "m3-stats-window-zero", "m3-support-no-sample", "m3-support-pending",
+				"m3-unknown", "m3-unknown-missing", "m3-unknown-null", "m3-unknown-tokens", "m3-yield-no-sample",
+				"m4-allfail-agent-progress", "m4-allfail-blind-new-id", "m4-allfail-caller-bool",
+				"m4-allfail-reframe-checkpoint", "m4-capacity-fresh-worker-timeout", "m4-cycle-echo", "m4-delivery-context",
+				"m4-delivery-id", "m4-delivery-proposal", "m4-delivery-results", "m4-drop-recovery", "m4-meta-attempt",
+				"m4-meta-cleanup", "m4-meta-diagnostic", "m4-meta-identity", "m4-meta-prefix", "m4-nil-recovery-timeout",
+				"m4-planner-first-compaction", "m4-planner-first-timeout", "m4-planner-later-user-cancel",
+				"m4-planner-parent-deadline", "m4-planner-retry-exhausted", "m4-planner-run-limit",
+				"m4-planner-unknown-provider", "m4-planner-user-cancel", "m4-policy-echo", "m4-reframe-completed-inspection",
+				"m4-reframe-no-inspection", "m4-reframe-stale-inspection", "m4-reframe-timeout-inspection-resume",
+				"m4-success-batch", "m4-support-resolve-context-timeout", "m4-support-resolve-wiki-timeout",
+				"m4-support-unsafe-no-basis", "m4-support-unsafe-no-reason", "m4-support-unsafe-owner",
+				"m4-support-update-context-timeout", "m4-support-update-wiki-timeout", "m4-wiki-timeout-partial-resume",
+				"m4-worker-timeout", "m5-agent-changes-reset", "m5-agent-runtime-declared", "m5-claim-retry-exhausted",
+				"m5-claim-timeout-retry", "m5-delivery-fresh-handoff", "m5-feedback-history-prefix", "m5-feedback-missing",
+				"m5-feedback-model-echo", "m5-feedback-repeat-completed", "m5-feedback-worker-new-claim",
+				"m5-feedback-wrong-action", "m5-feedback-wrong-claim", "m5-new-claim-all-fresh", "m5-new-evidence-all-fresh",
+				"m5-new-version-cross-reject", "m5-partial-provider-fatal", "m5-partial-user-cancel",
+				"m5-pending-claim-fresh-handoff", "m5-planner-feedback-timeout", "m5-policy-cross-retries",
+				"m5-policy-no-recovery", "m5-reverse-completion", "m5-same-version-missing-only",
+				"m5-supplement-claim-owner-key", "m5-supplement-claim-owner-model", "m5-supplement-claim-owner-role",
+				"m5-supplement-claim-parent-binding", "m5-supplement-exhausted-cross-fatal-pro",
+				"m5-supplement-exhausted-pro-fatal-cross", "m5-supplement-reframe-inspection-resume",
+				"m5-supplement-reframe-wiki", "m5-supplement-verifier-owner-key", "m5-supplement-verifier-owner-model",
+				"m5-supplement-verifier-owner-role", "m5-three-fresh-yield", "m5-verifier-claim", "m5-verifier-compaction-retry",
+				"m5-verifier-evidence", "m5-verifier-role", "m5-verifier-schema", "m5-verifier-timeout-retry",
+				"m5-verifier-unauthorized-basis", "m5-verifier-unavailable", "m6-bootstrap-attempts-short", "m6-bootstrap-exact",
+				"m6-bootstrap-existing-cap", "m6-bootstrap-sessions-short", "m6-capacity-handoff", "m6-capacity-reserve-short",
+				"m6-capacity-unknown", "m6-claim-and-role-retry-reserve", "m6-claim-history-reopen",
+				"m6-deadline-slow-intake-compaction", "m6-deadline-slow-intake-reframe", "m6-history-cross-handled",
+				"m6-history-redirect", "m6-history-retained-role", "m6-history-retry-full-inputs",
+				"m6-history-same-version-handled", "m6-history-uncommitted-result", "m6-history-unresolved",
+				"m6-history-unselected-claim", "m6-history-wiki-resume", "m6-history-worker-unresolved", "m6-history-workers",
+				"m6-mandatory-reframe-inspection", "m6-ordinary-cancel-no-report", "m6-ordinary-schema-no-report",
+				"m6-planner-history-reopen", "m6-policy-no-recovery", "m6-policy-recovery-overflow", "m6-policy-wrong-renderer",
+				"m6-policy-zero-invalid", "m6-policy-zero-retry-valid", "m6-reframe-wiki", "m6-report-cancel",
+				"m6-report-compaction-exhausted", "m6-report-compaction-retry", "m6-report-failures-echo",
+				"m6-report-file-hardcap", "m6-report-postcommit-binding", "m6-report-postcommit-render", "m6-report-schema",
+				"m6-report-timeout-exhausted", "m6-report-timeout-retry", "m6-report-unknown-provider",
+				"m6-review-claim-planner-state", "m6-review-claim-retry", "m6-review-planner-arbitrary-state",
+				"m6-review-planner-retry", "m6-review-support-resolve-context", "m6-review-support-resolve-wiki",
+				"m6-review-support-revise-context", "m6-review-support-revise-wiki", "m6-review-support-wrong-phase",
+				"m6-review-wiki-resume", "m6-review-wiki-wrong-role", "m6-review-worker-owner-handled",
+				"m6-review-worker-redirect", "m6-review-worker-resume", "m6-review-worker-wrong-proposal",
+				"m6-review-worker-wrong-task", "m6-supplement-foreign-producer-seam", "m6-supplement-host-lookup",
+				"m6-supplement-overflow-con", "m6-supplement-overflow-cross", "m6-supplement-overflow-pro",
+				"m6-supplement-parent-owner-seam", "m6-supplement-resolve-context-resume-attempt-exact",
+				"m6-supplement-resolve-context-resume-reserve", "m6-supplement-resolve-context-resume-session-exact",
+				"m6-supplement-resolve-context-resume-session-short", "m6-supplement-resolve-wiki-resume-attempt-exact",
+				"m6-supplement-resolve-wiki-resume-reserve", "m6-supplement-resolve-wiki-resume-session-exact",
+				"m6-supplement-resolve-wiki-resume-session-short", "m6-supplement-revise-context-resume-attempt-exact",
+				"m6-supplement-revise-context-resume-reserve", "m6-supplement-revise-context-resume-session-exact",
+				"m6-supplement-revise-context-resume-session-short", "m6-supplement-revise-wiki-resume-attempt-exact",
+				"m6-supplement-revise-wiki-resume-reserve", "m6-supplement-revise-wiki-resume-session-exact",
+				"m6-supplement-revise-wiki-resume-session-short", "m6-supplement-verifier-live-exact",
+				"m6-supplement-verifier-live-short", "m6-supplement-wrong-result-role", "m6-support-inspection-reserve",
+				"m6-support-resolve-reserve", "m6-support-resolve-resume", "m6-support-revise-reserve",
+				"m6-support-revise-resume", "m6-true-hardcap-no-report", "m6-verified-yield", "m6-verifiers-reserve-exact",
+				"m6-verifiers-reserve-short", "m6-verifiers-reverse-completion", "m6-workers-all-segments",
+				"m6-workers-feedback-retry-reserve", "m6-workers-first-segment-exact", "m6-workers-first-segment-sessions-exact",
+				"m6-workers-reserve-attempts-short", "m6-workers-reserve-sessions-short", "m6-yield", "m7-cancel", "m7-handoff",
+				"m7-no-runtime-prerequisites", "m7-partial-scope", "m7-planner-retry", "m7-report-retry", "m7-request-rewritten",
+				"m7-resource", "m7-same-version", "m7-scope-expanded", "m7-support-revision", "m7-verified", "m7-vision",
+				"m7-wrong-ref", "m7-yield", "planner-attempt-cap", "planner-cancel", "planner-handoff", "planner-history",
+				"planner-incomplete", "planner-invented-previous", "planner-missing-model", "planner-provider-failure",
+				"planner-ready", "planner-reuse", "planner-reuse-handoff", "planner-session-cap", "planner-support",
+				"planner-ticket-only", "planner-timeout", "planner-uncommitted-input", "planner-wrong-context",
+				"planner-wrong-previous", "planner-wrong-scope", "provider-failure", "r5-assessment-owner", "r5-body-tamper",
+				"r5-cancel", "r5-claim-version", "r5-historical", "r5-incomplete", "r5-producer-forgery", "r5-uncommitted",
+				"r5-version-binding", "r5-versioned", "refresh-attachment", "refresh-attempt-cap", "refresh-cancel",
+				"refresh-content-failure-repeat", "refresh-context-foreign-ref", "refresh-drop-gap", "refresh-dropped-history",
+				"refresh-escalated-task", "refresh-false-no-matches", "refresh-historical-wiki", "refresh-invalidated",
+				"refresh-issue-repeat", "refresh-old-wiki-binding", "refresh-page", "refresh-provider-failure", "refresh-repeat",
+				"refresh-then-resolve", "refresh-timeout", "refresh-uncommitted-input", "refresh-wiki-partial",
+				"refresh-work-binding", "refresh-work-changed", "resolve-acquisition-gap", "resolve-attempt-cap",
+				"resolve-cancel", "resolve-drop-gap", "resolve-dropped-history", "resolve-foreign-evidence", "resolve-identity",
+				"resolve-old-evidence", "resolve-provider-failure", "resolve-ready", "resolve-repeat",
+				"resolve-replace-valid-time", "resolve-ticket-only", "resolve-time", "resolve-timeout",
+				"resolve-uncommitted-input", "resolve-wiki", "resolve-wiki-not-run", "resolve-wiki-partial-again",
+				"resolve-wiki-unavailable", "resolve-wrong-previous", "support-complete", "support-incomplete",
+				"support-partial", "support-resolve-altered-query", "support-resolve-attempt-cap", "support-resolve-cancel",
+				"support-resolve-dropped-history", "support-resolve-empty-both", "support-resolve-empty-next",
+				"support-resolve-empty-prior", "support-resolve-provider-failure", "support-resolve-repeat",
+				"support-resolve-retag-basis", "support-resolve-success", "support-resolve-timeout", "support-ticket-only",
+				"support-wiki-partial", "ticket-only", "truncated-attachment", "update-add", "update-attempt-cap",
+				"update-cancel", "update-drop-gap", "update-history-alias", "update-history-lookup", "update-old-wiki-binding",
+				"update-page", "update-partial", "update-provider-failure", "update-remove", "update-repeat", "update-replace",
+				"update-resolve-gap", "update-retain-gap", "update-then-refresh", "update-then-resolve", "update-timeout",
+				"update-uncommitted-input", "update-wrong-task", "wiki-matches", "work-attempt-cap", "work-blank-reason",
+				"work-drop-gap", "work-final-cap", "work-handoff", "work-no-proposal", "work-planner-provider-failure",
+				"work-planner-timeout", "work-read-cancellation", "work-read-exact-ref", "work-read-isolation", "work-refresh",
+				"work-refresh-work-mismatch", "work-repeat", "work-resolve", "work-resolve-changed-intake", "work-reuse",
+				"work-session-cap", "work-skipped-context", "work-ticket-only", "work-time", "work-unproposed-transition",
+				"work-update", "work-update-incomplete", "work-update-partial", "work-worker-cancel",
+				"work-worker-provider-failure", "work-worker-timeout", "work-wrong-result-context", "work-wrong-task":
+				opts.SyncFile = func(*os.File) error {
+					syncCalls.Add(1)
+					return nil
+				}
+			}
+			r, err = engine.New(runCtx, def, input, opts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -7890,14 +8087,26 @@ func TestIntakeToContext(t *testing.T) {
 									v.Claim = parent.Data.Verification.Claims[0]
 									data = v
 								}
-								if strings.HasPrefix(tc.name, "m5-supplement-exhausted-") {
-									fatal := "cross"
+								if tc.name == "m5-supplement-exhausted-pro-fatal-cross" || tc.name == "m5-supplement-exhausted-cross-fatal-pro" {
+									key := verificationTask.Role
+									exhausted := "pro"
 									if strings.HasSuffix(tc.name, "fatal-pro") {
-										fatal = "pro"
+										exhausted = "cross"
 									}
-									if verificationTask.Role == fatal {
-										barrier.held[fatal], barrier.attempts[fatal] = e, req.Identity.AttemptID
+									if barrier.attempts[key] != "" {
+										if key != exhausted || barrier.waiting != exhausted || barrier.attempts[key] == req.Identity.AttemptID || barrier.attempts[key+"-replacement"] != "" {
+											t.Fatalf("unexpected exhausted gate prompt: role=%s attempt=%s phase=%s", key, req.Identity.AttemptID, barrier.waiting)
+										}
+										key += "-replacement"
 									}
+									snapshot := r.Snapshot()
+									a := snapshot.Attempts[req.Identity.AttemptID]
+									owner := snapshot.Sessions[a.HandleID]
+									if req.Identity.AttemptID == "" || a.Identity != req.Identity || a.Output != nil || a.Failure != nil || owner.State == "Closed" || owner.Identity.HandleID != a.HandleID || owner.Identity.SessionID == "" || owner.Role.Name != "triage-verify-"+verificationTask.Role {
+										t.Fatalf("exhausted gate prompt lacks actual owner: role=%s attempt=%s", key, req.Identity.AttemptID)
+									}
+									barrier.held[key], barrier.attempts[key] = e, req.Identity.AttemptID
+									t.Logf("exhausted-gate prompt role=%s actual_attempt=%s handle=%s session=%s", key, req.Identity.AttemptID, a.HandleID, owner.Identity.SessionID)
 								}
 								if m6 && m6Spec.fault == "wrong-result-role" {
 									if verificationTask.Role == "con" && m4Phases[task.Stage] == 1 {
@@ -8587,6 +8796,35 @@ func TestIntakeToContext(t *testing.T) {
 					sentReplies[req.Identity.AttemptID] = ack
 				}
 			}
+			if opts.SyncFile != nil {
+				calls := syncCalls.Load()
+				t.Logf("sync-boundary=success-dependency calls=%d", calls)
+				if calls == 0 {
+					t.Fatal("selected Sync dependency was not called")
+				}
+				if len(report.CleanupErrors) != 0 || len(report.Cleanup) != len(report.Snapshot.Sessions) {
+					t.Fatalf("Sync dependency cleanup errors or receipt count mismatch: errors=%v cleanup=%+v", report.CleanupErrors, report.Cleanup)
+				}
+				seen := map[string]bool{}
+				for handle, owner := range report.Snapshot.Sessions {
+					if owner.State != "Closed" || owner.Identity.HandleID != handle || owner.Identity.SessionID == "" || seen[owner.Identity.SessionID] {
+						t.Fatalf("Sync dependency session is not closed with a unique owned identity: %+v", owner)
+					}
+					seen[owner.Identity.SessionID] = true
+					matches := 0
+					for _, cleanup := range report.Cleanup {
+						if sameIdentity(cleanup.Identity, owner.Identity) {
+							matches++
+							if !cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
+								t.Fatalf("Sync dependency session lacks strict-close/Wait confirmation: %+v", cleanup)
+							}
+						}
+					}
+					if matches != 1 {
+						t.Fatalf("Sync dependency session lacks one exact cleanup receipt: owner=%+v matches=%d cleanup=%+v", owner, matches, report.Cleanup)
+					}
+				}
+			}
 			for _, session := range report.Snapshot.Sessions {
 				if session.Role.CWD != service {
 					t.Fatal("triage persisted session cwd differs from configured source workspace")
@@ -8751,6 +8989,36 @@ func TestIntakeToContext(t *testing.T) {
 					}
 					for i := 1; i <= 2; i++ {
 						assertFault(role, i, engine.CompactionFailed, engine.OriginCompaction)
+					}
+					if tc.name == "m5-supplement-exhausted-pro-fatal-cross" || tc.name == "m5-supplement-exhausted-cross-fatal-pro" {
+						exhausted, fatal := strings.TrimPrefix(role, "verify-"), "cross"
+						if exhausted == "cross" {
+							fatal = "pro"
+						}
+						keys := []string{exhausted, exhausted + "-replacement", "con", fatal}
+						if !barrier.proved || !barrier.faulted || !slices.Equal(barrier.exhaustedReleases, keys) || !slices.Equal(barrier.order, []string{exhausted, fatal}) {
+							t.Fatalf("exhausted gate release order mismatch: releases=%v phase=%s", barrier.exhaustedReleases, barrier.waiting)
+						}
+						if len(dispatched[role]) != 2 || len(dispatched["verify-con"]) != 1 || len(dispatched["verify-"+fatal]) != 1 || len(barrier.attempts) != 4 {
+							t.Fatal("exhausted gate did not dispatch exactly two faults and two siblings")
+						}
+						requests := []contract.Request{dispatched[role][0], dispatched[role][1], dispatched["verify-con"][0], dispatched["verify-"+fatal][0]}
+						seen := map[string]bool{}
+						var previous uint64
+						for i, key := range keys {
+							id := barrier.attempts[key]
+							a := report.Snapshot.Attempts[id]
+							if id == "" || seen[id] || id != requests[i].Identity.AttemptID || a.Identity != requests[i].Identity || a.LastSeq <= previous || report.Snapshot.Sessions[a.HandleID].State != "Closed" {
+								t.Fatalf("exhausted gate actual attempt/order mismatch: role=%s attempt=%s seq=%d previous=%d", key, id, a.LastSeq, previous)
+							}
+							seen[id], previous = true, a.LastSeq
+						}
+						con := report.Snapshot.Attempts[barrier.attempts["con"]]
+						if con.State != engine.Succeeded || con.Output == nil || con.Failure != nil {
+							t.Fatal("exhausted gate lost actual accepted con")
+						}
+						assertFault("verify-"+fatal, 1, engine.ProviderFailed, engine.OriginProvider)
+						t.Logf("exhausted-gate verified first=%s replacement=%s con=%s fatal=%s", barrier.attempts[exhausted], barrier.attempts[exhausted+"-replacement"], barrier.attempts["con"], barrier.attempts[fatal])
 					}
 				}
 			}

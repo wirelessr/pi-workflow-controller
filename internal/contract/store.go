@@ -37,6 +37,9 @@ type Options struct {
 	ControllerVersion string
 	PiVersion         string
 	Limits            Limits
+	// SyncFile is fixed at construction. Nil uses os.File.Sync.
+	// Callers must support concurrent file syncs from independent attempts.
+	SyncFile func(*os.File) error
 }
 
 type runMetadata struct {
@@ -74,6 +77,9 @@ func ValidatePrompt(prompt string, maxBytes int64) error {
 func NewStore(registry *Registry, opts Options) (_ *Store, err error) {
 	if opts.Limits == (Limits{}) {
 		opts.Limits = DefaultLimits()
+	}
+	if opts.SyncFile == nil {
+		opts.SyncFile = (*os.File).Sync
 	}
 	l := opts.Limits
 	if registry == nil || registry.envelope == nil || l.MaxPromptBytes <= 0 || l.MaxCandidateBytes <= 0 || l.MaxJSONDepth <= 0 || l.MaxFileBytes <= 0 || l.MaxAttemptFileBytes <= 0 || l.MaxAttemptFiles <= 0 {
@@ -141,7 +147,7 @@ func NewStore(registry *Registry, opts Options) (_ *Store, err error) {
 			_ = root.Close()
 		}
 	}()
-	s := &Store{root: root, dir: filepath.Join(base, rel), taskID: taskID, runID: runID, registry: registry, limits: l,
+	s := &Store{root: root, syncFile: opts.SyncFile, dir: filepath.Join(base, rel), taskID: taskID, runID: runID, registry: registry, limits: l,
 		resources: make(map[string]SchemaResource), attempts: make(map[string]*Attempt), numbers: make(map[string]int), tokens: make(map[string]bool)}
 	for _, dir := range []string{"steps", "sessions", "schemas", ".staging"} {
 		if e = root.Mkdir(dir, 0700); e != nil {
@@ -150,7 +156,7 @@ func NewStore(registry *Registry, opts Options) (_ *Store, err error) {
 	}
 	for uri, raw := range registry.resources {
 		path := filepath.Join("schemas", digest([]byte(uri))+".json")
-		if e = writeExclusive(root, path, raw); e != nil {
+		if e = writeExclusive(root, path, raw, s.syncFile); e != nil {
 			return nil, failure(StorageFailed, "schemas", Identity{RunID: runID}, e)
 		}
 		s.resources[uri] = SchemaResource{Path: filepath.Join(s.dir, path), SHA256: digest(raw)}
@@ -163,7 +169,7 @@ func NewStore(registry *Registry, opts Options) (_ *Store, err error) {
 	for path, value := range map[string]any{"run.json": meta, "input.json": input} {
 		raw, e := json.MarshalIndent(value, "", "  ")
 		if e == nil {
-			e = writeExclusive(root, path, raw)
+			e = writeExclusive(root, path, raw, s.syncFile)
 		}
 		if e != nil {
 			return nil, failure(StorageFailed, "create", Identity{RunID: runID}, e)
@@ -239,7 +245,7 @@ func (s *Store) BeginAttempt(id Identity, request Request) (*Attempt, error) {
 	request.Output = OutputSpec{SchemaID: a.schemaID, Schema: s.resources[s.registry.uris[a.schemaID]], Envelope: s.resources[EnvelopeURI], Resources: s.resources}
 	raw, err := json.MarshalIndent(request, "", "  ")
 	if err == nil {
-		err = writeExclusive(s.root, filepath.Join(a.rel, "request.json"), raw)
+		err = writeExclusive(s.root, filepath.Join(a.rel, "request.json"), raw, s.syncFile)
 	}
 	if err != nil {
 		return nil, failure(StorageFailed, "begin", id, err)

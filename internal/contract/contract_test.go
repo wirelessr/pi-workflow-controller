@@ -151,6 +151,238 @@ func storeTestReport(t *testing.T, a *Attempt, id Identity, valid bool) {
 	}
 }
 
+func TestStoreSyncFileSites(t *testing.T) {
+	for _, site := range []string{"schema", "run.json", "input.json", "request.json", "contract.json", "manifest.json", "source", "validation"} {
+		for _, fail := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/fail=%t", site, fail), func(t *testing.T) {
+				base := t.TempDir()
+				sentinel := filepath.Join(base, "sentinel")
+				storeTestWrite(t, sentinel, []byte("keep"))
+				injected := errors.New("synthetic Sync failure")
+				var files []*os.File
+				callback := func(f *os.File) error {
+					name := filepath.Base(f.Name())
+					match := name == site
+					switch site {
+					case "schema":
+						match = name == storeTestHash([]byte(schemaTestURI))+".json"
+					case "validation":
+						match = strings.HasPrefix(name, ".tmp-")
+					}
+					if !match {
+						return f.Sync()
+					}
+					files = append(files, f)
+					if info, err := f.Stat(); err != nil || info.Size() == 0 {
+						t.Errorf("Sync preceded Write: info=%v err=%v", info, err)
+					}
+					if fail {
+						return injected
+					}
+					return nil
+				}
+				defer func() {
+					if len(files) != 1 {
+						t.Errorf("target Sync calls=%d, want 1", len(files))
+					}
+					for _, f := range files {
+						if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
+							t.Errorf("Sync descriptor was not closed: %v", err)
+						}
+					}
+					if string(storeTestReadFile(t, sentinel)) != "keep" {
+						t.Error("constructor cleanup removed foreign sentinel")
+					}
+				}()
+				s, err := NewStore(schemaTestRegistry(t, storeTestSchema), Options{BaseDir: base, Prompt: "sync boundary", SyncFile: callback})
+				constructor := site == "schema" || site == "run.json" || site == "input.json"
+				if fail && constructor {
+					storeTestCode(t, err, StorageFailed)
+					if s != nil || !errors.Is(err, injected) {
+						t.Fatalf("constructor returned Store or lost Sync cause: %v %v", s, err)
+					}
+					entries, readErr := os.ReadDir(base)
+					if readErr != nil || len(entries) != 1 || entries[0].Name() != "sentinel" {
+						t.Errorf("failed constructor leaked task: %v %v", entries, readErr)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := s.Close(); err != nil {
+						t.Error(err)
+					}
+				})
+				id := Identity{s.RunID(), storeTestID(t), storeTestID(t), storeTestID(t)}
+				request := Request{Identity: id, Prompt: "sync boundary", Output: OutputSpec{SchemaID: storeTestSchemaID}}
+				a, err := s.BeginAttempt(id, request)
+				if fail && site == "request.json" {
+					storeTestCode(t, err, StorageFailed)
+					if a != nil || !errors.Is(err, injected) {
+						t.Fatalf("request failure: %v %v", a, err)
+					}
+					if again, err := s.BeginAttempt(id, request); again != nil || err == nil {
+						t.Fatal("failed request identity reused")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				entry := fileEntry{ID: "source", Kind: "evidence", Path: "evidence/source"}
+				raw := storeTestCandidate(t, id, entry)
+				storeTestWrite(t, a.CandidatePath(), raw)
+				storeTestWrite(t, filepath.Join(a.Dir(), entry.Path), []byte("source bytes"))
+				reportPath := filepath.Join(a.Dir(), "validation.json")
+				tempSentinel := filepath.Join(a.Dir(), ".tmp-sentinel")
+				storeTestWrite(t, reportPath, []byte("previous report"))
+				storeTestWrite(t, tempSentinel, []byte("keep"))
+				staged, err := a.Stage(context.Background(), Spec{SchemaID: storeTestSchemaID})
+				if fail {
+					storeTestCode(t, err, StorageFailed)
+					if staged != nil || !errors.Is(err, injected) {
+						t.Fatalf("Stage failure: %v %v", staged, err)
+					}
+					if ref, err := a.Publish(context.Background(), staged); ref != (Ref{}) || err == nil {
+						t.Fatal("Sync failure published Ref")
+					}
+					storeTestUnpublished(t, a)
+					if site == "validation" {
+						if string(storeTestReadFile(t, reportPath)) != "previous report" {
+							t.Error("failed Sync replaced report")
+						}
+					} else {
+						storeTestReport(t, a, id, false)
+					}
+				} else {
+					if err != nil {
+						t.Fatal(err)
+					}
+					ref, err := a.Publish(context.Background(), staged)
+					if err != nil {
+						t.Fatal(err)
+					}
+					got, err := s.Read(context.Background(), ref)
+					if err != nil || !bytes.Equal(got, raw) || ref.SHA256 != storeTestHash(raw) {
+						t.Fatalf("publication bytes/Ref: %v", err)
+					}
+					if string(storeTestReadFile(t, filepath.Join(filepath.Dir(ref.Path), entry.Path))) != "source bytes" {
+						t.Error("copy bytes changed")
+					}
+					storeTestReport(t, a, id, true)
+				}
+				entries, err := os.ReadDir(filepath.Join(s.Dir(), ".staging"))
+				if err != nil || len(entries) != 0 {
+					t.Errorf("staging leaked: %v %v", entries, err)
+				}
+				if string(storeTestReadFile(t, tempSentinel)) != "keep" {
+					t.Error("foreign temp removed")
+				}
+				entries, err = os.ReadDir(a.Dir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					if strings.HasPrefix(entry.Name(), ".tmp-") && entry.Name() != ".tmp-sentinel" {
+						t.Errorf("owned temp leaked: %s", entry.Name())
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestStoreSyncFileDefault(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit=%t", explicit), func(t *testing.T) {
+			opts := Options{BaseDir: t.TempDir(), Prompt: "real Sync"}
+			if explicit {
+				opts.SyncFile = (*os.File).Sync
+			}
+			s, err := NewStore(schemaTestRegistry(t, storeTestSchema), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := s.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			a, id := storeTestAttempt(t, s, "")
+			entry := fileEntry{ID: "source", Kind: "evidence", Path: "evidence/source"}
+			storeTestWrite(t, a.CandidatePath(), storeTestCandidate(t, id, entry))
+			storeTestWrite(t, filepath.Join(a.Dir(), entry.Path), []byte("real file"))
+			ref := storeTestPublish(t, a)
+			if _, err := s.Read(context.Background(), ref); err != nil {
+				t.Fatal(err)
+			}
+			storeTestWrite(t, filepath.Join(filepath.Dir(ref.Path), entry.Path), []byte("changed"))
+			if raw, err := s.Read(context.Background(), ref); raw != nil || err == nil {
+				t.Fatal("default Sync bypassed real file integrity")
+			}
+		})
+	}
+}
+
+func TestStoreSyncFileCopyError(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sync-fail=%t", fail), func(t *testing.T) {
+			injected, copyCause := errors.New("synthetic Sync failure"), errors.New("copy cancelled")
+			var files []*os.File
+			s, err := NewStore(schemaTestRegistry(t, storeTestSchema), Options{BaseDir: t.TempDir(), Prompt: "copy error", SyncFile: func(f *os.File) error {
+				if filepath.Base(f.Name()) != "source" {
+					return f.Sync()
+				}
+				files = append(files, f)
+				if fail {
+					return injected
+				}
+				return nil
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := s.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			a, id := storeTestAttempt(t, s, "")
+			entry := fileEntry{ID: "source", Kind: "evidence", Path: "evidence/source"}
+			storeTestWrite(t, a.CandidatePath(), storeTestCandidate(t, id, entry))
+			storeTestWrite(t, filepath.Join(a.Dir(), entry.Path), []byte("source bytes"))
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			s.afterCopy = func(path string) {
+				if path == filepath.Join(a.rel, entry.Path) {
+					cancel(copyCause)
+				}
+			}
+			staged, err := a.Stage(ctx, Spec{SchemaID: storeTestSchemaID})
+			if staged != nil || !errors.Is(err, copyCause) || errors.Is(err, injected) != fail {
+				t.Fatalf("copy/Sync cause lost: %v %v", staged, err)
+			}
+			if fail {
+				storeTestCode(t, err, StorageFailed)
+			}
+			if len(files) != 1 {
+				t.Fatalf("copy error skipped Sync: calls=%d", len(files))
+			}
+			if _, err := files[0].Stat(); !errors.Is(err, os.ErrClosed) {
+				t.Errorf("copy error skipped Close: %v", err)
+			}
+			entries, err := os.ReadDir(filepath.Join(s.Dir(), ".staging"))
+			if err != nil || len(entries) != 0 {
+				t.Errorf("copy error leaked staging: %v %v", entries, err)
+			}
+			storeTestUnpublished(t, a)
+			storeTestReport(t, a, id, false)
+		})
+	}
+}
+
 func TestStoreFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	for _, s := range []*Store{nil, {}} {

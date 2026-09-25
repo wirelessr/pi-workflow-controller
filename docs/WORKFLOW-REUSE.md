@@ -22,6 +22,7 @@
 | Run、session、Step 與 limits | `engine/api.go`、`session.go`、`step.go`、`policy.go`；`Run.SessionIdentity` 讀 owned committed identity；`Run.WorkflowInput` 以值回傳 immutable workflow/input | 直接重用；M4 dispatch 前身份沿中性入口，不另造 session driver／會計；`callerRequest` 使用 input 投影，無需複製歷史 |
 | Pi 預設 cwd | `engine.Options.PiDefaultCWD`／`Run.OpenSession` → `runtime.SessionSpec.CWD` | CLI run 讀 `PWC_PI_CWD`，engine 在 New 依 LaunchCWD 固定相對值；triage／smoke 沿 fallback，review explicit workspace 保留，僅選用的 default NUL 提前拒絕，explicit Role.CWD／fallback LaunchCWD 保留原 runtime 驗證與會計。Task workspace 與來源唯讀要求留 triage，不新增 runtime prompt 或 sandbox |
 | Child、Parallel、Retry、Decision | `engine/scope.go` | 直接重用；workflow 決定批次、依賴及可重做分支 |
+| OS File.Sync 依賴 | `engine.Options.SyncFile` → `engine.New` → 原 `Run`／`contract.Options.SyncFile`／`NewStore`；Store 的既有 writers 及 Stage copy | 正常逐 instance constructor DI，兩個入口的 nil 都正規化為真 `os.File.Sync`，建構後 private 固定；schemas、run/input、RunCreated 及後續寫入使用同一依賴。既有 CLI／review／triage callers 留 nil，無 fast mode／CLI/env 開關。只替代 Sync 結果，不重造 filesystem／Store／journal；真 durability/fault/order gates 保留 |
 | Stage／Confirm／Publish、committed resolver | `contract/`、`engine/resolve.go`、`step.go` | 直接重用；禁止第二個 Store／commit／journal |
 | Result／FinalSelection／FinalDelivery | `engine/api.go`、`resolve.go`、`run.go` | 直接重用；禁止另一個 final artifact registry |
 | Context usage 與 cleanup report | `engine/session.go`、`runtime/types.go` | M3 triage 沿 SessionContextUsage／既有 strict-close handoff 接入明示容量政策；sample 非 provider admission |

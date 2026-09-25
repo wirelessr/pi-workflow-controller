@@ -38,7 +38,7 @@ func (a *Attempt) Stage(ctx context.Context, spec Spec) (*Staged, error) {
 		Error    any      `json:"error,omitempty"`
 	}{a.id, err == nil, diagnostic}, "", "  ")
 	if reportErr == nil {
-		reportErr = writeAtomic(s.root, filepath.Join(a.rel, "validation.json"), raw)
+		reportErr = writeAtomic(s.root, filepath.Join(a.rel, "validation.json"), raw, s.syncFile)
 	}
 	if reportErr != nil {
 		if staged != nil {
@@ -74,7 +74,7 @@ func (a *Attempt) stage(ctx context.Context) (_ *Staged, err error) {
 			}
 		}
 	}()
-	if e = writeExclusive(s.root, filepath.Join(rel, "contract.json"), raw); e != nil {
+	if e = writeExclusive(s.root, filepath.Join(rel, "contract.json"), raw, s.syncFile); e != nil {
 		return nil, failure(StorageFailed, "stage", a.id, e)
 	}
 	m := manifest{Version: 1, Identity: a.id, SchemaID: a.schemaID, ContractSHA256: digest(raw), Files: make([]manifestFile, 0, len(env.Files))}
@@ -107,7 +107,7 @@ func (a *Attempt) stage(ctx context.Context) (_ *Staged, err error) {
 		}
 		limit := min(s.limits.MaxFileBytes, s.limits.MaxAttemptFileBytes-total)
 		hash, n, info, copyErr := copyStable(ctx, s.root, sourcePath, limit, storageWriter{f, a.id}, s.afterCopy)
-		syncErr := f.Sync()
+		syncErr := s.syncFile(f)
 		closeErr := f.Close()
 		if syncErr != nil || closeErr != nil {
 			return nil, failure(StorageFailed, "stage", a.id, errors.Join(syncErr, closeErr, copyErr))
@@ -136,7 +136,7 @@ func (a *Attempt) stage(ctx context.Context) (_ *Staged, err error) {
 	if e != nil {
 		return nil, failure(StorageFailed, "manifest", a.id, e)
 	}
-	if e = writeExclusive(s.root, filepath.Join(rel, "manifest.json"), manifestRaw); e != nil {
+	if e = writeExclusive(s.root, filepath.Join(rel, "manifest.json"), manifestRaw, s.syncFile); e != nil {
 		return nil, failure(StorageFailed, "manifest", a.id, e)
 	}
 	if e = context.Cause(ctx); e != nil {

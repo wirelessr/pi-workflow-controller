@@ -6,7 +6,7 @@
 
 ## 1. 共通方法與判定
 
-- 執行真實 engine、Store、filesystem、schema validator 與業務驗收，只在外部 Pi/RPC/provider/GitHub/API 邊界替代。不要 stub Step、reducer、內部轉換或流程 helper。
+- 執行真實 engine、Store、filesystem、schema validator 與業務驗收，只在外部 Pi/RPC/provider/GitHub/API 或明確批准的 OS File.Sync dependency boundary 替代。`engine.Options.SyncFile`／`contract.Options.SyncFile` 是逐 instance、建構後固定的正常 DI，nil 使用真 `os.File.Sync`，不是產品 fast mode，也沒有 CLI/env 開關。成功替身限 Sync 非受測性質的明列案例；synthetic Sync failure 是補充採證，不取代既有真 OS faults。Durability、storage/journal failure、持久化順序及 fsync queue 測試保留真 Sync；Read／Write／Close／Rename／cleanup、path／digest／Ref 驗證不替代。不要 stub Step、reducer、內部轉換或流程 helper。
 - 相同行為使用 table-driven tests；race／並行情境用 channel、RPC、socket、filesystem barrier 控制順序，不以 sleep 推定 accepted、join 或 cleanup。Timer 只作 deadline 來源及失敗保險。
 - 每個 test 為自有 subprocess 註冊獨立 Close/Wait/lifeline cleanup，assertion 失敗也不能誤傷外部 sentinel 或留下 fixture。Temp discovery 不掃描／清空使用者真實 sessions。
 - 分開列 local unit、subprocess、race、bundled Pi、live-provider／hub、各業務 E2E、build、獨立 review、release scan。任一 required case 失敗或 blocked 不以其他組成功代替。
@@ -85,7 +85,7 @@ Gate：各必要 case 的預期行為成立，無 race；實際執行交付 bina
 - 真 Stage 後改 candidate，Publish 仍使用 Stage bytes；讀取中變更來源／destination、staging tamper 必須拒絕。Discard 冪等，不刪 published/history。
 - Root alias/WIP symlink 正規化後 request/Ref/renderer 一致，LaunchCWD 不變；attempt/artifact no-follow 不放寬。Exclusive rename 不覆蓋既有 published，即使空目錄也拒絕。
 - 雙 digest、identity、canonical path、file digests 都檢查；重算 manifest 不能繞過 Ref anchor。Manifest read limit 依實際生成 bytes，不能因 escaping 或 policy 算式溢位拒絕合法輸入。
-- Temp file 在 Write/Sync/Close/rename 故障時只清自有檔案；caller 的 typed cancellation 保留。用 OS filesystem fault/barrier，而非 mock read/write helpers。ID/token/attempt number 預約失敗不重用，並行 Store/attempt 不互相污染。
+- Temp file 在 Write/Sync/Close/rename 故障時只清自有檔案；caller 的 typed cancellation 保留。用 OS filesystem fault/barrier，而非 mock read/write helpers；另以 constructor SyncFile DI 補驗 Sync 結果傳遞、descriptor Close、temp ownership 與失敗不授權，不把 synthetic 成功當成斷電 durability 證明。ID/token/attempt number 預約失敗不重用，並行 Store/attempt 不互相污染。
 
 ### Engine／persistence／finalization
 

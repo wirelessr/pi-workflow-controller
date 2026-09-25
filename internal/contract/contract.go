@@ -90,6 +90,7 @@ func failure(code Code, phase string, id Identity, cause error) error {
 type Store struct {
 	life               sync.RWMutex
 	root               *os.Root
+	syncFile           func(*os.File) error
 	dir, taskID, runID string
 	registry           *Registry
 	limits             Limits
