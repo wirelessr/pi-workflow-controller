@@ -55,8 +55,8 @@ func execute(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result
 	return executeSource(ctx, r, in, acquisitionSource{gh: "gh", remote: func(repo string) string { return "https://github.com/" + repo + ".git" }})
 }
 
-// Only the external GitHub transport changes in acquisition tests. All stages,
-// sessions, Store publications and acceptance checks are production paths.
+// Tests may replace external Git output and the GitHub command/endpoint.
+// Acquisition, Verify, stages, sessions, Store and acceptance remain real.
 func executeSource(ctx context.Context, r *engine.Run, in engine.Input, source acquisitionSource) (engine.Result, error) {
 	result := engine.Result{Outputs: map[string]contract.Ref{}}
 	if _, _, err := ParsePRURL(in.Prompt); err != nil {

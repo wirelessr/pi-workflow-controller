@@ -37,6 +37,7 @@ type Checkout struct {
 	rootInfo, repositoryInfo, worktreeInfo os.FileInfo
 	cleaned                                bool
 	snapshotHashes                         map[string][32]byte
+	gitOutput                              func(context.Context, string, []string) ([]byte, error)
 }
 
 var (
@@ -61,12 +62,14 @@ func ParsePRURL(raw string) (repository string, number int, err error) {
 	return m[1] + "/" + m[2], n, nil
 }
 
-// acquisitionSource is solely the external GitHub boundary. Tests may replace
-// gh and the GitHub transport endpoint, but never the local git operations.
+// acquisitionSource selects external command boundaries and the GitHub endpoint.
+// A nil gitOutput preserves real Git; acquisition, parsing, ownership and Verify
+// remain production paths. Configure callbacks before use, not concurrently.
 type acquisitionSource struct {
-	gh       string
-	ghPrefix []string
-	remote   func(string) string
+	gh        string
+	ghPrefix  []string
+	remote    func(string) string
+	gitOutput func(context.Context, string, []string) ([]byte, error)
 }
 
 func Acquire(ctx context.Context, root, prURL string) (*Checkout, error) {
@@ -113,7 +116,8 @@ func acquire(ctx context.Context, root, prURL string, source acquisitionSource) 
 		return nil, err
 	}
 	c := &Checkout{URL: fmt.Sprintf("https://github.com/%s/pull/%d", repository, number), Repository: repository, Number: number,
-		root: root, rootInfo: info, repository: filepath.Join(root, "repository.git"), worktree: filepath.Join(root, "checkout"), Snapshots: make(map[string]string), snapshotHashes: make(map[string][32]byte)}
+		root: root, rootInfo: info, repository: filepath.Join(root, "repository.git"), worktree: filepath.Join(root, "checkout"), Snapshots: make(map[string]string), snapshotHashes: make(map[string][32]byte),
+		gitOutput: source.gitOutput}
 	defer func() {
 		if err != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -384,7 +388,14 @@ func (c *Checkout) git(ctx context.Context, args ...string) ([]byte, error) {
 		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.http.allow=always",
 		"-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "submodule.recurse=false",
 	}
-	data, err := acquisitionCommand(ctx, c.root, "git", append(fixed, args...), true)
+	command := append(fixed, args...)
+	var data []byte
+	var err error
+	if c.gitOutput == nil {
+		data, err = acquisitionCommand(ctx, c.root, "git", command, true)
+	} else {
+		data, err = c.gitOutput(ctx, c.root, command)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("git %s: %w", args[0], err)
 	}

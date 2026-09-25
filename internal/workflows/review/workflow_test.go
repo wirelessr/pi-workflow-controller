@@ -132,20 +132,24 @@ type workflowFixture struct {
 	joined   chan struct{}
 	scenario workflowScenario
 	hellos   map[string]protocol.Control
+	source   *acquisitionFixture
 }
 
 func newWorkflowFixture(t *testing.T, scenario workflowScenario) *workflowFixture {
 	t.Helper()
-	return newWorkflowFixtureFromSeed(t, scenario, nil)
+	source := newAcquisitionFixture(t)
+	if source.source.gitOutput != nil || source.sourceRepo == "" {
+		t.Fatal("default workflow fixture must use real Git")
+	}
+	return newWorkflowFixtureFromSource(t, scenario, source)
 }
 
-func newWorkflowFixtureFromSeed(t *testing.T, scenario workflowScenario, seed *acquisitionGit) *workflowFixture {
+func newWorkflowFixtureFromSource(t *testing.T, scenario workflowScenario, source *acquisitionFixture) *workflowFixture {
 	t.Helper()
 	t.Setenv("NODE_TLS_REJECT_UNAUTHORIZED", "1")
 	// Only the runtime's explicit directory controls discovery, not this setting.
 	t.Setenv("PI_BRIDGE_DIR", filepath.Join(t.TempDir(), "not-the-runtime-bridge"))
 	t.Setenv("GORACE", "atexit_sleep_ms=0")
-	source := newAcquisitionFixtureFromSeed(t, seed)
 	if scenario.missing {
 		if err := os.Remove(filepath.Join(source.dir, "issues.json")); err != nil {
 			t.Fatal(err)
@@ -157,7 +161,7 @@ func newWorkflowFixtureFromSeed(t *testing.T, scenario workflowScenario, seed *a
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &workflowFixture{t: t, ctx: ctx, host: host, done: make(chan engine.Report, 1), joined: make(chan struct{}), scenario: scenario, hellos: map[string]protocol.Control{}}
+	f := &workflowFixture{t: t, ctx: ctx, host: host, done: make(chan engine.Report, 1), joined: make(chan struct{}), scenario: scenario, hellos: map[string]protocol.Control{}, source: source}
 	// Install the lifeline before any Start, so even a failed assertion releases children.
 	protocol.RegisterCleanup(t, host, func() <-chan struct{} {
 		if f.run != nil {
@@ -217,6 +221,13 @@ func newWorkflowFixtureFromSeed(t *testing.T, scenario workflowScenario, seed *a
 	if err != nil {
 		t.Fatal(err)
 	}
+	if source.source.gitOutput != nil {
+		// Bind the fixture directory before Execute or any callback can run.
+		source.root = filepath.Join(f.run.Dir(), "review")
+		if source.sourceRepo != "" || source.baseRepo != "" || source.headRepo != "" || len(source.gitCalls(t)) != 0 {
+			t.Fatal("external Git fixture reused a repository or command history")
+		}
+	}
 	go func() { defer close(f.joined); f.done <- f.run.Execute() }()
 	return f
 }
@@ -267,7 +278,20 @@ func (f *workflowFixture) next(kind string) workflowControl {
 				if _, err := os.Stat(event.task.Skill); err != nil {
 					f.t.Fatal(err)
 				}
-				if head := fixtureGit(f.t, event.task.Worktree, "rev-parse", "HEAD"); head != event.task.Pin.HeadSHA {
+				if info, err := os.Stat(filepath.Join(f.run.Dir(), "review", "repository.git", "worktrees", "checkout")); err != nil || !info.IsDir() {
+					f.t.Fatalf("checkout registration must exist before cleanup: %v", err)
+				}
+				var head string
+				if output := f.source.source.gitOutput; output != nil {
+					raw, err := output(f.ctx, event.task.Worktree, []string{"-c", "core.hooksPath=/dev/null", "rev-parse", "HEAD"})
+					if err != nil {
+						f.t.Fatal(err)
+					}
+					head = strings.TrimSpace(string(raw))
+				} else {
+					head = fixtureGit(f.t, event.task.Worktree, "rev-parse", "HEAD")
+				}
+				if head != event.task.Pin.HeadSHA {
 					f.t.Fatal("task does not use acquired git HEAD")
 				}
 				f.runtime.mu.Lock()
@@ -535,6 +559,27 @@ func (f *workflowFixture) finish() engine.Report {
 		if len(violations) != 0 {
 			f.t.Fatalf("ownership/order violations: %v", violations)
 		}
+		if f.source.source.gitOutput != nil {
+			counts := map[string]int{}
+			calls := f.source.gitCalls(f.t)
+			for i, key := range calls {
+				if i < 16 && key != fmt.Sprintf("acquire-%d", i) {
+					f.t.Fatalf("acquisition command order changed: %v", calls)
+				}
+				counts[key]++
+			}
+			verifies := 3
+			if f.scenario.validationError != "" {
+				verifies = 2
+			}
+			if len(calls) != 16+5+2*verifies || counts["next-head"] != 5 || counts["verify-head"] != verifies || counts["verify-status"] != verifies {
+				f.t.Fatalf("external fixture bypassed acquisition/HEAD/Verify: %v", calls)
+			}
+		} else {
+			if len(f.source.gitCalls(f.t)) != 0 || len(f.source.requests) == 0 {
+				f.t.Fatal("real Git workflow used a fake or did not fetch")
+			}
+		}
 		root := filepath.Join(f.run.Dir(), "review")
 		for _, path := range []string{"checkout", "repository.git/worktrees/checkout"} {
 			if _, err := os.Stat(filepath.Join(root, path)); !errors.Is(err, os.ErrNotExist) {
@@ -610,7 +655,6 @@ func (f *workflowFixture) finish() engine.Report {
 }
 
 func TestWorkflowProductionReports(t *testing.T) {
-	seed := newAcquisitionGit(t, t.TempDir(), t.TempDir())
 	for _, tc := range []struct {
 		name                     string
 		scenario                 workflowScenario
@@ -626,7 +670,12 @@ func TestWorkflowProductionReports(t *testing.T) {
 		{"unconfirmed-requirement", workflowScenario{unknown: true}, "limited", "undetermined", 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newWorkflowFixtureFromSeed(t, tc.scenario, &seed)
+			var f *workflowFixture
+			if tc.name == "renderer-output-committed-through-Step" {
+				f = newWorkflowFixture(t, tc.scenario)
+			} else {
+				f = newWorkflowFixtureFromSource(t, tc.scenario, newExternalGitFixture(t))
+			}
 			f.prepare(f.next("prompt"))
 			reviewers := f.reviewerBarrier()
 			for _, event := range reviewers {
@@ -687,7 +736,6 @@ func (f *workflowFixture) reviewerBarrier() []workflowControl {
 }
 
 func TestWorkflowProductionRejectsInvalidResults(t *testing.T) {
-	seed := newAcquisitionGit(t, t.TempDir(), t.TempDir())
 	for _, tc := range []struct {
 		name     string
 		scenario workflowScenario
@@ -708,7 +756,12 @@ func TestWorkflowProductionRejectsInvalidResults(t *testing.T) {
 		{"unknown-coverage-cannot-claim-complete", workflowScenario{unknown: true, validationError: "overstated"}, "overstates"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newWorkflowFixtureFromSeed(t, tc.scenario, &seed)
+			var f *workflowFixture
+			if tc.name == "prepare-source-omitted" {
+				f = newWorkflowFixture(t, tc.scenario)
+			} else {
+				f = newWorkflowFixtureFromSource(t, tc.scenario, newExternalGitFixture(t))
+			}
 			f.prepare(f.next("prompt"))
 			if tc.scenario.prepareError == "" {
 				reviewers := f.reviewerBarrier()

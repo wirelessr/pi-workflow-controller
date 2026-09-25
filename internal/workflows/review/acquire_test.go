@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -71,6 +72,10 @@ type acquisitionFixture struct {
 	source    acquisitionSource
 	metadata  map[string]any
 	requests  chan string
+
+	gitMu      sync.Mutex
+	gitHistory []string
+	gitMode    string
 }
 
 func fixtureWrite(t *testing.T, path string, data []byte) {
@@ -128,7 +133,7 @@ func newAcquisitionFixture(t *testing.T) *acquisitionFixture {
 	return newAcquisitionFixtureFromSeed(t, nil)
 }
 
-func newAcquisitionFixtureFromSeed(t *testing.T, seed *acquisitionGit) *acquisitionFixture {
+func newAcquisitionFixturePaths(t *testing.T) *acquisitionFixture {
 	t.Helper()
 	f := &acquisitionFixture{dir: t.TempDir(), root: t.TempDir(), requests: make(chan string, 100)}
 	if err := os.Chmod(f.root, 0700); err != nil {
@@ -139,6 +144,12 @@ func newAcquisitionFixtureFromSeed(t *testing.T, seed *acquisitionGit) *acquisit
 		t.Fatal(err)
 	}
 	f.root = canonical
+	return f
+}
+
+func newAcquisitionFixtureFromSeed(t *testing.T, seed *acquisitionGit) *acquisitionFixture {
+	t.Helper()
+	f := newAcquisitionFixturePaths(t)
 	if seed == nil {
 		f.acquisitionGit = newAcquisitionGit(t, f.dir, t.TempDir())
 	} else {
@@ -154,15 +165,7 @@ func newAcquisitionFixtureFromSeed(t *testing.T, seed *acquisitionGit) *acquisit
 		fixtureGit(t, f.dir, "clone", "--bare", "--no-hardlinks", "--template=", seed.baseRepo, f.baseRepo)
 		fixtureGit(t, f.dir, "clone", "--bare", "--no-hardlinks", "--template=", seed.headRepo, f.headRepo)
 	}
-	f.metadata = map[string]any{
-		"number": 17, "html_url": "https://github.com/owner/repo/pull/17",
-		"base": map[string]any{"sha": f.base, "ref": "actual-base", "repo": map[string]string{"full_name": "owner/repo"}},
-		"head": map[string]any{"sha": f.head, "ref": "topic", "repo": map[string]string{"full_name": "fork/repo"}},
-	}
-	f.saveMetadata(t)
-	fixtureWrite(t, filepath.Join(f.dir, "issues.json"), []byte(`[[{"id":1}],[{"id":2}]]`))
-	fixtureWrite(t, filepath.Join(f.dir, "inline.json"), []byte(`[[]]`))
-	fixtureWrite(t, filepath.Join(f.dir, "reviews.json"), []byte(`[[{"id":3}]]`))
+	f.configureAPI(t)
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
@@ -173,12 +176,7 @@ func newAcquisitionFixtureFromSeed(t *testing.T, seed *acquisitionGit) *acquisit
 		handler.ServeHTTP(w, r)
 	}))
 	t.Cleanup(server.Close)
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PWC_ACQUIRE_FIXTURE", f.dir)
-	f.source = acquisitionSource{gh: executable, ghPrefix: []string{"-test.run=^TestAcquisitionGHHelper$", "--"}, remote: func(repository string) string {
+	f.source.remote = func(repository string) string {
 		switch repository {
 		case "owner/repo":
 			return server.URL + "/base.git"
@@ -188,9 +186,30 @@ func newAcquisitionFixtureFromSeed(t *testing.T, seed *acquisitionGit) *acquisit
 			t.Errorf("unvalidated remote: %q", repository)
 			return server.URL + "/invalid.git"
 		}
-	}}
+	}
 	return f
 }
+
+func (f *acquisitionFixture) configureAPI(t *testing.T) {
+	t.Helper()
+	f.metadata = map[string]any{
+		"number": 17, "html_url": "https://github.com/owner/repo/pull/17",
+		"base": map[string]any{"sha": f.base, "ref": "actual-base", "repo": map[string]string{"full_name": "owner/repo"}},
+		"head": map[string]any{"sha": f.head, "ref": "topic", "repo": map[string]string{"full_name": "fork/repo"}},
+	}
+	f.saveMetadata(t)
+	fixtureWrite(t, filepath.Join(f.dir, "issues.json"), []byte(`[[{"id":1}],[{"id":2}]]`))
+	fixtureWrite(t, filepath.Join(f.dir, "inline.json"), []byte(`[[]]`))
+	fixtureWrite(t, filepath.Join(f.dir, "reviews.json"), []byte(`[[{"id":3}]]`))
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWC_ACQUIRE_FIXTURE", f.dir)
+	f.source.gh = executable
+	f.source.ghPrefix = []string{"-test.run=^TestAcquisitionGHHelper$", "--"}
+}
+
 func (f *acquisitionFixture) saveMetadata(t *testing.T) {
 	t.Helper()
 	data, err := json.Marshal(f.metadata)
@@ -304,6 +323,9 @@ func TestAcquisitionSeedIsolation(t *testing.T) {
 
 func TestAcquirePinnedForkSnapshotAndOwnedCleanup(t *testing.T) {
 	f := newAcquisitionFixture(t)
+	if f.source.gitOutput != nil {
+		t.Fatal("dedicated acquisition must retain the default real Git adapter")
+	}
 	// Advance both real source branches after the metadata snapshot was taken.
 	fixtureWrite(t, filepath.Join(f.sourceRepo, "shared.txt"), []byte("new mutable head\n"))
 	fixtureGit(t, f.sourceRepo, "commit", "-am", "advance head")
@@ -322,6 +344,9 @@ func TestAcquirePinnedForkSnapshotAndOwnedCleanup(t *testing.T) {
 			t.Error(err)
 		}
 	})
+	if c.gitOutput != nil {
+		t.Fatal("default acquisition selected a replacement Git command")
+	}
 	if c.Repository != "owner/repo" || c.Number != 17 || c.URL != "https://github.com/owner/repo/pull/17" || c.BaseSHA != f.base || c.HeadSHA != f.head || c.MergeBase != f.mergeBase || c.DiffRange != f.mergeBase+".."+f.head || len(c.ContextID) != 64 {
 		t.Fatalf("bad pins: %+v", c)
 	}
@@ -887,8 +912,366 @@ func TestAcquireSanitizesGitConfiguration(t *testing.T) {
 	}
 }
 
-// The gh subprocess is the sole command replacement. Git HTTP requests are
-// served by real git http-backend over real temporary repositories.
+func TestAcquisitionGitResultAdapter(t *testing.T) {
+	t.Run("raw-results-and-instance-isolation", func(t *testing.T) {
+		f := newExternalGitFixture(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		output := f.source.gitOutput
+		f.source.gitOutput = func(got context.Context, cwd string, argv []string) ([]byte, error) {
+			if got != ctx || cwd != f.root {
+				return nil, errors.New("Git boundary lost context or cwd")
+			}
+			raw, err := output(got, cwd, argv)
+			// The callback must not alias the caller's dynamic argv or later calls.
+			for i := range argv {
+				argv[i] = "callback-owned"
+			}
+			return raw, err
+		}
+		c, err := f.acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { checkError(t, c.Cleanup(context.Background()), "") })
+		f.source.gitOutput = func(context.Context, string, []string) ([]byte, error) {
+			return nil, errors.New("caller replaced its callback after acquisition")
+		}
+		checkError(t, c.Verify(ctx), "")
+		history := f.gitCalls(t)
+		history[0] = "caller-owned"
+		if f.gitCalls(t)[0] != "acquire-0" {
+			t.Fatal("caller overwrote fixture command history")
+		}
+		id := sha256.Sum256([]byte("owner/repo\n17\n" + externalGitBase + "\n" + externalGitHead + "\n" + externalGitMergeBase))
+		if c.BaseSHA != externalGitBase || c.HeadSHA != externalGitHead || c.MergeBase != externalGitMergeBase || c.DiffRange != externalGitMergeBase+".."+externalGitHead || c.ContextID != fmt.Sprintf("%x", id) || len(c.Snapshots) != 6 || len(c.Missing) != 0 {
+			t.Fatalf("raw acquisition results were not parsed: %+v", c)
+		}
+		for key, path := range c.Snapshots {
+			raw, err := os.ReadFile(path)
+			if err != nil || c.snapshotHashes[key] != sha256.Sum256(raw) {
+				t.Fatalf("SUT did not record snapshot hash %s: %v", key, err)
+			}
+		}
+		for path, info := range map[string]os.FileInfo{c.root: c.rootInfo, c.repository: c.repositoryInfo, c.worktree: c.worktreeInfo} {
+			actual, err := os.Stat(path)
+			if err != nil || info == nil || !os.SameFile(actual, info) {
+				t.Fatalf("SUT did not record reserved path ownership: %s: %v", path, err)
+			}
+		}
+		for key, want := range map[string]string{"diff": externalGitDiff, "changed-files": `["binary.dat","odd\nname.txt","shared.txt"]`, "issues": `[{"id":1},{"id":2}]`, "inline": `[]`} {
+			if raw, err := os.ReadFile(c.Snapshots[key]); err != nil || string(raw) != want {
+				t.Fatalf("raw snapshot %s: %q %v", key, raw, err)
+			}
+		}
+		if raw, err := output(ctx, c.Worktree, []string{"-c", "core.hooksPath=/dev/null", "rev-parse", "HEAD"}); err != nil || strings.TrimSpace(string(raw)) != externalGitHead {
+			t.Fatalf("independent fixed HEAD query: %q %v", raw, err)
+		}
+		verifyHead := []string{"--git-dir=" + filepath.Join(c.repository, "worktrees", "checkout"), "--work-tree=" + c.worktree, "rev-parse", "HEAD"}
+		beforeArgs := append([]string{}, verifyHead...)
+		if raw, err := c.git(ctx, verifyHead...); err != nil || strings.TrimSpace(string(raw)) != externalGitHead {
+			t.Fatalf("valid HEAD query rejected: %q %v", raw, err)
+		}
+		if !reflect.DeepEqual(verifyHead, beforeArgs) {
+			t.Fatal("callback overwrote caller argv")
+		}
+		beforeCalls := f.gitCalls(t)
+		for _, args := range [][]string{{"unexpected-command"}, {"rev-parse", "--verify", strings.Repeat("4", 40) + "^{commit}"}, append([]string{"-c", "core.hooksPath=unexpected"}, verifyHead...)} {
+			if raw, err := c.git(ctx, args...); err == nil || raw != nil {
+				t.Fatalf("unexpected argv accepted: %v: %q %v", args, raw, err)
+			}
+		}
+		command := []string{"-c", "core.hooksPath=/dev/null", "rev-parse", "HEAD"}
+		if raw, err := output(ctx, c.root, command); err == nil || raw != nil {
+			t.Fatalf("HEAD query accepted wrong cwd: %q %v", raw, err)
+		}
+		if !reflect.DeepEqual(beforeCalls, f.gitCalls(t)) {
+			t.Fatal("unknown command/cwd advanced fixture receipts")
+		}
+		fixtureWrite(t, c.Snapshots["diff"], []byte("changed snapshot"))
+		checkError(t, c.Verify(ctx), "acquisition snapshot diff changed")
+		if !reflect.DeepEqual(beforeCalls, f.gitCalls(t)) {
+			t.Fatal("snapshot verification was bypassed")
+		}
+		registration := filepath.Join(c.repository, "worktrees", "checkout")
+		if info, err := os.Stat(registration); err != nil || !info.IsDir() {
+			t.Fatalf("cleanup registration never existed: %v", err)
+		}
+		checkError(t, c.Cleanup(context.Background()), "")
+		for _, path := range []string{c.Worktree, registration} {
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("real cleanup did not remove %s: %v", path, err)
+			}
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+	}{
+		{"command-error", false},
+		{"context-cause", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExternalGitFixture(t)
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			cause := errors.New("external Git result failure")
+			output := f.source.gitOutput
+			f.source.gitOutput = func(got context.Context, cwd string, argv []string) ([]byte, error) {
+				if got != ctx || cwd != f.root {
+					return nil, errors.New("Git boundary lost context or cwd")
+				}
+				if _, err := output(got, cwd, argv); err != nil {
+					return nil, err
+				}
+				if tc.cancel {
+					cancel(cause)
+				}
+				return []byte("partial command output"), cause
+			}
+			c, err := f.acquire(ctx)
+			if c != nil || !errors.Is(err, cause) || !strings.HasPrefix(err.Error(), "git init:") {
+				t.Fatalf("external error lost its cause or became a Checkout: %+v %v", c, err)
+			}
+			if tc.cancel && context.Cause(ctx) != cause {
+				t.Fatal("caller context lost cancellation cause")
+			}
+			if !reflect.DeepEqual(f.gitCalls(t), []string{"acquire-0"}) {
+				t.Fatal("acquisition continued after command failure")
+			}
+			if _, err := os.Stat(filepath.Join(f.root, "checkout")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("failed acquisition retained checkout: %v", err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		mode, want string
+		verify     bool
+	}{
+		{"pin-result", "fetched revision is not the pinned commit", false},
+		{"merge-result", "missing or ambiguous merge-base", false},
+		{"names-unterminated", "changed-files is not NUL terminated", false},
+		{"names-utf8", "changed-files contains a non-UTF-8 path", false},
+		{"unknown-pin", "git fetch:", false},
+		{"head-result", "review checkout HEAD changed", true},
+		{"status-result", "review checkout was modified", true},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			f := newExternalGitFixture(t)
+			if len(f.gitCalls(t)) != 0 {
+				t.Fatal("fixture inherited command history")
+			}
+			if tc.mode == "unknown-pin" {
+				f.metadata["head"].(map[string]any)["sha"] = strings.Repeat("4", 40)
+				f.saveMetadata(t)
+			} else if !tc.verify {
+				f.setGitMode(tc.mode)
+			}
+			c, err := f.acquire(context.Background())
+			if tc.verify {
+				checkError(t, err, "")
+				t.Cleanup(func() { checkError(t, c.Cleanup(context.Background()), "") })
+				checkError(t, c.Verify(context.Background()), "")
+				before := len(f.gitCalls(t))
+				f.setGitMode(tc.mode)
+				checkError(t, c.Verify(context.Background()), tc.want)
+				wantCalls := []string{"verify-head"}
+				if tc.mode == "status-result" {
+					wantCalls = append(wantCalls, "verify-status")
+				}
+				if got := f.gitCalls(t)[before:]; !reflect.DeepEqual(got, wantCalls) {
+					t.Fatalf("Verify rejection bypassed raw result: %v", got)
+				}
+			} else {
+				checkError(t, err, tc.want)
+				if c != nil {
+					t.Fatal("invalid external result became a Checkout")
+				}
+				for _, path := range []string{"checkout", "repository.git/worktrees/checkout"} {
+					if _, err := os.Stat(filepath.Join(f.root, path)); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("failed acquisition cleanup: %s: %v", path, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+const (
+	externalGitBase      = "1111111111111111111111111111111111111111"
+	externalGitHead      = "2222222222222222222222222222222222222222"
+	externalGitMergeBase = "3333333333333333333333333333333333333333"
+	externalGitTree      = "100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tbinary.dat\x00" +
+		"100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\todd\nname.txt\x00" +
+		"100644 blob cccccccccccccccccccccccccccccccccccccccc\tshared.txt\x00"
+	externalGitNames = "binary.dat\x00odd\nname.txt\x00shared.txt\x00"
+	externalGitDiff  = "diff --git a/binary.dat b/binary.dat\nnew file mode 100644\n" +
+		"index 0000000000000000000000000000000000000000..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" +
+		"GIT binary patch\nliteral 4\nLcmZQzWMXDv01f~L\n\nliteral 0\nHcmV?d00001\n\n" +
+		"diff --git \"a/odd\\nname.txt\" \"b/odd\\nname.txt\"\nnew file mode 100644\n" +
+		"--- /dev/null\n+++ \"b/odd\\nname.txt\"\n@@ -0,0 +1 @@\n+newline path\n" +
+		"diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-common\n+pinned head\n"
+)
+
+// This fixture supplies only fixed external responses, not a Git object database.
+// The SUT reserves paths and records ownership, snapshots, hashes and ContextID.
+func newExternalGitFixture(t *testing.T) *acquisitionFixture {
+	t.Helper()
+	f := newAcquisitionFixturePaths(t)
+	f.base, f.head, f.mergeBase = externalGitBase, externalGitHead, externalGitMergeBase
+	f.configureAPI(t)
+	f.source.gitOutput = f.gitOutput
+	// The existing protocol.allow=never rejects file transport if the callback
+	// is accidentally unset; this fixture must never fall back to the network.
+	f.source.remote = func(repository string) string { return "file://" + filepath.Join(f.dir, repository+".git") }
+	return f
+}
+
+func (f *acquisitionFixture) gitCalls(t *testing.T) []string {
+	t.Helper()
+	f.gitMu.Lock()
+	defer f.gitMu.Unlock()
+	return append([]string(nil), f.gitHistory...)
+}
+
+func (f *acquisitionFixture) setGitMode(mode string) {
+	f.gitMu.Lock()
+	defer f.gitMu.Unlock()
+	f.gitMode = mode
+}
+
+func (f *acquisitionFixture) gitOutput(ctx context.Context, cwd string, args []string) ([]byte, error) {
+	f.gitMu.Lock()
+	defer f.gitMu.Unlock()
+	if ctx.Err() != nil {
+		return nil, context.Cause(ctx)
+	}
+	invalid := errors.New("unexpected external Git fixture command, cwd or state")
+	root := f.root
+	repository, worktree := filepath.Join(root, "repository.git"), filepath.Join(root, "checkout")
+	registration := filepath.Join(repository, "worktrees", "checkout")
+	calls, mode := f.gitHistory, f.gitMode
+	switch mode {
+	case "", "pin-result", "merge-result", "names-unterminated", "names-utf8", "head-result", "status-result":
+	default:
+		return nil, invalid
+	}
+	fixed := []string{
+		"--no-pager", "--git-dir=" + repository,
+		"-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null",
+		"-c", "core.fsmonitor=false", "-c", "core.autocrlf=false", "-c", "core.sparseCheckout=false",
+		"-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+		"-c", "credential.interactive=false", "-c", "http.sslVerify=true", "-c", "http.followRedirects=false",
+		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.http.allow=always",
+		"-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "submodule.recurse=false",
+	}
+	steps := []struct {
+		args   []string
+		output string
+	}{
+		{[]string{"init", "--bare", "--template=", repository}, ""},
+		{[]string{"config", "remote.base.url", "file://" + filepath.Join(f.dir, "owner/repo.git")}, ""},
+		{[]string{"config", "remote.base.promisor", "true"}, ""},
+		{[]string{"config", "remote.base.partialclonefilter", "blob:none"}, ""},
+		{[]string{"fetch", "--filter=blob:none", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "base", externalGitBase + ":refs/review/base"}, ""},
+		{[]string{"rev-parse", "--verify", externalGitBase + "^{commit}"}, externalGitBase + "\n"},
+		{[]string{"config", "remote.head.url", "file://" + filepath.Join(f.dir, "fork/repo.git")}, ""},
+		{[]string{"config", "remote.head.promisor", "true"}, ""},
+		{[]string{"config", "remote.head.partialclonefilter", "blob:none"}, ""},
+		{[]string{"fetch", "--filter=blob:none", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "head", externalGitHead + ":refs/review/head"}, ""},
+		{[]string{"rev-parse", "--verify", externalGitHead + "^{commit}"}, externalGitHead + "\n"},
+		{[]string{"merge-base", "--all", externalGitBase, externalGitHead}, externalGitMergeBase + "\n"},
+		{[]string{"ls-tree", "-r", "-z", externalGitHead}, externalGitTree},
+		{[]string{"worktree", "add", "--detach", worktree, externalGitHead}, ""},
+		{[]string{"diff", "--binary", "--no-ext-diff", "--no-textconv", externalGitMergeBase, externalGitHead, "--"}, externalGitDiff},
+		{[]string{"diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv", externalGitMergeBase, externalGitHead, "--"}, externalGitNames},
+	}
+	key, output := "", ""
+	if reflect.DeepEqual(args, []string{"-c", "core.hooksPath=/dev/null", "rev-parse", "HEAD"}) {
+		if cwd != worktree || len(calls) < len(steps) {
+			return nil, invalid
+		}
+		key, output = "next-head", externalGitHead+"\n"
+	} else {
+		if cwd != root || len(args) < len(fixed) || !reflect.DeepEqual(args[:len(fixed)], fixed) {
+			return nil, invalid
+		}
+		args = args[len(fixed):]
+		if len(calls) < len(steps) {
+			i := len(calls)
+			if !reflect.DeepEqual(args, steps[i].args) {
+				return nil, invalid
+			}
+			key, output = fmt.Sprintf("acquire-%d", i), steps[i].output
+			switch i {
+			case 0:
+				if err := os.Mkdir(filepath.Join(repository, "objects"), 0700); err != nil {
+					return nil, err
+				}
+			case 5:
+				if mode == "pin-result" {
+					output = externalGitHead + "\n"
+				}
+			case 11:
+				if mode == "merge-result" {
+					output = "not-a-commit\n"
+				}
+			case 13:
+				if err := os.Mkdir(filepath.Join(repository, "worktrees"), 0700); err != nil {
+					return nil, err
+				}
+				if err := os.Mkdir(registration, 0700); err != nil {
+					return nil, err
+				}
+				for name, body := range map[string]string{"shared.txt": "pinned head\n", "odd\nname.txt": "newline path\n", "binary.dat": "\x00\x01\x02\x03"} {
+					file, err := os.OpenFile(filepath.Join(worktree, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+					if err != nil {
+						return nil, err
+					}
+					_, writeErr := file.WriteString(body)
+					if err := errors.Join(writeErr, file.Close()); err != nil {
+						return nil, err
+					}
+				}
+			case 15:
+				switch mode {
+				case "names-unterminated":
+					output = strings.TrimSuffix(externalGitNames, "\x00")
+				case "names-utf8":
+					output = "\xff\x00"
+				}
+			}
+		} else {
+			verify := []string{"--git-dir=" + registration, "--work-tree=" + worktree}
+			switch {
+			case reflect.DeepEqual(args, append(append([]string{}, verify...), "rev-parse", "HEAD")):
+				key, output = "verify-head", externalGitHead+"\n"
+				if mode == "head-result" {
+					output = externalGitBase + "\n"
+				}
+			case reflect.DeepEqual(args, append(append([]string{}, verify...), "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none")):
+				key = "verify-status"
+				if mode == "status-result" {
+					output = " M shared.txt\n"
+				}
+			default:
+				return nil, invalid
+			}
+		}
+	}
+	if key == "next-head" || strings.HasPrefix(key, "verify-") {
+		for _, path := range []string{worktree, registration} {
+			if info, err := os.Stat(path); err != nil || !info.IsDir() {
+				return nil, invalid
+			}
+		}
+	}
+	f.gitHistory = append(f.gitHistory, key)
+	return []byte(output), nil
+}
+
+// Both acquisition fixtures use this raw GitHub boundary. The default fixture
+// still serves Git HTTP requests with real git over temporary repositories.
 func TestAcquisitionGHHelper(t *testing.T) {
 	dir := os.Getenv("PWC_ACQUIRE_FIXTURE")
 	if dir == "" {
