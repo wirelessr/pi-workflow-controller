@@ -5489,6 +5489,8 @@ func validationStage(name string) string {
 		return "worker"
 	}
 	switch name {
+	case "m1-incomplete-no-gap", "m1-query-utc", "m1-task-id", "m1-proposal", "m1-context", "m1-inputs", "m1-owner", "m1-evidence-analysis":
+		return "worker"
 	case "duplicate-attachment", "conflicting-attachment", "duplicate-empty-attachment", "missing-attachment-size", "null-comment",
 		"analysis-without-content", "missing-page", "changed-total", "missing-fields", "unsafe-attachment", "oversized-attachment", "vision-pending",
 		"false-complete", "duplicate-comment", "wrong-page-offset", "missing-linked", "missing-attachment", "raw-key", "unknown-file", "file-escape":
@@ -5553,6 +5555,75 @@ func storedPublication[T any](t *testing.T, store *contract.Store, ref contract.
 		t.Fatal("Store publication changed fixture data")
 	}
 	return p
+}
+
+func testWorkerDataValidation(t *testing.T, store *contract.Store, base validationInputs, name string) error {
+	t.Helper()
+	scope := testScope()
+	sources := map[contract.Ref][]file{base.intakeRef: base.intake.Files, base.wikiRef: base.wiki.Files}
+	contextData, files := contextFixture("complete", scope, []contract.Ref{base.intakeRef, base.wikiRef}, base.intake.Data, base.wiki.Data)
+	contextRef, err := storeFixture(t, store, ContextSchema, contextData, files, false)
+	if err != nil {
+		t.Fatal("invalid context prerequisite: ", err)
+	}
+	cp := storedPublication[Context](t, store, contextRef, contextData)
+	if _, err := checkContextPublication(t.Context(), contextRef, cp, scope, base.intakeRef, base.wikiRef, base.intake.Data, base.wiki.Data, sources); err != nil {
+		t.Fatal("invalid context prerequisite: ", err)
+	}
+	sources[contextRef] = cp.Files
+	h := contextHistory{ref: contextRef, value: cp.Data, sources: sources}
+	workspace := filepath.Join(store.Dir(), "triage-work")
+	req := contract.Request{Inputs: appendSourceInputs([]contract.Ref{contextRef}, sources)}
+	task := stageTask{Workspace: workspace, Stage: "planner", Scope: scope, Gaps: cp.Data.Gaps, Requirements: plannerRequirements + "\n" + triageWorkspaceRequirements}
+	plannerData := plannerFixture(t, name, req, task, 1, base.intakeRef)
+	plannerData = workerPlannerFixture(t, name, req, plannerData, 1)
+	proposal, err := storeFixture(t, store, PlannerSchema, plannerData, nil, false)
+	if err != nil {
+		t.Fatal("invalid planner prerequisite: ", err)
+	}
+	pp := storedPublication[PlannerState](t, store, proposal, plannerData)
+	if err := checkPlannerSnapshot(pp.Data, h); err != nil {
+		t.Fatal("invalid planner prerequisite: ", err)
+	}
+	if err := checkWorkerTasks(pp.Data, h, sources, nil); err != nil {
+		t.Fatal("invalid worker task prerequisite: ", err)
+	}
+	workerTask := pp.Data.WorkerTasks[0]
+	request := workerRequest{Workspace: workspace, Stage: "worker-" + workerTask.SourceKind + "-" + workerTask.Responsibility, Scope: scope, Proposal: proposal, Context: contextRef, Task: workerTask, Dependencies: []contract.Ref{}, Requirements: workerRequirements + "\n" + triageWorkspaceRequirements}
+	refs := appendSourceInputs([]contract.Ref{proposal, contextRef}, sources)
+	before := testJSON([]any{base.intake, base.wiki, cp, pp, req, request, refs})
+	baseline := "m1-complete"
+	if name == "m1-query-utc" {
+		baseline = "m1-logs"
+	}
+	want := validationError(name)
+	for i, fixture := range []string{baseline, name} {
+		v, files := workerFixture(fixture, request, refs)
+		ref, e := storeFixture(t, store, WorkerSchema, v, files, false)
+		if e != nil {
+			t.Fatalf("worker %s did not reach semantic validation: %v", fixture, e)
+		}
+		p := storedPublication[WorkerResult](t, store, ref, v)
+		if !reflect.DeepEqual(p.Files, []file{{ID: "worker-raw", Kind: "evidence", Path: "evidence/worker-raw"}}) {
+			t.Fatal("worker publication changed evidence entries")
+		}
+		raw, e := rawFile(t.Context(), ref, p.Files, "worker-raw")
+		if e != nil || string(raw) != "anonymous evidence\n" {
+			t.Fatalf("worker publication changed evidence bytes: %q, %v", raw, e)
+		}
+		err = checkWorkerResult(p, request, refs, sources)
+		if !bytes.Equal(before, testJSON([]any{base.intake, base.wiki, cp, pp, req, request, refs})) {
+			t.Fatal("worker fixture changed prerequisite data or Inputs")
+		}
+		if i == 0 {
+			if err != nil {
+				t.Fatal("invalid worker baseline: ", err)
+			}
+		} else if err == nil || err.Error() != want {
+			t.Fatalf("worker mutation reached wrong rejection: %v, want %q", err, want)
+		}
+	}
+	return err
 }
 
 // Reuse the provider data fixtures and real Store schema path, without dispatch
@@ -5760,7 +5831,18 @@ func validationError(name string) string {
 	case "m3-retained-feedback-drop", "m3-retained-feedback-change", "m3-retained-feedback-reorder":
 		return "planner cannot drop or change controller feedback"
 	}
-	if name == "m1-store-file" {
+	switch name {
+	case "m1-incomplete-no-gap":
+		return "worker requires actual work and complete/incomplete delivery with gaps"
+	case "m1-query-utc":
+		return "supporting query requires a nonzero UTC window"
+	case "m1-task-id", "m1-proposal", "m1-context", "m1-inputs":
+		return "worker proposal/context/task/inputs mismatch"
+	case "m1-owner":
+		return "worker evidence is not an exact committed input"
+	case "m1-evidence-analysis":
+		return "evidence-only worker cannot supply analysis"
+	case "m1-file", "m1-store-file":
 		return "unknown worker evidence file"
 	}
 	if name == "m1-store-schema" {
@@ -5915,8 +5997,13 @@ func validationRejection(name string, err error) error {
 	if phase != "" {
 		expectedCode = engine.ContractInvalid
 	}
-	if errors.As(err, &execution) && execution.Code != expectedCode {
-		return fmt.Errorf("expected %s classification, not execution failure: %w", expectedCode, err)
+	if errors.As(err, &execution) {
+		if name == "m1-file" || validationStage(name) == "worker" && !strings.HasPrefix(name, "m1-store-") {
+			return fmt.Errorf("expected M1 semantic rejection, not execution failure: %w", err)
+		}
+		if execution.Code != expectedCode {
+			return fmt.Errorf("expected %s classification, not execution failure: %w", expectedCode, err)
+		}
 	}
 	var failure *contract.Error
 	var pathError *os.PathError
@@ -6044,6 +6131,37 @@ func TestTriageReportFileHardcap(t *testing.T) {
 }
 
 func TestValidationRejectionFailures(t *testing.T) {
+	for _, tc := range triageCases {
+		if tc.name != "m1-file" && (validationStage(tc.name) != "worker" || strings.HasPrefix(tc.name, "m1-store-")) {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			message := validationError(tc.name)
+			semantic := errors.New(message)
+			for _, fault := range []struct {
+				name string
+				err  error
+				want bool
+			}{
+				{"semantic", semantic, true},
+				{"wrapped-semantic", fmt.Errorf("worker result acceptance: %w", semantic), true},
+				{"nil", nil, false},
+				{"wrong-message", errors.New("another rejection"), false},
+				{"workflow", &engine.Failure{Code: engine.WorkflowFailed, Message: message}, false},
+				{"wrapped-workflow", fmt.Errorf("worker: %w", &engine.Failure{Code: engine.WorkflowFailed, Message: message}), false},
+				{"provider", &engine.Failure{Code: engine.ProviderFailed, Message: message}, false},
+				{"contract", &contract.Error{Code: contract.ContractInvalid, Phase: "schema", Message: message}, false},
+				{"joined-storage", errors.Join(semantic, &contract.Error{Code: contract.StorageFailed, Message: message}), false},
+				{"path", &os.PathError{Op: "read", Path: "evidence/worker-raw", Err: semantic}, false},
+				{"cancel", errors.Join(semantic, context.Canceled), false},
+				{"deadline", errors.Join(semantic, context.DeadlineExceeded), false},
+			} {
+				if got := validationRejection(tc.name, fault.err); (got == nil) != fault.want {
+					t.Fatalf("%s rejection classification changed: %v", fault.name, got)
+				}
+			}
+		})
+	}
 	store := newValidationStore(t)
 	for _, mode := range []string{"report-storage", "cancellation"} {
 		t.Run(mode, func(t *testing.T) {
@@ -6207,6 +6325,10 @@ func TestTriageValidation(t *testing.T) {
 			sources := map[contract.Ref][]file{base.intakeRef: base.intake.Files, base.wikiRef: base.wiki.Files}
 			switch stage {
 			case "worker":
+				if !strings.HasPrefix(tc.name, "m1-store-") {
+					err = testWorkerDataValidation(t, store, base, tc.name)
+					break
+				}
 				request := workerRequest{Proposal: base.wikiRef, Context: base.intakeRef, Task: WorkerTask{ID: "w1", Responsibility: "evidence-only"}}
 				refs := []contract.Ref{base.intakeRef, base.wikiRef}
 				v, files := workerFixture("m1-"+strings.TrimPrefix(tc.name, "m1-store-"), request, refs)
@@ -7325,11 +7447,11 @@ func TestIntakeToContext(t *testing.T) {
 				"http-linked-failure", "http-malformed-fields", "http-malformed-issue", "http-metadata-limit", "http-oversized",
 				"http-page-duplicate", "http-page-empty", "http-page-failure", "http-page-null", "http-page-offset",
 				"http-page-partial", "http-page-short", "http-page-total", "initial-update", "m1-analysis", "m1-complete",
-				"m1-context", "m1-dependencies", "m1-dependencies-incomplete", "m1-evidence-analysis", "m1-file",
-				"m1-handoff-after", "m1-handoff-before", "m1-incomplete", "m1-incomplete-no-gap", "m1-inputs", "m1-logs",
-				"m1-owner", "m1-pending", "m1-planner-drop", "m1-planner-invent", "m1-planner-invent-committed",
-				"m1-planner-provider-failure", "m1-proposal", "m1-query-utc", "m1-redispatch", "m1-reuse-id", "m1-schema",
-				"m1-support", "m1-task-duplicate", "m1-task-id", "m1-task-owner", "m1-task-utc", "m1-unsatisfied",
+				"m1-dependencies", "m1-dependencies-incomplete", "m1-file",
+				"m1-handoff-after", "m1-handoff-before", "m1-incomplete", "m1-logs",
+				"m1-pending", "m1-planner-drop", "m1-planner-invent", "m1-planner-invent-committed",
+				"m1-planner-provider-failure", "m1-redispatch", "m1-reuse-id", "m1-schema",
+				"m1-support", "m1-task-duplicate", "m1-task-owner", "m1-task-utc", "m1-unsatisfied",
 				"m1-worker-cancel", "m1-worker-provider-failure", "m1-worker-timeout", "m3-capacity-above", "m3-capacity-at",
 				"m3-capacity-at-plan", "m3-capacity-below", "m3-capacity-zero", "m3-checkpoint-missing", "m3-cycle-six",
 				"m3-feedback-change", "m3-feedback-drop", "m3-feedback-invent", "m3-feedback-owner", "m3-feedback-reorder",
@@ -9929,14 +10051,15 @@ func TestIntakeToContext(t *testing.T) {
 						want = engine.CleanupFailed
 					}
 					if want == engine.WorkflowFailed {
-						wantText := map[string]string{
-							"m1-incomplete-no-gap": "complete/incomplete delivery with gaps", "m1-planner-invent-committed": "distinct workflow-accepted refs", "m1-query-utc": "supporting query requires a nonzero UTC window",
-							"m1-pending": "explicit proposed task ID", "m1-unsatisfied": "has no accepted result", "m1-redispatch": "task ID already completed",
-							"m1-reuse-id": "unique, uncompleted IDs", "m1-planner-drop": "worker_results differ from accepted deliveries", "m1-planner-invent": "distinct workflow-accepted refs",
-							"m1-task-id": "proposal/context/task/inputs mismatch", "m1-proposal": "proposal/context/task/inputs mismatch", "m1-context": "proposal/context/task/inputs mismatch", "m1-inputs": "proposal/context/task/inputs mismatch",
-							"m1-owner": "not an exact committed input", "m1-file": "unknown worker evidence file", "m1-evidence-analysis": "evidence-only worker cannot supply analysis",
-							"m1-task-utc": "nonzero UTC window", "m1-task-owner": "exact input owner/file", "m1-task-duplicate": "unique, uncompleted IDs",
-						}[tc.name]
+						wantText := validationError(tc.name)
+						if wantText == "" {
+							wantText = map[string]string{
+								"m1-planner-invent-committed": "distinct workflow-accepted refs",
+								"m1-pending":                  "explicit proposed task ID", "m1-unsatisfied": "has no accepted result", "m1-redispatch": "task ID already completed",
+								"m1-reuse-id": "unique, uncompleted IDs", "m1-planner-drop": "worker_results differ from accepted deliveries", "m1-planner-invent": "distinct workflow-accepted refs",
+								"m1-task-utc": "nonzero UTC window", "m1-task-owner": "exact input owner/file", "m1-task-duplicate": "unique, uncompleted IDs",
+							}[tc.name]
+						}
 						var contractErr *contract.Error
 						if wantText == "" || !strings.Contains(report.Failure.Error(), wantText) || errors.As(report.Failure, &failure) || errors.As(report.Failure, &contractErr) {
 							t.Fatalf("M1 semantic rejection changed: %v", report.Failure)
