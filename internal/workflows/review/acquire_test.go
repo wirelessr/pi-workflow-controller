@@ -149,6 +149,8 @@ func newAcquisitionFixturePaths(t *testing.T) *acquisitionFixture {
 
 func newAcquisitionFixtureFromSeed(t *testing.T, seed *acquisitionGit) *acquisitionFixture {
 	t.Helper()
+	// Acquisition strips GIT_* identity; avoid host email resolution for its reflog.
+	t.Setenv("EMAIL", "fixture@pwc.invalid")
 	f := newAcquisitionFixturePaths(t)
 	if seed == nil {
 		f.acquisitionGit = newAcquisitionGit(t, f.dir, t.TempDir())
@@ -321,6 +323,36 @@ func TestAcquisitionSeedIsolation(t *testing.T) {
 	}
 }
 
+func TestAcquisitionFixtureIdentityScope(t *testing.T) {
+	t.Setenv("EMAIL", "parent@example.invalid")
+	t.Run("fixture", func(t *testing.T) {
+		f := newAcquisitionFixture(t)
+		if f.source.gitOutput != nil {
+			t.Fatal("identity coverage requires real Git")
+		}
+		c, err := f.acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { checkError(t, c.Cleanup(context.Background()), "") })
+		for _, repo := range []string{f.sourceRepo, c.Worktree} {
+			for _, revision := range []string{f.base, f.head, f.mergeBase} {
+				got := fixtureGit(t, repo, "show", "-s", "--format=%an%n%ae%n%cn%n%ce", revision)
+				if got != "Fixture\nfixture@example.com\nFixture\nfixture@example.com" {
+					t.Fatalf("fallback replaced explicit commit identity: %q", got)
+				}
+			}
+		}
+		if got := fixtureGit(t, c.Worktree, "reflog", "show", "-1", "--format=%ge", "HEAD"); got != "fixture@pwc.invalid" {
+			t.Fatalf("acquisition reflog inherited host identity: %q", got)
+		}
+		checkError(t, c.Verify(context.Background()), "")
+	})
+	if got := os.Getenv("EMAIL"); got != "parent@example.invalid" {
+		t.Fatalf("fixture email leaked to parent scope: %q", got)
+	}
+}
+
 func TestAcquirePinnedForkSnapshotAndOwnedCleanup(t *testing.T) {
 	f := newAcquisitionFixture(t)
 	if f.source.gitOutput != nil {
@@ -487,12 +519,31 @@ func TestAcquireMetadataValidationAndPartialCleanup(t *testing.T) {
 		{"unfetchable-pin", func(f *acquisitionFixture) { f.metadata["head"].(map[string]any)["sha"] = strings.Repeat("a", 40) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newAcquisitionFixture(t)
+			var f *acquisitionFixture
+			if tc.name == "unfetchable-pin" {
+				f = newAcquisitionFixture(t)
+			} else {
+				f = newExternalGitFixture(t)
+				f.source.gitOutput = func(_ context.Context, _ string, args []string) ([]byte, error) {
+					t.Fatalf("Git used before metadata rejection: %v", args)
+					return nil, nil
+				}
+			}
 			tc.mutate(f)
 			f.saveMetadata(t)
 			c, err := f.acquire(context.Background())
 			if err == nil || c != nil {
 				t.Fatalf("accepted bad metadata: %+v %v", c, err)
+			}
+			if tc.name != "unfetchable-pin" {
+				wantErr := "invalid PR revision metadata"
+				switch tc.name {
+				case "wrong-number", "wrong-url", "wrong-base-repo":
+					wantErr = "PR metadata identity mismatch"
+				}
+				if err.Error() != wantErr {
+					t.Fatalf("metadata rejection: got %v, want %q", err, wantErr)
+				}
 			}
 			if strings.Contains(err.Error(), "SECRET") {
 				t.Fatalf("stderr leaked: %v", err)
@@ -684,7 +735,11 @@ func TestAcquirePartialFetchHydratesOnlyNeededBlobs(t *testing.T) {
 func TestAcquireMetadataCommandBoundaries(t *testing.T) {
 	for _, scenario := range []string{"unavailable", "oversized", "deadline"} {
 		t.Run(scenario, func(t *testing.T) {
-			f := newAcquisitionFixture(t)
+			f := newExternalGitFixture(t)
+			f.source.gitOutput = func(_ context.Context, _ string, args []string) ([]byte, error) {
+				t.Fatalf("Git used before metadata command rejection: %v", args)
+				return nil, nil
+			}
 			if err := os.Remove(filepath.Join(f.dir, "metadata.json")); err != nil {
 				t.Fatal(err)
 			}
@@ -698,6 +753,19 @@ func TestAcquireMetadataCommandBoundaries(t *testing.T) {
 			c, err := f.acquire(ctx)
 			if c != nil || err == nil || strings.Contains(err.Error(), "SECRET") {
 				t.Fatalf("metadata failure: %+v %v", c, err)
+			}
+			wantErr := "PR metadata: acquisition command failed"
+			switch scenario {
+			case "deadline":
+				wantErr = "PR metadata: " + context.DeadlineExceeded.Error()
+			case "oversized":
+				wantErr = "PR metadata: " + errAcquisitionOutputLimit.Error()
+			}
+			if scenario == "unavailable" && errors.Is(err, syscall.EPERM) {
+				wantErr = "PR metadata: acquisition process group cleanup failed: " + syscall.EPERM.Error()
+			}
+			if err.Error() != wantErr {
+				t.Fatalf("metadata command rejection: got %v, want %q", err, wantErr)
 			}
 			if scenario == "deadline" && !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("deadline lost: %v", err)
