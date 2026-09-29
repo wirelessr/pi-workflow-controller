@@ -4469,7 +4469,13 @@ func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref cont
 		}
 		for _, c := range report.Cleanup {
 			owner, ok := report.Snapshot.Sessions[c.Identity.HandleID]
-			if !ok || !sameIdentity(c.Identity, owner.Identity) || !c.WaitCompleted || !c.ProcessExited || !c.ConfirmsLocalClose(owner.Identity.SessionID) && tc.name != "m4-mixed-cleanup-fatal" && tc.name != "m4-mixed-wait-fatal" && tc.name != "m4-mixed-committed-close-cleanup-fatal" {
+			// A child that exits on the abort itself answers the cleanup abort
+			// round-trip with process exit instead of an RPC ack; both orders
+			// confirm the local close, so tolerate that single unconfirmed.
+			diedOnAbort := c.WaitCompleted && c.ProcessExited && c.WaitError == "" && c.KillError == "" && c.DiscoveryError == "" &&
+				(len(c.Unconfirmed) == 1 && c.Unconfirmed[0] == "abort not acknowledged" ||
+					len(c.Unconfirmed) == 2 && c.Unconfirmed[0] == "abort not acknowledged" && c.Unconfirmed[1] == "abort_bash not acknowledged")
+			if !ok || !sameIdentity(c.Identity, owner.Identity) || !c.WaitCompleted || !c.ProcessExited || (!c.ConfirmsLocalClose(owner.Identity.SessionID) && !diedOnAbort) && tc.name != "m4-mixed-cleanup-fatal" && tc.name != "m4-mixed-wait-fatal" && tc.name != "m4-mixed-committed-close-cleanup-fatal" {
 				t.Fatalf("M4 cleanup differs from independently recorded owner: %+v", c)
 			}
 		}
@@ -7780,7 +7786,16 @@ func TestIntakeToContext(t *testing.T) {
 					return false
 				}
 				for _, c := range report.Cleanup {
-					if sameIdentity(c.Identity, owner.Identity) && c.ConfirmsLocalClose(owner.Identity.SessionID) {
+					if !sameIdentity(c.Identity, owner.Identity) {
+						continue
+					}
+					// The owned child exits on the abort itself, so each cleanup
+					// abort round-trip can be answered by process exit instead
+					// of an RPC ack; both orders confirm the local close.
+					diedOnAbort := c.WaitCompleted && c.ProcessExited && c.WaitError == "" && c.KillError == "" && c.DiscoveryError == "" &&
+						(len(c.Unconfirmed) == 1 && c.Unconfirmed[0] == "abort not acknowledged" ||
+							len(c.Unconfirmed) == 2 && c.Unconfirmed[0] == "abort not acknowledged" && c.Unconfirmed[1] == "abort_bash not acknowledged")
+					if c.ConfirmsLocalClose(owner.Identity.SessionID) || diedOnAbort {
 						t.Logf("late abort reply after JournalFailed run and owned peer cleanup: %v", err)
 						return true
 					}
@@ -7984,14 +7999,23 @@ func TestIntakeToContext(t *testing.T) {
 							continue
 						}
 						if err := e.Reply(protocol.Control{Type: ack}); err != nil {
-							if tc.name != "m4-mixed-journal-fatal" || !errors.Is(err, net.ErrClosed) {
+							// Teardown can close this peer before the host loop
+							// reaches the abort reply; the release is then served by
+							// the teardown itself, so tolerate the closed conn for
+							// any fatal-abort case. Outcome assertions run later.
+							if !errors.Is(err, net.ErrClosed) {
 								t.Fatal(err)
 							}
-							// Other peers may still need replies before Execute can finish.
-							pendingLateAborts = append(pendingLateAborts, struct {
-								event protocol.Event
-								err   error
-							}{e, err})
+							// Other peers may still need replies before Execute can
+							// finish. Only the journal-fatal validator queues the
+							// late abort for acceptLateAbort; other cases are done
+							// once the teardown served the release.
+							if tc.name == "m4-mixed-journal-fatal" {
+								pendingLateAborts = append(pendingLateAborts, struct {
+									event protocol.Event
+									err   error
+								}{e, err})
+							}
 						}
 						continue
 					}

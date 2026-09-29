@@ -1388,7 +1388,12 @@ func TestAcquisitionGHHelper(t *testing.T) {
 		if child.Start() != nil {
 			os.Exit(2)
 		}
-		if os.WriteFile(filepath.Join(dir, "ready"), []byte(strconv.Itoa(child.Process.Pid)), 0600) != nil {
+		// Publish atomically so the reader's existence check implies the pid
+		// bytes are complete; a truncated create is readable under load.
+		if err := os.WriteFile(filepath.Join(dir, "ready.tmp"), []byte(strconv.Itoa(child.Process.Pid)), 0600); err != nil {
+			os.Exit(2)
+		}
+		if err := os.Rename(filepath.Join(dir, "ready.tmp"), filepath.Join(dir, "ready")); err != nil {
 			os.Exit(2)
 		}
 		fmt.Fprintln(os.Stderr, "SECRET cancellation credential")

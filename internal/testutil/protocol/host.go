@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -137,13 +138,22 @@ func (h *Host) read(p *peer) {
 	for {
 		var message Control
 		if err := decoder.Decode(&message); err != nil {
-			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !isReset(err) {
 				h.failed(p, err)
 			}
 			return
 		}
 		h.send(Event{Message: message, peer: p})
 	}
+}
+
+// isReset reports a peer teardown where the peer closed with unread data left
+// in the socket (the kernel answers RST instead of FIN). A child exiting on an
+// abort without draining pending replies produces exactly this read error, so
+// it is a clean peer-gone, not a transport fault.
+func isReset(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && errors.Is(opErr.Err, syscall.ECONNRESET)
 }
 
 // Close unblocks publishers before waiting for accept/read goroutines. It also
