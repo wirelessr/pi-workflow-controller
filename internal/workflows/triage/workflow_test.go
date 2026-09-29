@@ -131,10 +131,146 @@ type deadlineRuntime struct {
 	name, fault string
 	mu          sync.Mutex
 	occurrences map[[2]string]int
+	// gates tracks in-flight gated dispatches and closes each deadline early
+	// once the fixture accepted that dispatch. Only timeout precondition
+	// cases opt in; deadline-subject cases keep natural expiry.
+	gates *deadlineGates
 }
 type deadlineSession struct {
 	runtime.Session
 	owner *deadlineRuntime
+}
+
+type deadlineGates struct {
+	mu    sync.Mutex
+	chans map[string]chan struct{}
+}
+
+func (g *deadlineGates) register(token string) chan struct{} {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c := make(chan struct{})
+	g.chans[token] = c
+	return c
+}
+func (g *deadlineGates) remove(token string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.chans, token)
+}
+func (g *deadlineGates) accept(token string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if c, ok := g.chans[token]; ok {
+		close(c)
+	}
+}
+
+// timeoutPreconditionGate marks cases whose 1s deadline wait is not itself
+// the property under test: precondition cases construct history, ownership,
+// reserve, reframe or later-priority from the timeout, and deadline-subject
+// variants other than the kept natural-expiry representatives gate the wait
+// the same way. Gated cases end the physical wait at the hold barrier with
+// the same typed cause a natural 1s expiry would surface; the kept
+// representatives (attempt-timeout, m3-stats-timeout, the two report-timeout
+// retries, verifier-timeout-retry, and the slow-intake pair) keep natural
+// expiry.
+var timeoutPrecondition = map[string]bool{
+	"m4-allfail-blind-new-id":                            true,
+	"m4-allfail-caller-bool":                             true,
+	"m4-meta-attempt":                                    true,
+	"m4-meta-cleanup":                                    true,
+	"m4-meta-diagnostic":                                 true,
+	"m4-meta-identity":                                   true,
+	"m4-meta-prefix":                                     true,
+	"m4-planner-journal-fatal":                           true,
+	"m4-planner-later-user-cancel":                       true,
+	"m4-planner-parent-deadline":                         true,
+	"m4-planner-run-limit":                               true,
+	"m4-planner-storage-fatal":                           true,
+	"m4-support-unsafe-no-basis":                         true,
+	"m4-support-unsafe-no-reason":                        true,
+	"m4-support-unsafe-owner":                            true,
+	"m6-claim-history-reopen":                            true,
+	"m6-history-cross-handled":                           true,
+	"m6-history-redirect":                                true,
+	"m6-history-retry-full-inputs":                       true,
+	"m6-history-same-version-handled":                    true,
+	"m6-history-uncommitted-result":                      true,
+	"m6-history-unresolved":                              true,
+	"m6-history-unselected-claim":                        true,
+	"m6-history-wiki-resume":                             true,
+	"m6-history-worker-unresolved":                       true,
+	"m6-history-wrong-owner":                             true,
+	"m6-mandatory-reframe-inspection":                    true,
+	"m6-review-claim-planner-state":                      true,
+	"m6-review-claim-retry":                              true,
+	"m6-review-support-resolve-context":                  true,
+	"m6-review-support-resolve-wiki":                     true,
+	"m6-review-support-revise-context":                   true,
+	"m6-review-support-revise-wiki":                      true,
+	"m6-review-support-wrong-phase":                      true,
+	"m6-review-wiki-resume":                              true,
+	"m6-review-wiki-wrong-role":                          true,
+	"m6-review-worker-owner-handled":                     true,
+	"m6-review-worker-redirect":                          true,
+	"m6-review-worker-resume":                            true,
+	"m6-review-worker-wrong-proposal":                    true,
+	"m6-review-worker-wrong-task":                        true,
+	"m6-supplement-resolve-context-resume-attempt-exact": true,
+	"m6-supplement-resolve-context-resume-reserve":       true,
+	"m6-supplement-resolve-context-resume-session-exact": true,
+	"m6-supplement-resolve-context-resume-session-short": true,
+	"m6-supplement-resolve-wiki-resume-attempt-exact":    true,
+	"m6-supplement-resolve-wiki-resume-reserve":          true,
+	"m6-supplement-resolve-wiki-resume-session-exact":    true,
+	"m6-supplement-resolve-wiki-resume-session-short":    true,
+	"m6-supplement-revise-context-resume-attempt-exact":  true,
+	"m6-supplement-revise-context-resume-reserve":        true,
+	"m6-supplement-revise-context-resume-session-exact":  true,
+	"m6-supplement-revise-context-resume-session-short":  true,
+	"m6-supplement-revise-wiki-resume-attempt-exact":     true,
+	"m6-supplement-revise-wiki-resume-reserve":           true,
+	"m6-supplement-revise-wiki-resume-session-exact":     true,
+	"m6-supplement-revise-wiki-resume-session-short":     true,
+	"m6-support-inspection-reserve":                      true,
+	"m6-support-resolve-resume":                          true,
+	"m6-support-revise-resume":                           true,
+	"m7-same-version":                                    true,
+	"m7-support-revision":                                true,
+	"m7-wrong-ref":                                       true,
+	"m1-worker-timeout":                                  true,
+	"m2-branch-timeout":                                  true,
+	"m4-allfail-agent-progress":                          true,
+	"m4-allfail-reframe-checkpoint":                      true,
+	"m4-capacity-fresh-worker-timeout":                   true,
+	"m4-mixed-timeout":                                   true,
+	"m4-nil-recovery-timeout":                            true,
+	"m4-planner-first-timeout":                           true,
+	"m4-planner-retry-exhausted":                         true,
+	"m4-reframe-completed-inspection":                    true,
+	"m4-reframe-no-inspection":                           true,
+	"m4-reframe-stale-inspection":                        true,
+	"m4-reframe-timeout-inspection-resume":               true,
+	"m4-support-resolve-context-timeout":                 true,
+	"m4-support-resolve-wiki-timeout":                    true,
+	"m4-support-update-context-timeout":                  true,
+	"m4-support-update-wiki-timeout":                     true,
+	"m4-wiki-timeout-partial-resume":                     true,
+	"m4-worker-timeout":                                  true,
+	"m5-claim-retry-exhausted":                           true,
+	"m5-claim-timeout-retry":                             true,
+	"m5-planner-feedback-timeout":                        true,
+	"m5-same-version-missing-only":                       true,
+	"m5-supplement-reframe-inspection-resume":            true,
+	"m5-verifier-unavailable":                            true,
+	"planner-timeout":                                    true,
+	"refresh-timeout":                                    true,
+	"resolve-timeout":                                    true,
+	"support-resolve-timeout":                            true,
+	"update-timeout":                                     true,
+	"work-planner-timeout":                               true,
+	"work-worker-timeout":                                true,
 }
 
 func (r *deadlineRuntime) Start(ctx context.Context, spec runtime.SessionSpec) (runtime.Session, error) {
@@ -169,12 +305,32 @@ func (s deadlineSession) Execute(ctx context.Context, d runtime.Dispatch) (runti
 	}
 	r.occurrences[key]++
 	n := r.occurrences[key]
+	target := r.timeoutTarget(key[0], key[1], n)
+	var gate chan struct{}
+	if target && r.gates != nil {
+		gate = r.gates.register(d.Token)
+	}
 	r.mu.Unlock()
-	if !r.timeoutTarget(key[0], key[1], n) {
+	if !target {
 		return s.Session.Execute(ctx, d)
 	}
-	timed, cancel := context.WithTimeoutCause(ctx, time.Second, &runtime.Failure{Code: runtime.TimedOut, Origin: runtime.AttemptDeadline, Message: "fixture step deadline"})
-	defer cancel()
+	deadlineFailure := &runtime.Failure{Code: runtime.TimedOut, Origin: runtime.AttemptDeadline, Message: "fixture step deadline"}
+	// The parent lets the gate end the physical wait with the same typed cause
+	// the 1s expiry would surface; natural expiry remains the fallback.
+	base, baseCancel := context.WithCancelCause(ctx)
+	timed, timedCancel := context.WithTimeoutCause(base, time.Second, deadlineFailure)
+	defer timedCancel()
+	defer baseCancel(context.Canceled)
+	if gate != nil {
+		defer r.gates.remove(d.Token)
+		go func() {
+			select {
+			case <-gate:
+				baseCancel(deadlineFailure)
+			case <-timed.Done():
+			}
+		}()
+	}
 	return s.Session.Execute(timed, d)
 }
 
@@ -6941,6 +7097,16 @@ func TestIntakeToContext(t *testing.T) {
 					policy.MaxTotalAttempts = m6Spec.attempts
 				}
 			}
+			// Gating keys on the subtest name, never the m6 base: ten bases are
+			// shared between precondition and deadline-subject subtests.
+			gateName := tc.name
+			if m6 {
+				gateName = m6Name
+			}
+			var gates *deadlineGates
+			if timeoutPrecondition[gateName] {
+				gates = &deadlineGates{chans: map[string]chan struct{}{}}
+			}
 			exe, err := os.Executable()
 			if err != nil {
 				t.Fatal(err)
@@ -7424,10 +7590,10 @@ func TestIntakeToContext(t *testing.T) {
 			}
 			var transport runtime.Runtime = pi
 			if tc.name == "attempt-timeout" || tc.name == "resolve-timeout" || tc.name == "refresh-timeout" || tc.name == "update-timeout" || tc.name == "support-resolve-timeout" || tc.name == "planner-timeout" || tc.name == "work-worker-timeout" || tc.name == "work-planner-timeout" || tc.name == "m1-worker-timeout" {
-				transport = &deadlineRuntime{Runtime: pi, name: tc.name, fault: m6Spec.fault}
+				transport = &deadlineRuntime{Runtime: pi, name: tc.name, fault: m6Spec.fault, gates: gates}
 			}
 			if tc.name == "m2-branch-timeout" || m4 || m5 || m6 {
-				transport = &deadlineRuntime{Runtime: pi, name: tc.name, fault: m6Spec.fault}
+				transport = &deadlineRuntime{Runtime: pi, name: tc.name, fault: m6Spec.fault, gates: gates}
 			}
 			runCtx := ctx
 			var cancelParent context.CancelCauseFunc
@@ -8916,6 +9082,12 @@ func TestIntakeToContext(t *testing.T) {
 						t.Fatal(err)
 					}
 					sentReplies[req.Identity.AttemptID] = ack
+					// The hold reply is the barrier: the fixture has entered
+					// hold, so the gated deadline wait can end with the same
+					// typed cause a natural 1s expiry would surface.
+					if ack == "hold" && gates != nil {
+						gates.accept(req.Identity.DispatchToken)
+					}
 				}
 			}
 			if opts.SyncFile != nil {
