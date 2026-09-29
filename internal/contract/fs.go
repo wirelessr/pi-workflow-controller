@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 var errSize = errors.New("file exceeds byte limit")
@@ -20,10 +22,35 @@ var errUnsafe = errors.New("path must contain only directories and a regular fil
 
 func digest(raw []byte) string { h := sha256.Sum256(raw); return hex.EncodeToString(h[:]) }
 
-func noSymlinks(root *os.Root, path string) error {
+func noSymlinks(root *os.Root, path string) (err error) {
 	if !filepath.IsLocal(path) || filepath.Clean(path) != path {
 		return errUnsafe
 	}
+	// Native single-open proof: O_NOFOLLOW_ANY rejects symlinks anywhere in
+	// the path in one syscall instead of one Lstat per prefix from the root.
+	var cleanupErr error
+	defer func() {
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
+	}()
+	if dir, openErr := root.Open("."); openErr == nil {
+		fd, nativeErr := unix.Openat(int(dir.Fd()), path, unix.O_EVTONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+		parentOK := false
+		if nativeErr == nil {
+			// Native lookup only needs search permission; retain Go's directory read requirement.
+			if parent, parentErr := root.OpenFile(filepath.Dir(path), os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0); parentErr == nil {
+				parentOK = true
+				cleanupErr = parent.Close()
+			}
+			cleanupErr = errors.Join(cleanupErr, unix.Close(fd))
+		}
+		cleanupErr = errors.Join(cleanupErr, dir.Close())
+		if nativeErr == nil && parentOK && cleanupErr == nil {
+			return nil
+		}
+	}
+	// Preserve the original prefix result on proof failure, retaining visible Close errors.
 	current := ""
 	parts := strings.Split(path, string(filepath.Separator))
 	for i, part := range parts {
