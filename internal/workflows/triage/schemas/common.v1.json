@@ -7,10 +7,18 @@
       "additionalProperties": false,
       "required": ["source", "filter", "from", "to", "basis", "status", "outcome", "evidence"],
       "properties": {
-        "source": {"type": "string"},
-        "filter": {"type": "string"},
-        "from": {"type": "string"},
-        "to": {"type": "string"},
+        "source": { "type": "string" },
+        "filter": { "type": "string" },
+        "from": {
+          "type": "string",
+          "pattern": "Z$",
+          "description": "UTC RFC 3339 timestamp ending in Z (e.g. 2026-10-01T10:41:34.603376Z), never a +00:00 numeric offset form"
+        },
+        "to": {
+          "type": "string",
+          "pattern": "Z$",
+          "description": "UTC RFC 3339 timestamp ending in Z, strictly later than from"
+        },
         "basis": {
           "type": "array",
           "items": {"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"}
@@ -78,10 +86,14 @@
           "type": "string"
         },
         "sha256": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Full lowercase 64-hex-character sha256 of the referenced contract; copy byte-exact, never truncate"
         },
         "manifest_sha256": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Full lowercase 64-hex-character sha256 of the referenced manifest; copy byte-exact, never truncate"
         }
       }
     },
@@ -177,7 +189,8 @@
           "type": "string"
         },
         "original": {
-          "type": "string"
+          "type": "string",
+          "description": "The raw timestamp exactly as observed in its source; shape depends on format (see allOf branches)"
         },
         "format": {
           "enum": [
@@ -191,7 +204,9 @@
           "type": "string"
         },
         "utc": {
-          "type": "string"
+          "type": "string",
+          "pattern": "Z$",
+          "description": "The anchor converted to UTC, an RFC 3339 string ending in Z; from/to must be byte-identical to the min/max of these"
         },
         "offset_seconds": {
           "type": "integer",
@@ -221,7 +236,51 @@
             }
           ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "format": { "const": "rfc3339" } },
+            "required": ["format"]
+          },
+          "then": {
+            "properties": {
+              "original": {
+                "pattern": "(Z|[+-]\\d\\d:\\d\\d)$",
+                "description": "Complete RFC 3339 timestamp with an explicit zone or numeric offset suffix (e.g. 2026-10-01T05:21:20.298Z), never a time-only fragment or a zone-less date-time"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "format": { "const": "epoch-seconds" } },
+            "required": ["format"]
+          },
+          "then": {
+            "properties": {
+              "original": {
+                "pattern": "^\\d+$",
+                "description": "Bare integer epoch-seconds value, digits only, never the full surrounding string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "format": { "const": "epoch-millis" } },
+            "required": ["format"]
+          },
+          "then": {
+            "properties": {
+              "original": {
+                "pattern": "^\\d+$",
+                "description": "Bare integer epoch-millis value, digits only, never the full surrounding string"
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }
