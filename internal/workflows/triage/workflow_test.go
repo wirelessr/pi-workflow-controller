@@ -3867,7 +3867,11 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 	}
 	pending := slices.Clone(p.pendingFeedback)
 	if name == "m3-feedback-owner" || name == "m3-retained-feedback-reorder" {
-		if len(committed) != ordinal+1 || last == nil || len(pending) != 1 || pending[0].After != *last || !strings.HasPrefix(pending[0].Note, "Context usage percent is unknown;") {
+		// The acceptance repair adds one repair re-attempt after the rejected
+		// publication, so the committed slice carries the rejected candidate
+		// and its replayed repair: ordinal accepted snapshots, the rejected
+		// publication and one repair publication.
+		if len(committed) != ordinal+2 || last == nil || len(pending) != 1 || pending[0].After != *last || !strings.HasPrefix(pending[0].Note, "Context usage percent is unknown;") {
 			t.Fatal("checkpoint rejection lost last accepted state or pending capacity feedback")
 		}
 		var accepted, rejected publication[PlannerState]
@@ -4126,11 +4130,16 @@ func m2StoreSchema(t *testing.T, store *contract.Store, base validationInputs, n
 func assertValidationBoundary(t *testing.T, r *engine.Run, tc triageCase, report engine.Report, samples []contract.Ref) {
 	t.Helper()
 	wantStates, wantSessions := 0, 3
+	// Planner states added by the acceptance repair: their published output
+	// is a repair re-attempt, not a new sampled snapshot.
+	repairStates := 0
 	if tc.name == "m3-feedback-owner" {
-		wantStates, wantSessions = 2, 5
+		wantStates, wantSessions = 3, 5
+		repairStates = 1
 	}
 	if tc.name == "m3-retained-feedback-reorder" {
-		wantStates, wantSessions = 3, 5
+		wantStates, wantSessions = 4, 5
+		repairStates = 1
 	}
 	if report.Final != nil || report.Result.Final != nil || len(report.Result.Outputs) != 0 || len(report.Snapshot.Retries) != 0 || report.Snapshot.Policy.MaxLiveSessions != 4 || len(report.CleanupErrors) != 0 || len(report.FinalizationErrors) != 0 || len(report.Snapshot.Attempts) != tc.stages || len(report.Snapshot.Sessions) != wantSessions || len(report.Cleanup) != wantSessions {
 		t.Fatal("validation boundary changed outputs, accounting or cleanup")
@@ -4191,13 +4200,19 @@ func assertValidationBoundary(t *testing.T, r *engine.Run, tc triageCase, report
 		}
 		return 0
 	})
-	if len(states) != wantStates || len(samples) != max(0, wantStates-1) {
+	if len(states) != wantStates || len(samples) != max(0, wantStates-repairStates-1) {
 		t.Fatal("rejected snapshot was sampled or dispatched")
 	}
-	for i := 0; i < len(states)-1; i++ {
+	// The repair re-attempt's publication trails the accepted states; the
+	// stats receipts bind the earlier accepted snapshots in order only.
+	// The rejected repair never records a Decision, so its key stays absent.
+	for i := 0; i < len(samples); i++ {
 		if samples[i] != *states[i].Output {
 			t.Fatal("stats receipt does not name the exact accepted snapshot in order")
 		}
+		decisions[states[i].Key+"-recorded"] = *states[i].Output
+	}
+	for i := len(samples); i < len(states)-repairStates-1; i++ {
 		decisions[states[i].Key+"-recorded"] = *states[i].Output
 	}
 	raw, err := os.ReadFile(filepath.Join(r.Dir(), "events.jsonl"))
@@ -5641,7 +5656,7 @@ var triageCases = []triageCase{
 	{"m4-cycle-echo", 4, true, false},
 	{"m3-cycle-six", 19, false, true},
 	{"m3-capacity-zero", 6, false, true}, {"m3-capacity-at-plan", 7, false, true}, {"m3-policy-initial-echo", 4, true, false},
-	{"m3-retained-feedback-drop", 7, true, false}, {"m3-retained-feedback-change", 7, true, false}, {"m3-retained-feedback-reorder", 7, true, false},
+	{"m3-retained-feedback-drop", 7, true, false}, {"m3-retained-feedback-change", 7, true, false}, {"m3-retained-feedback-reorder", 8, true, false},
 	{"m3-stats-window-zero", 4, true, false}, {"m3-stats-percent-type", 4, true, false}, {"m3-stats-tokens-type", 4, true, false}, {"m3-stats-missing-percent", 4, true, false}, {"m3-stats-missing-identity", 4, true, false},
 	{"m3-capacity-below", 6, false, true}, {"m3-capacity-at", 6, false, true}, {"m3-capacity-above", 6, false, true},
 	{"m3-unknown", 6, false, true}, {"m3-unknown-null", 6, false, true}, {"m3-unknown-missing", 6, false, true}, {"m3-unknown-tokens", 6, false, true},
@@ -5650,7 +5665,7 @@ var triageCases = []triageCase{
 	{"m3-fresh-worker-before-step", 6, false, true}, {"m3-fresh-wiki-before-step", 6, false, true}, {"m3-fresh-reconstruct", 7, false, true}, {"m3-support-pending", 7, false, true},
 	{"m3-checkpoint-missing", 4, true, false}, {"m3-illegal-optin", 4, true, false},
 	{"m3-checkpoint-drop", 6, true, false}, {"m3-policy-change", 6, true, false}, {"m3-cycle-backward", 6, true, false}, {"m3-cycle-skip", 6, true, false}, {"m3-checkpoint-forged", 6, true, false}, {"m3-full-forged", 6, true, false},
-	{"m3-feedback-drop", 6, true, false}, {"m3-feedback-change", 6, true, false}, {"m3-feedback-reorder", 5, true, false}, {"m3-feedback-owner", 6, true, false}, {"m3-feedback-blank", 6, true, false}, {"m3-feedback-invent", 6, true, false}, {"m3-note-change", 6, true, false},
+	{"m3-feedback-drop", 6, true, false}, {"m3-feedback-change", 6, true, false}, {"m3-feedback-reorder", 5, true, false}, {"m3-feedback-owner", 7, true, false}, {"m3-feedback-blank", 6, true, false}, {"m3-feedback-invent", 6, true, false}, {"m3-note-change", 6, true, false},
 	{"m3-stats-reject", 4, true, false}, {"m3-stats-identity", 4, true, false}, {"m3-stats-history", 4, true, false}, {"m3-stats-format", 4, true, false}, {"m3-stats-timeout", 4, true, false}, {"m3-stats-cancel", 4, true, false}, {"m3-stats-fatal", 4, true, false}, {"m3-stats-cleanup-failure", 4, true, false},
 	{"m3-policy-invalid-zero", 3, true, false}, {"m3-policy-invalid-negative", 3, true, false}, {"m3-policy-invalid-above", 3, true, false}, {"m3-policy-invalid-nan", 3, true, false}, {"m3-policy-invalid-infinite", 3, true, false},
 	{"m3-store-absent", 0, false, false}, {"m3-store-null", 0, true, false},
@@ -9660,7 +9675,11 @@ func TestIntakeToContext(t *testing.T) {
 				}
 			}
 			limitBeforePrompt := tc.name == "m5-verifier-attempt-limit" || tc.name == "m5-verifier-live-limit"
-			if count != tc.stages && !limitBeforePrompt || (report.ExitCode != 0) != tc.failure {
+			// The planner acceptance repair adds one re-prompted attempt that the
+			// dispatch counter above deliberately skips (repair prompts are not
+			// new stages), so accepted-repair cases count stages without it.
+			repairAdjusted := count != tc.stages && count+repairPrompts == tc.stages
+			if count != tc.stages && !repairAdjusted && !limitBeforePrompt || (report.ExitCode != 0) != tc.failure {
 				t.Fatalf("stages=%d outcome=%s failure=%v", count, report.Outcome, report.Failure)
 			}
 			if tc.failure && validationError(tc.name) != "" {

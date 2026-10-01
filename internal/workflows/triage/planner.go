@@ -360,7 +360,42 @@ func (p *plannerCaller) stepInScope(ctx context.Context, executionScope *engine.
 	// deadline trades a longer worst-case wait for avoiding a full
 	// re-reasoning retry. Workers keep the default: their overruns are real
 	// acquisition time, not reasoning.
-	out, err := executionScope.Step(ctx, engine.StepSpec{Key: key, Session: p.handle, Prompt: string(prompt), Inputs: inputs, Output: contract.Spec{SchemaID: PlannerSchema}, Timeout: 45 * time.Minute})
+	spec := engine.StepSpec{Key: key, Session: p.handle, Prompt: string(prompt), Inputs: inputs, Output: contract.Spec{SchemaID: PlannerSchema}, Timeout: 45 * time.Minute}
+	validate := func(ref contract.Ref) (bool, error) {
+		a2 := newAcceptance(ctx, p.r)
+		records2, verr := a2.loadWorkerResults(p.scope, p.workerResults)
+		if verr != nil {
+			return false, verr
+		}
+		if verr = a2.checkPlannerWithWorkers(ref, p.history, p.last, records2); verr != nil {
+			return false, verr
+		}
+		state, verr := readAccepted[PlannerState](a2, ref, PlannerSchema)
+		if verr != nil {
+			return false, verr
+		}
+		if !slices.Equal(state.Data.WorkerResults, p.workerResults) {
+			return false, fmt.Errorf("planner worker_results differ from accepted deliveries")
+		}
+		if !slices.Equal(state.Data.WikiResults, p.wikiResults) || (p.adaptive && state.Data.Ledger == nil) {
+			return false, fmt.Errorf("planner requires exact wiki deliveries and adaptive ledger")
+		}
+		if !samePlannerCheckpoint(state.Data.Checkpoint, checkpoint) {
+			return false, fmt.Errorf("planner checkpoint differs from supplied continuation metadata")
+		}
+		if recoveryJSON(state.Data.Recovery) != recoveryJSON(task.Recovery) {
+			return false, fmt.Errorf("planner recovery differs from supplied delivery metadata")
+		}
+		if recoveryJSON(state.Data.Verification) != recoveryJSON(task.Verification) {
+			return false, fmt.Errorf("planner verification differs from supplied claim/feedback metadata")
+		}
+		return state.Data.Ledger != nil, nil
+	}
+	// Mechanical acceptance repair, one budgeted re-attempt on the same
+	// session, mirrors taskStepValidateRepair: the rejection diagnostic rides
+	// spec.Feedback so the repairing planner sees the exact violation. Without
+	// it a gate rejection is a blind terminal failure the model cannot fix.
+	out, err := executionScope.Step(ctx, spec)
 	if err != nil && p.recovery != nil {
 		p.stopped = true
 		return contract.Ref{}, &taskFailure{cause: err, handle: p.handle, identity: p.identity, stage: "planner", attempt: out.AttemptID}
@@ -369,32 +404,31 @@ func (p *plannerCaller) stepInScope(ctx context.Context, executionScope *engine.
 		err = fmt.Errorf("planner execution identity mismatch")
 	}
 	if err == nil {
-		a = newAcceptance(ctx, p.r)
-		records, err = a.loadWorkerResults(p.scope, p.workerResults)
-		if err == nil {
-			err = a.checkPlannerWithWorkers(out.Output, p.history, p.last, records)
+		var ledger bool
+		ledger, err = validate(out.Output)
+		if err != nil {
+			child, cerr := executionScope.Child("contract-repair-" + key)
+			if cerr != nil {
+				err = cerr
+			} else {
+				repairSpec := spec
+				repairSpec.Feedback = &engine.Feedback{Message: "Previous contract was published but rejected by acceptance validation. Fix exactly the reported violation and republish the same contract; do not change substance: " + err.Error()}
+				out, err = child.Step(ctx, repairSpec)
+				if err != nil && p.recovery != nil {
+					p.stopped = true
+					return contract.Ref{}, &taskFailure{cause: err, handle: p.handle, identity: p.identity, stage: "planner", attempt: out.AttemptID}
+				}
+				if err == nil {
+					if p.recovery != nil && out.Execution.SessionID != p.identity.SessionID {
+						err = fmt.Errorf("planner execution identity mismatch")
+					} else {
+						ledger, err = validate(out.Output)
+					}
+				}
+			}
 		}
-		if err == nil {
-			var state publication[PlannerState]
-			state, err = readAccepted[PlannerState](a, out.Output, PlannerSchema)
-			if err == nil && !slices.Equal(state.Data.WorkerResults, p.workerResults) {
-				err = fmt.Errorf("planner worker_results differ from accepted deliveries")
-			}
-			if err == nil && (!slices.Equal(state.Data.WikiResults, p.wikiResults) || (p.adaptive && state.Data.Ledger == nil)) {
-				err = fmt.Errorf("planner requires exact wiki deliveries and adaptive ledger")
-			}
-			if err == nil && !samePlannerCheckpoint(state.Data.Checkpoint, checkpoint) {
-				err = fmt.Errorf("planner checkpoint differs from supplied continuation metadata")
-			}
-			if err == nil && recoveryJSON(state.Data.Recovery) != recoveryJSON(task.Recovery) {
-				err = fmt.Errorf("planner recovery differs from supplied delivery metadata")
-			}
-			if err == nil && recoveryJSON(state.Data.Verification) != recoveryJSON(task.Verification) {
-				err = fmt.Errorf("planner verification differs from supplied claim/feedback metadata")
-			}
-			if err == nil && state.Data.Ledger != nil {
-				adaptive = true
-			}
+		if err == nil && ledger {
+			adaptive = true
 		}
 	}
 	if err == nil {
