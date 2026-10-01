@@ -279,6 +279,27 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": { "format": { "const": "local-paired" } },
+            "required": ["format"]
+          },
+          "then": {
+            "properties": {
+              "original": {
+                "description": "Zone-less local timestamp (e.g. 2025-01-02T00:30:00). local-paired requires a same-event absolute pair: paired_epoch_millis must be a nonnull integer and paired_evidence a nonnull evidence entry. Without a same-event absolute epoch value in committed evidence, local-paired can never validate: instead combine the time-of-day with the date established by same-day evidence and record format rfc3339 with the normalized RFC 3339 original"
+              },
+              "paired_epoch_millis": {
+                "type": "integer",
+                "description": "Same-event absolute epoch millis; never null when format is local-paired"
+              },
+              "paired_evidence": {
+                "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
+                "description": "Evidence of the paired absolute timestamp; never null when format is local-paired"
+              }
+            }
+          }
         }
       ]
     }

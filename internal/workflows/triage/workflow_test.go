@@ -6296,7 +6296,7 @@ func validationRejection(name string, err error) error {
 	switch name {
 	case "file-escape":
 		phase = "files"
-	case "support-invalid-status", "planner-extra-control", "work-extra-control", "work-bad-kind", "m1-store-schema", "support-nonutc", "guessed-zone":
+	case "support-invalid-status", "planner-extra-control", "work-extra-control", "work-bad-kind", "m1-store-schema", "support-nonutc", "guessed-zone", "local-no-pair":
 		phase = "schema"
 	}
 	var execution *engine.Failure
