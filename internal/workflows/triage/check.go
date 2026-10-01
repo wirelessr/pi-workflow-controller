@@ -465,8 +465,11 @@ func checkTime(v TimeResolution, evidence func(Evidence) error) error {
 		if a.Format != "local-paired" && (a.PairedEpochMillis != nil || a.PairedEvidence != nil) {
 			return fmt.Errorf("unexpected paired anchor")
 		}
-		if err != nil || !actual.Equal(want) {
-			return fmt.Errorf("UTC conversion mismatch")
+		if err != nil {
+			return fmt.Errorf("UTC conversion mismatch: anchor %q original %q does not parse as format %s (expected e.g. a complete RFC 3339 timestamp ending in Z, or a bare integer for epoch formats)", a.Event, a.Original, a.Format)
+		}
+		if !actual.Equal(want) {
+			return fmt.Errorf("UTC conversion mismatch: anchor %q original %q (format %s, offset_seconds %d) converts to %s but the recorded utc is %q", a.Event, a.Original, a.Format, a.OffsetSeconds, actual.Format(time.RFC3339Nano), a.UTC)
 		}
 		if first.IsZero() || want.Before(first) {
 			first = want
@@ -492,8 +495,14 @@ func checkTime(v TimeResolution, evidence func(Evidence) error) error {
 func checkSupportingQuery(q SupportingQuery, evidence func(Evidence) error) error {
 	from, e1 := utc(q.From)
 	to, e2 := utc(q.To)
-	if e1 != nil || e2 != nil || !from.Before(to) {
-		return fmt.Errorf("supporting query requires a nonzero UTC window")
+	if e1 != nil {
+		return fmt.Errorf("supporting query requires a nonzero UTC window: from %q is not an explicit UTC RFC 3339 string ending in Z (e.g. 2026-10-01T10:41:34.603376Z)", q.From)
+	}
+	if e2 != nil {
+		return fmt.Errorf("supporting query requires a nonzero UTC window: to %q is not an explicit UTC RFC 3339 string ending in Z", q.To)
+	}
+	if !from.Before(to) {
+		return fmt.Errorf("supporting query requires a nonzero UTC window: from %q is not strictly before to %q", q.From, q.To)
 	}
 	if !nonblank(q.Source) || !nonblank(q.Filter) || !nonblank(q.Outcome) || len(q.Basis) == 0 || len(q.Evidence) == 0 {
 		return fmt.Errorf("supporting query lacks conditions, basis or result evidence")
@@ -542,8 +551,11 @@ func checkContextPublication(ctx context.Context, ref contract.Ref, p publicatio
 		return v, fmt.Errorf("context source/scope mismatch")
 	}
 	if len(history) == 0 {
-		if v.Previous != nil || len(v.ResolvedGaps) != 0 {
-			return v, fmt.Errorf("initial context cannot invent resolution lineage")
+		if v.Previous != nil {
+			return v, fmt.Errorf("initial context cannot invent resolution lineage: previous is set to %q but this is the initial context (no prior context exists); leave previous and resolved_gaps unset/null on initial context, including repair re-attempts", v.Previous.AttemptID)
+		}
+		if len(v.ResolvedGaps) != 0 {
+			return v, fmt.Errorf("initial context cannot invent resolution lineage: resolved_gaps has %d entries but this is the initial context (no prior gaps exist to resolve); leave previous and resolved_gaps unset/null on initial context, including repair re-attempts", len(v.ResolvedGaps))
 		}
 	} else {
 		if v.Intake != history[0].value.Intake && (intake.Previous == nil || *intake.Previous != history[0].value.Intake || wikiRef == history[0].value.Wiki) {

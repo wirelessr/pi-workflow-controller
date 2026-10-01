@@ -146,9 +146,9 @@ func (a *acceptance) loadIntakeHistory(ref contract.Ref, ticket string) (intakeH
 			if p.Data.Update || len(p.Data.Work) != 0 {
 				return h, fmt.Errorf("initial intake cannot declare revision work")
 			}
-			for _, s := range intakeSlots(p.Data) {
+			for name, s := range intakeSlots(p.Data) {
 				if s.Ref != nil {
-					return h, fmt.Errorf("initial intake cannot retain foreign evidence")
+					return h, fmt.Errorf("initial intake cannot retain foreign evidence: source slot %q carries ref %q but initial intake must own all its evidence locally; set every source slot ref to null and keep its local file_id (only Controller-dispatched revision stages may re-point slots)", name, s.Ref.AttemptID)
 				}
 			}
 			if p.Data.Acquisition != nil && p.Data.Acquisition.Ref != nil {
