@@ -247,7 +247,7 @@
             "properties": {
               "original": {
                 "pattern": "(Z|[+-]\\d\\d:\\d\\d)$",
-                "description": "Complete RFC 3339 timestamp with an explicit zone or numeric offset suffix (e.g. 2026-10-01T05:21:20.298Z), never a time-only fragment or a zone-less date-time"
+                "description": "Complete RFC 3339 timestamp with an explicit zone or numeric offset suffix (e.g. 2026-10-01T05:21:20.298Z), never a time-only fragment or a zone-less date-time. An absolute timestamp in another syntax (e.g. '2026-10-01 05:21:58 UTC') is still rfc3339: normalize original to RFC 3339 syntax (2026-10-01T05:21:58Z) instead of switching format to local-paired; local-paired is only for zone-less local timestamps"
               }
             }
           }

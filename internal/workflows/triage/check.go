@@ -445,7 +445,7 @@ func checkTime(v TimeResolution, evidence func(Evidence) error) error {
 			}
 		case "local-paired":
 			if a.PairedEpochMillis == nil || a.PairedEvidence == nil {
-				return fmt.Errorf("local timestamp needs same-event absolute evidence")
+				return fmt.Errorf("local timestamp needs same-event absolute evidence: anchor %q original %q is format local-paired but paired_epoch_millis or paired_evidence is null; local-paired is only for a zone-less local timestamp whose same event also carries an absolute epoch value elsewhere, and when no such same-event epoch value exists it can never satisfy this gate; an absolute UTC/zone-labeled timestamp in another syntax (e.g. '2026-10-01 05:21:58 UTC') is not local-paired: record it as format rfc3339 with original normalized to RFC 3339 syntax (e.g. 2026-10-01T05:21:58Z), keeping the raw form in the event text or evidence", a.Event, a.Original)
 			}
 			if reflect.DeepEqual(a.Evidence, *a.PairedEvidence) {
 				return fmt.Errorf("local timestamp cannot be its own absolute evidence")
