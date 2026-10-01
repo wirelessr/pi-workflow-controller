@@ -80,6 +80,17 @@ Planner Agent 可以提出下一步工作；Controller 依已批准的 contract�
 - 後續 milestones 必須遵守已記錄的相依與重用決策。接手先核對 source、完成單元與採證，不回復歷史版本、不重做已完成工作；要改變既定邊界或繞過相依，先指出具體新衝突並取得確認，再同步計畫。
 - 本條是開發／review gate，不新增對 workflow nodes 的共通安全 prompt、runtime hook 或工具 allowlist，也不以 DRY 為由取消前六條保證。
 
+## 八、資訊通道分層：schema、診斷、prompt 各管一種資訊
+
+**格式的機器可檢查事實歸 schema；需要執行期資料的跨欄位／跨檔案規則歸 Go validator 與具體診斷；prompt 只留 Agent 必須判斷或 Controller 無法機械表達的東西。規則有兩份會漂移；用 prompt 補 schema 或 validator 的洞，就是製造第二份會漂移的規則。**
+
+- 機器可檢查的格式（型別、pattern、必填、enum、欄位語義）寫進該 workflow 的 schemas，不寫在 prompt。Schema 是格式的唯一權威來源；skills 與 Step requirements 不手抄 JSON 格式，只可指向 schema。
+- 只有 Go 算得出的規則（跨欄位一致性、byte-exact 保留、條件式 lineage）靠驗收診斷教 Agent，不靠 prompt 預先背誦。診斷必須具體到可修復：指出哪個欄位、收到什麼、期望什麼。籠統訊息（同一句話涵蓋多種原因）先拆訊息，不改驗收條件；repair 迴路是這些規則的執行處。
+- 禁止以「Prompt X to Y」補驗收的洞：schema 缺 pattern 補 schema，診斷不具體修診斷。同一格式規則被 prompt 補兩次以上，代表 prompt 壓制無效，必須升級到 schema 或診斷層，不得第三次寫進 prompt。
+- 格式規則從 validator 前移到 schema 會改變錯誤時點與訊息，屬行為變更：必須明列（依第七條）、schema pattern 不得比對應 Go 檢查更嚴（只讓同一個拒絕更早發生，不新增拒絕條件）、同步更新期待該錯誤時點的測試，並核對 fixtures 與引擎產出端皆符合新 pattern。
+- 領域語義（判斷指引）、scope 與角色邊界（授權、不寫回、不做什麼）屬於 prompt 的正當內容，不得以分層為由刪除或搬進 validator；把領域判斷搬進 Controller 違反第一條。
+- 刪 prompt 句子須有數據佐證（規則實際違反次數、repair 失敗紀錄）或 live 驗證通過；匿名 fixtures 只證明結構不變，不證明模型行為不退化。模型可否讀懂 schema（`output.schema.path` 的自我取用）是 live 能力，未驗證前列為缺口。
+
 ## 閱讀入口
 
 - [PRD](PRD.md)：產品範圍與 Controller 唯一派工。
