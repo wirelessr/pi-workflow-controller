@@ -227,7 +227,7 @@ func checkPlannerSnapshot(v PlannerState, h contextHistory) error {
 	}
 	for _, gap := range h.value.Gaps {
 		if !slices.Contains(v.Gaps, gap) {
-			return fmt.Errorf("planning cannot remove supporting context gaps")
+			return fmt.Errorf("planning cannot remove supporting context gaps: prior gap %q is absent from the new gaps; retain every supporting-context gap byte-exact and put any new information in a new gap or rationale text instead of editing a retained one", gap)
 		}
 	}
 	evidence := func(items []Evidence) error {
