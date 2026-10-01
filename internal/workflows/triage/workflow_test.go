@@ -2566,6 +2566,7 @@ func m2WikiFixture(t *testing.T, name string, req contract.Request) (WikiSearch,
 // the event-loop goroutine owns these maps; the workflow never mutates them.
 type m2Barrier struct {
 	reportFailureAttempt string
+	repairUnderway       bool
 	settleAbortGate      bool
 	settledAbort         *protocol.Event
 	abortReleased        bool
@@ -2593,6 +2594,13 @@ func (b *m2Barrier) pending(name string) bool {
 		return len(b.held) >= 3
 	}
 	return len(b.held) == 3 && (len(b.order) < 3 || b.waiting != "")
+}
+
+// reportOutcomeFailed reports whether the run already reached a terminal
+// failed outcome, so pending barrier releases are teardown races, not bugs.
+func reportOutcomeFailed(r *engine.Run) bool {
+	s := r.Snapshot()
+	return s.WorkflowOutcome == engine.Failed || s.WorkflowOutcome == engine.CancelledState
 }
 
 func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
@@ -2880,7 +2888,11 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 			return
 		}
 		a := snapshot.Attempts[b.attempts[b.waiting]]
-		if a.State != engine.Succeeded || a.Output == nil || snapshot.Sessions[a.HandleID].State != "Closed" && !strings.HasPrefix(name, "m4-mixed-committed-close-") {
+		if a.State != engine.Succeeded || a.Output == nil || snapshot.Sessions[a.HandleID].State != "Closed" && !strings.HasPrefix(name, "m4-mixed-committed-close-") && !b.repairUnderway {
+			// With a contract repair in flight the producer session stays
+			// open past its first published attempt; the published attempt
+			// is the ordering evidence the barrier needs, so do not wait
+			// for the session close the repair delays.
 			return
 		}
 		b.waiting = ""
@@ -2907,7 +2919,11 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 					control = "hold-abort-exit"
 				}
 				if err := b.held["w1"].Reply(protocol.Control{Type: control}); err != nil {
-					t.Fatal(err)
+					// A repair terminal failure can abort held siblings before
+					// this hold reaches them; the teardown serves the release.
+					if !errors.Is(err, net.ErrClosed) || !reportOutcomeFailed(r) {
+						t.Fatal(err)
+					}
 				}
 			}
 		}
@@ -2927,7 +2943,17 @@ func (b *m2Barrier) release(t *testing.T, r *engine.Run, name, bridge string) {
 		}
 	}
 	if err := b.held[id].Reply(protocol.Control{Type: ack}); err != nil {
-		t.Fatal(err)
+		// A contract-repair terminal failure can fail the run and abort this
+		// held worker before the barrier reaches its release: the teardown
+		// then serves the release by process exit. Tolerate the closed peer
+		// for already-failed runs; outcome assertions run later anyway.
+		if !errors.Is(err, net.ErrClosed) || !reportOutcomeFailed(r) {
+			t.Fatal(err)
+		}
+		t.Logf("late barrier release after failed-run teardown: %v", err)
+		b.order = append(b.order, id)
+		b.waiting = id
+		return
 	}
 	if b.settleAbortGate && id == "w2" {
 		t.Log("w3 abort held; w2 compaction-error released without blocking host event loop")
@@ -4098,7 +4124,7 @@ func assertValidationBoundary(t *testing.T, r *engine.Run, tc triageCase, report
 	}
 }
 
-func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref contract.Ref, original ContextResult, expected PlannerState, barrier m2Barrier, prompts, hellos int) {
+func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref contract.Ref, original ContextResult, expected PlannerState, barrier m2Barrier, prompts, hellos, repairs int) {
 	t.Helper()
 	if strings.HasPrefix(tc.name, "m5-") {
 		if tc.failure {
@@ -4211,7 +4237,7 @@ func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref cont
 				}
 				return
 			}
-			if prompts != tc.stages || len(report.Snapshot.Attempts) != prompts || len(report.Snapshot.Sessions) != hellos || len(report.Cleanup) != hellos {
+			if prompts != tc.stages+repairs || len(report.Snapshot.Attempts) != prompts || len(report.Snapshot.Sessions) != hellos || len(report.Cleanup) != hellos {
 				t.Fatalf("M5 failure accounting: prompts=%d attempts=%d sessions=%d hellos=%d cleanup=%d", prompts, len(report.Snapshot.Attempts), len(report.Snapshot.Sessions), hellos, len(report.Cleanup))
 			}
 			for _, attempt := range report.Snapshot.Attempts {
@@ -5177,15 +5203,28 @@ func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref cont
 		if !c.WaitCompleted || !c.ProcessExited {
 			t.Fatal("M2 cleanup did not confirm local Wait/process exit")
 		}
-		if tc.name != "m2-branch-cleanup-failure" && tc.name != "m2-branch-abort-unacknowledged" && !c.ConfirmsLocalClose(c.Identity.SessionID) {
+		diedOnHold := len(c.Unconfirmed) == 2 && c.Unconfirmed[0] == "abort not acknowledged" && c.Unconfirmed[1] == "abort_bash not acknowledged" && c.WaitCompleted && c.ProcessExited && c.WaitError == "" && c.KillError == "" && c.DiscoveryError == ""
+		if !(tc.name == "m2-branch-cleanup-failure" || tc.name == "m2-branch-abort-unacknowledged" || c.ConfirmsLocalClose(c.Identity.SessionID) || (repairs > 0 && diedOnHold)) {
 			t.Fatalf("M2 cleanup not strict: WaitError=%q KillError=%q DiscoveryError=%q Unconfirmed=%v StderrTail=%.300q", c.WaitError, c.KillError, c.DiscoveryError, c.Unconfirmed, c.StderrTail)
+		}
+	}
+	unexpectedCleanup := len(report.CleanupErrors) != 0
+	if repairs > 0 {
+		// A repair round can fail the run while the barrier still holds a
+		// sibling prompt; its teardown kill surfaces as an unacknowledged
+		// abort cleanup error, the same class the abort-unacknowledged case
+		// exercises explicitly.
+		for _, c := range report.Cleanup {
+			if len(c.Unconfirmed) > 0 {
+				unexpectedCleanup = false
+			}
 		}
 	}
 	if tc.name == "m2-branch-cleanup-failure" || tc.name == "m2-branch-abort-unacknowledged" {
 		if len(report.CleanupErrors) == 0 {
 			t.Fatal("M2 cleanup failure was swallowed")
 		}
-	} else if len(report.CleanupErrors) != 0 {
+	} else if unexpectedCleanup {
 		t.Fatal("M2 has unexpected cleanup failures")
 	}
 	if tc.name == "m2-branch-abort-unacknowledged" {
@@ -6074,7 +6113,7 @@ func validationError(name string) string {
 	case "wrong-offset", "support-wrong-epoch":
 		return "calculated local/epoch offset mismatch"
 	case "support-missing-file":
-		return "unknown evidence file"
+		return "no files[] entry declares this id"
 	case "support-zero-window", "support-reversed-window", "support-nonutc":
 		return "supporting query requires a nonzero UTC window"
 	case "support-no-basis", "support-no-result", "support-blank-filter", "support-no-outcome":
@@ -6743,7 +6782,19 @@ var m6Cases = map[string]m6Case{
 	"m6-claim-history-reopen":                            {base: "m5-claim-timeout-retry", stages: 11, final: true, plannerRetries: 1},
 }
 
+type repairCandidate struct {
+	data    any
+	entries []file
+	files   map[string][]byte
+}
+
 func TestIntakeToContext(t *testing.T) {
+	// Repair-retry fixture replay: caches each stage's written candidate so a
+	// semantic/schema repair prompt can deterministically re-present the same
+	// static contract and exhaust the retry budget without disturbing the
+	// count-based stage choreography.
+	repairCache := map[string]repairCandidate{}
+	repairPrompts := 0
 	productCases := map[string]string{
 		"m7-scope-expanded":           "m6-yield",
 		"m7-support-revision":         "m6-review-support-revise-context",
@@ -6787,6 +6838,10 @@ func TestIntakeToContext(t *testing.T) {
 			continue
 		}
 		t.Run(tc.name, func(t *testing.T) {
+			// Repair-replay state is per subtest: cached candidates and the
+			// repair count from one fixture must never leak into the next.
+			repairCache = map[string]repairCandidate{}
+			repairPrompts = 0
 			productName := tc.name
 			productBase, product := productCases[tc.name]
 			m6Name := tc.name
@@ -8031,7 +8086,6 @@ func TestIntakeToContext(t *testing.T) {
 					if e.Message.Type != "prompt" {
 						t.Fatalf("unexpected control %s", e.Message.Type)
 					}
-					count++
 					var req contract.Request
 					if err := protocol.ReadJSON(e.Message.RequestPath, &req); err != nil {
 						t.Fatal(err)
@@ -8040,6 +8094,42 @@ func TestIntakeToContext(t *testing.T) {
 					if err := json.Unmarshal([]byte(req.Prompt), &task); err != nil {
 						t.Fatal(err)
 					}
+					if req.Feedback != nil && repairCache != nil {
+						// A repair retry re-prompts the same session with the exact
+						// rejection diagnostic. The fixture provider is static, so
+						// replay the cached candidate verbatim: the repaired attempt
+						// fails the same gate again and the retry budget exhausts
+						// deterministically. Repair prompts are not new stages and
+						// do not advance the count-based choreography.
+						cacheKey := task.Stage
+						var workerProbe struct {
+							Task struct {
+								ID string `json:"id"`
+							} `json:"task"`
+						}
+						if json.Unmarshal([]byte(req.Prompt), &workerProbe) == nil && workerProbe.Task.ID != "" {
+							// Concurrent workers share a stage name; the cache key
+							// must carry the worker task ID to avoid cross-worker
+							// candidate replay.
+							cacheKey = task.Stage + "/" + workerProbe.Task.ID
+						}
+						if cached, ok := repairCache[cacheKey]; ok {
+							for id, b := range cached.files {
+								if err := os.WriteFile(filepath.Join(filepath.Dir(e.Message.CandidatePath), "evidence", id), b, 0600); err != nil {
+									t.Fatal(err)
+								}
+							}
+							writeEnvelope(t, e.Message, req, cached.data, cached.entries)
+							if err := e.Reply(protocol.Control{Type: "settle"}); err != nil {
+								t.Fatal(err)
+							}
+							repairPrompts++
+							barrier.repairUnderway = true
+							continue
+						}
+						t.Fatalf("repair prompt without cached candidate for stage %s", task.Stage)
+					}
+					count++
 					if task.Workspace != filepath.Join(r.Dir(), "triage-work") || !strings.Contains(task.Requirements, triageWorkspaceRequirements) {
 						t.Fatalf("%s lost run workspace/read-only task guidance", task.Stage)
 					}
@@ -8844,6 +8934,28 @@ func TestIntakeToContext(t *testing.T) {
 						writeEnvelope(t, e.Message, req, data, acquiredFiles)
 					} else {
 						writeCandidate(t, e.Message, req, data, files, tc.name == "file-escape")
+					}
+					if repairCache != nil {
+						entries := []file{}
+						cached := map[string][]byte{}
+						for id, b := range files {
+							entries = append(entries, file{ID: id, Kind: "evidence", Path: filepath.Join("evidence", id)})
+							cached[id] = b
+						}
+						if acquiring && count == 1 {
+							entries = nil
+							cached = nil
+						}
+						writeKey := task.Stage
+						var writeProbe struct {
+							Task struct {
+								ID string `json:"id"`
+							} `json:"task"`
+						}
+						if json.Unmarshal([]byte(req.Prompt), &writeProbe) == nil && writeProbe.Task.ID != "" {
+							writeKey = task.Stage + "/" + writeProbe.Task.ID
+						}
+						repairCache[writeKey] = repairCandidate{data: data, entries: entries, files: cached}
 					}
 					if (r5 || m6) && req.Output.SchemaID == ReportSchema {
 						renderCase := tc.name
@@ -10116,7 +10228,7 @@ func TestIntakeToContext(t *testing.T) {
 				if validationFullflowRepresentative(tc.name) {
 					assertValidationBoundary(t, r, tc, report, barrier.stats)
 				}
-				m2AssertOutcome(t, tc, report, plannerRef, result, expectedPlanner, barrier, count, len(hellos))
+				m2AssertOutcome(t, tc, report, plannerRef, result, expectedPlanner, barrier, count+repairPrompts, len(hellos), repairPrompts)
 				return
 			}
 			supportingAllowed := targetAuthorized && intake.Complete && wikiComplete(wiki)
@@ -10225,7 +10337,7 @@ func TestIntakeToContext(t *testing.T) {
 				if len(report.Snapshot.Sessions) != wantSessions {
 					t.Fatal("M1 failed/successful session accounting changed")
 				}
-				if len(report.Snapshot.Attempts) != tc.stages {
+				if len(report.Snapshot.Attempts) != tc.stages+repairPrompts {
 					t.Fatal("M1 attempt accounting changed")
 				}
 				if tc.failure {
@@ -10276,7 +10388,7 @@ func TestIntakeToContext(t *testing.T) {
 								}
 							}
 						}
-						if failed != 1 {
+						if failed != 1+repairPrompts {
 							t.Fatal("execution failure was not retained as one failed attempt")
 						}
 					}

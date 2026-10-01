@@ -40,6 +40,19 @@ func hasFile(files []file, id string) bool {
 	}
 	return false
 }
+
+// fileDiagnostic explains why an evidence citation of id failed: a wrong-kind
+// declaration is the repairable case the feedback loop must distinguish from a
+// genuinely unknown id, so the repairing agent fixes the kind instead of
+// hunting for a missing file.
+func fileDiagnostic(files []file, id string) string {
+	for _, f := range files {
+		if f.ID == id && f.Kind != "evidence" {
+			return fmt.Sprintf("unknown worker evidence file %s (the file exists but is declared kind=%s; evidence citations require kind=evidence)", id, f.Kind)
+		}
+	}
+	return fmt.Sprintf("unknown worker evidence file %s (no files[] entry declares this id)", id)
+}
 func checkSource(s Source, files []file) (bool, error) {
 	if s.Ref != nil {
 		return false, fmt.Errorf("retained source requires intake lineage")
@@ -553,7 +566,7 @@ func checkContextPublication(ctx context.Context, ref contract.Ref, p publicatio
 			}
 		}
 		if !hasFile(files, e.FileID) {
-			return fmt.Errorf("unknown evidence file %s", e.FileID)
+			return fmt.Errorf("%s", fileDiagnostic(files, e.FileID))
 		}
 		return nil
 	}

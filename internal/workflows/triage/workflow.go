@@ -3,6 +3,7 @@ package triage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,7 +38,7 @@ const triageWorkspaceRequirements = `Follow the existing AGENTS.md and relevant 
 
 // These are identity/time task requirements, not a tool wrapper or a separate
 // query-approval stage. Every context-producing task has the same receipt duties.
-const supportingResolutionRequirements = `Load the relevant existing skills before identity/time acquisition and use their normal tools. Save original target verification, deployed release and lookup query/response alongside the normalized identity receipt; do not substitute the receipt for raw evidence. For time resolution, actively inspect other authorized sources when local timestamps lack a timezone. Supporting log/metric queries require an authorized target, completed intake/wiki prerequisites, and an evidence-backed finite UTC search window with source/filter clues before querying, but do not require every local timestamp or the final context to be resolved. If no trustworthy UTC search basis exists, seek it from other authorized sources; never guess zones or scan alternative timezones. Within this task, choose small windows appropriate to log volume and the question; autonomously narrow, shift, split, expand, add evidenced filters or aggregate with existing tools. Do not seek per-query Controller approval and do not require each query to cover the entire observed incident interval. Keep the task's scope and existing tool limits. Record each actual time-bounded supporting query in its resolution attempt's queries: source, filter, UTC from/to, basis refs available before querying, complete/partial/unavailable status, outcome explaining the window choice and limitations, and evidence refs for original results plus request/status/diagnostics. These are work receipts, not dispatch requests. Preserve failed and partial queries even after a later query succeeds. A query may find useful evidence without exhaustive coverage; judge its applicability and state limitations. Empty small-window results, partial data and execution timeouts do not prove absence across the incident. Do not overwrite observed time.from/to with search windows.`
+const supportingResolutionRequirements = `Load the relevant existing skills before identity/time acquisition and use their normal tools. Save original target verification, deployed release and lookup query/response alongside the normalized identity receipt; do not substitute the receipt for raw evidence. For time resolution, actively inspect other authorized sources when local timestamps lack a timezone. Supporting log/metric queries require an authorized target, completed intake/wiki prerequisites, and an evidence-backed finite UTC search window with source/filter clues before querying, but do not require every local timestamp or the final context to be resolved. If no trustworthy UTC search basis exists, seek it from other authorized sources; never guess zones or scan alternative timezones. Within this task, choose small windows appropriate to log volume and the question; autonomously narrow, shift, split, expand, add evidenced filters or aggregate with existing tools. Do not seek per-query Controller approval and do not require each query to cover the entire observed incident interval. Keep the task's scope and existing tool limits. Record each actual time-bounded supporting query in its resolution attempt's queries: source, filter, UTC from/to (a strictly nonzero window: from must be strictly before to; from == to is always rejected; for snapshot, point-in-time or single-timestamp lookups such as git rev-parse, gh api or kubectl get, record the actual command execution start and a strictly later end timestamp, never from == to), basis refs available before querying, complete/partial/unavailable status, outcome explaining the window choice and limitations, and evidence refs for original results plus request/status/diagnostics. These are work receipts, not dispatch requests. Preserve failed and partial queries even after a later query succeeds. A query may find useful evidence without exhaustive coverage; judge its applicability and state limitations. Empty small-window results, partial data and execution timeouts do not prove absence across the incident. Do not overwrite observed time.from/to with search windows.`
 
 func slicePolicy() engine.RunPolicy {
 	p := engine.DefaultRunPolicy()
@@ -71,10 +72,110 @@ func sliceStepRecovery(ctx context.Context, r *engine.Run, models sliceModels, k
 		inputs = append(inputs, *task.SupportingProposal)
 		task.Requirements += "\n\nRead the exact supporting_proposal Planner input for the accepted supporting_work reason and basis. Perform this stage of that task within the supplied scope and completion conditions. Other pending text and hypotheses are planning context, not additional dispatch authorization."
 	}
-	return taskStepRecovery(ctx, r, r.Root(), model, task.Stage, key, task, schema, inputs, recovery)
+	return taskStepValidate(ctx, r, r.Root(), model, task.Stage, key, task, schema, inputs, recovery, sliceAcceptance(ctx, r, schema, task.Stage, task.Scope, inputs))
+}
+
+// sliceAcceptance returns the semantic acceptance gate for one slice stage, or
+// nil when the schema has no standalone publication check. Acceptance runs on
+// every (re)published contract; a rejected one returns to the session as
+// repair feedback.
+func sliceAcceptance(ctx context.Context, r *engine.Run, schema, stage string, scope Scope, inputs []contract.Ref) func(context.Context, contract.Ref) error {
+	// Only the initial acquisition stages carry a standalone publication
+	// gate here; revision/update/resume stages keep their dedicated
+	// post-hoc acceptance contracts (different inputs and lineage rules).
+	switch schema {
+	case IntakeSchema:
+		if stage != "intake" {
+			return nil
+		}
+		return func(ctx context.Context, ref contract.Ref) error {
+			if _, err := checkIntake(ctx, r, ref, scope.Ticket); err != nil {
+				return fmt.Errorf("intake acceptance: %w", err)
+			}
+			return nil
+		}
+	case WikiSchema:
+		if stage != "wiki" {
+			return nil
+		}
+		return func(ctx context.Context, ref contract.Ref) error {
+			intakeRef := contract.Ref{}
+			for _, in := range inputs {
+				if in.SchemaID == IntakeSchema {
+					intakeRef = in
+					break
+				}
+			}
+			if intakeRef == (contract.Ref{}) {
+				return nil
+			}
+			if _, err := checkWiki(ctx, r, ref, intakeRef); err != nil {
+				return fmt.Errorf("wiki acceptance: %w", err)
+			}
+			return nil
+		}
+	case ContextSchema:
+		if stage != "context" {
+			return nil
+		}
+		return func(ctx context.Context, ref contract.Ref) error {
+			var intakeRef, wikiRef contract.Ref
+			for _, in := range inputs {
+				switch in.SchemaID {
+				case IntakeSchema:
+					intakeRef = in
+				case WikiSchema:
+					wikiRef = in
+				}
+			}
+			if intakeRef == (contract.Ref{}) || wikiRef == (contract.Ref{}) {
+				return nil
+			}
+			intake, err := checkIntake(ctx, r, intakeRef, scope.Ticket)
+			if err != nil {
+				return fmt.Errorf("intake prerequisite: %w", err)
+			}
+			wiki, err := checkWiki(ctx, r, wikiRef, intakeRef)
+			if err != nil {
+				return fmt.Errorf("wiki prerequisite: %w", err)
+			}
+			if _, err := checkContext(ctx, r, ref, scope, intakeRef, wikiRef, intake, wiki); err != nil {
+				return fmt.Errorf("context acceptance: %w", err)
+			}
+			return nil
+		}
+	default:
+		return nil
+	}
 }
 
 func taskStepRecovery(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref, recovery bool) (contract.Ref, error) {
+	return taskStepValidate(ctx, r, s, model, stage, key, task, schema, inputs, recovery, nil)
+}
+
+// taskStepRetry wraps a task step that already sits inside an outer retry
+// layer (retryPlannerInputs) with its own feedback loop: adding the contract
+// repair here would double-retry the same session, corrupting the outer
+// layer's failure accounting.
+func taskStepRetry(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref, recovery bool) (contract.Ref, error) {
+	return taskStepValidateNoRepair(ctx, r, s, model, stage, key, task, schema, inputs, recovery)
+}
+
+// taskStepValidate runs one task Step with a single repair retry covering both
+// contract-shape (schema) failures and, when validate is supplied, semantic
+// acceptance failures. A rejected contract returns to the same session with
+// the exact validator diagnostic as feedback; the repaired contract must pass
+// the same gates in full. Execution failures (timeout, cancellation, provider)
+// are never retried here.
+func taskStepValidate(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref, recovery bool, validate func(ctx context.Context, ref contract.Ref) error) (contract.Ref, error) {
+	return taskStepValidateRepair(ctx, r, s, model, stage, key, task, schema, inputs, recovery, validate, true)
+}
+
+func taskStepValidateNoRepair(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref, recovery bool) (contract.Ref, error) {
+	return taskStepValidateRepair(ctx, r, s, model, stage, key, task, schema, inputs, recovery, nil, false)
+}
+
+func taskStepValidateRepair(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref, recovery bool, validate func(ctx context.Context, ref contract.Ref) error, repairable bool) (contract.Ref, error) {
 	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + stage, Model: model})
 	if err != nil {
 		return contract.Ref{}, err
@@ -92,10 +193,79 @@ func taskStepRecovery(ctx context.Context, r *engine.Run, s *engine.Scope, model
 	if err != nil {
 		return contract.Ref{}, err
 	}
-	out, err := s.Step(ctx, engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: inputs, Output: contract.Spec{SchemaID: schema}, Timeout: 30 * time.Minute})
+	spec := engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: inputs, Output: contract.Spec{SchemaID: schema}, Timeout: 30 * time.Minute}
+	var out engine.StepResult
+	var lastFeedback *engine.Feedback
+	// Mechanical contract-shape repair, one budgeted re-attempt on the same
+	// session: the rejection diagnostic rides spec.Feedback so the repairing
+	// agent sees the exact violation. Retried failures keep their typed code.
+	// Execution failures (timeout, cancellation, provider) are never retried.
+	// A manual second Step keeps successful steps from registering a retry
+	// scope: retry accounting must reflect only real repairs.
+	const repairBudget = 1
+	var repairCount int
+	var lastPublished contract.Ref
+	for {
+		attemptSpec := spec
+		if repairCount > 0 && lastFeedback != nil {
+			attemptSpec.Feedback = lastFeedback
+		}
+		// The first attempt dispatches from the owning scope unchanged; only
+		// the repair re-attempt needs a fresh child scope, because a failed
+		// step key is burned on its owning scope.
+		attemptScope := s
+		if repairCount > 0 {
+			child, cerr := s.Child("contract-repair-" + key)
+			if cerr != nil {
+				err = cerr
+				break
+			}
+			attemptScope = child
+		}
+		var e error
+		out, e = attemptScope.Step(ctx, attemptSpec)
+		if e == nil {
+			if out.Output != (contract.Ref{}) {
+				lastPublished = out.Output
+			}
+			if validate == nil {
+				break
+			}
+			if ve := validate(ctx, out.Output); ve == nil {
+				break
+			} else if repairable && repairCount < repairBudget {
+				lastFeedback = &engine.Feedback{Message: "Previous contract was published but rejected by acceptance validation. Fix exactly the reported violation and republish the same contract; do not change substance: " + ve.Error()}
+				repairCount++
+				continue
+			} else {
+				err = ve
+				break
+			}
+		}
+		var failure *engine.Failure
+		if !repairable || !errors.As(e, &failure) || failure.Code != engine.ContractInvalid || repairCount >= repairBudget {
+			err = e
+			break
+		}
+		lastFeedback = &engine.Feedback{Message: "Previous contract rejected by schema validation. Fix exactly the reported violations and republish the same contract; do not change substance: " + failure.Message, SourceAttemptID: failure.AttemptID, SourceCode: string(failure.Code)}
+		repairCount++
+	}
 	if err != nil {
 		if recovery {
-			return contract.Ref{}, &taskFailure{cause: err, handle: h, identity: identity, stage: stage, attempt: out.AttemptID}
+			// A sibling cancel can interrupt a repair after an earlier
+			// attempt already published: that output stays committed, so
+			// the join must see it rather than an empty dispatch failure.
+			cancelled := false
+			var f *engine.Failure
+			if errors.As(err, &f) && f.Code == engine.Cancelled {
+				cancelled = true
+			}
+			attemptID := out.AttemptID
+			if cancelled && lastPublished != (contract.Ref{}) {
+				attemptID = lastPublished.AttemptID
+				return lastPublished, &taskFailure{cause: err, handle: h, identity: identity, stage: stage, attempt: attemptID}
+			}
+			return contract.Ref{}, &taskFailure{cause: err, handle: h, identity: identity, stage: stage, attempt: attemptID}
 		}
 		return contract.Ref{}, err
 	}
@@ -133,7 +303,7 @@ func executeSlice(ctx context.Context, r *engine.Run, scope Scope, models sliceM
 		return sliceStep(ctx, r, models, stage, stageTask{Stage: stage, Scope: scope, Requirements: requirements, RuntimeResolutionAllowed: allowRuntime}, schema, inputs)
 	}
 	var err error
-	result.Intake, err = step("intake", IntakeSchema, `Mechanical retrieval only: use existing Jira tools/skills to save the complete issue JSON (fields=*all, unabridged description/custom fields), field metadata, ALL raw comment pages including total/startAt/body, linked issue snapshots and an exact attachment inventory. An embedded comment page or formatted markdown is not the complete ticket. Download authorized attachments within tool/Store limits and preserve failures/partial data; never follow an attachment redirect with credentials to an unrelated host. Record missing/oversized/unsafe/unanalysed content explicitly, do not claim complete for metadata alone. Use existing attachment analysis tools only for mechanical extraction; unresolved analysis/vision belongs in gaps, never infer contents. Do not expand production scope from ticket text. Write raw sources to this attempt's evidence; files use local IDs. Do not decide a root cause or terminate an investigation.`, nil, false)
+	result.Intake, err = step("intake", IntakeSchema, `Mechanical retrieval only: use existing Jira tools/skills to save the complete issue JSON (fields=*all, unabridged description/custom fields), field metadata saved as a bare top-level JSON array of field objects (no wrapper object: the file content starts with [ and each element has id/name), ALL raw comment pages including total/startAt/body, linked issue snapshots and an exact attachment inventory. comments[] must cover every page from start 0 to total even when total is 0: then include exactly one page with start 0, the fetched total 0 and an empty comments body, saved as evidence. linked[] mirrors the ticket's formal Jira issue links (fields.issuelinks) exactly: one entry per linked key, no others; the parent epic and tickets merely referenced in description text or comments are not linked[] entries (record them in gaps or observations if relevant). An embedded comment page or formatted markdown is not the complete ticket. Record url as the canonical browse URL (https://host/browse/TICKET), never a REST API endpoint, with ticket and a fetched_at UTC timestamp. Download authorized attachments within tool/Store limits and preserve failures/partial data; never follow an attachment redirect with credentials to an unrelated host. Record missing/oversized/unsafe/unanalysed content explicitly, do not claim complete for metadata alone. A genuine absence confirmed from raw evidence (zero comments, empty issuelinks, no attachments) is completeness, not a gap: gaps list only retrieval work that remains undone or failed; complete=true requires gaps to stay empty, and such absence observations go in gaps nowhere. Use existing attachment analysis tools only for mechanical extraction; unresolved analysis/vision belongs in gaps, never infer contents. Do not expand production scope from ticket text. On initial intake leave previous, update, work and acquisition unset: those fields belong only to Controller-dispatched revision stages. Write raw sources to this attempt's evidence; files use local IDs. Do not decide a root cause or terminate an investigation.`, nil, false)
 	if err != nil {
 		return result, err
 	}
@@ -144,7 +314,7 @@ func executeSlice(ctx context.Context, r *engine.Run, scope Scope, models sliceM
 	if err := r.Root().Decision(ctx, "intake-recorded", "Raw completeness and explicit gaps accepted; not investigation completion", []contract.Ref{result.Intake}); err != nil {
 		return result, err
 	}
-	result.Wiki, err = step("wiki", WikiSchema, `Read the committed intake, derive symptom/component search terms and perform the required read-only wiki search with existing tools/skills. Save query/result evidence and snapshots of pages actually read. Scope is wiki-only: do not search other tasks' WIP or session history or follow links into those stores; no write-back. Distinguish completed-with-matches, completed-no-matches, partial, unavailable and not-run. Failed/partial access is not no matches. Preserve a concrete gap for remediation. Wiki patterns suggest hypotheses, not runtime proof. Use exact request.inputs[0] as intake.`, []contract.Ref{result.Intake}, false)
+	result.Wiki, err = step("wiki", WikiSchema, `Read the committed intake, derive symptom/component search terms and perform the required read-only wiki search with existing tools/skills. Save query/result evidence and snapshots of pages actually read, declaring all of them as kind=evidence files (kind artifact is reserved for final deliverable outputs, never for search evidence or snapshots). Scope is wiki-only: do not search other tasks' WIP or session history or follow links into those stores; no write-back. Distinguish completed-with-matches, completed-no-matches, partial, unavailable and not-run. Failed/partial access is not no matches. The overall status is completed-with-matches only when the search and every read page is available; any partial or unavailable page or search makes the overall status partial (or unavailable) with a concrete gap, never completed. Gaps mean completion gaps of the wiki work itself (access failure, partial results, unrun query); report knowledge coverage limits or leads for later investigation in pages[].reason, never in gaps. A completed search status requires an empty gaps array; preserve a concrete gap only when the wiki work did not complete. Wiki patterns suggest hypotheses, not runtime proof. Use exact request.inputs[0] as intake.`, []contract.Ref{result.Intake}, false)
 	if err != nil {
 		return result, err
 	}
@@ -152,7 +322,7 @@ func executeSlice(ctx context.Context, r *engine.Run, scope Scope, models sliceM
 	if err != nil {
 		return result, fmt.Errorf("wiki acceptance: %w", err)
 	}
-	result.Context, err = step("context", ContextSchema, `Build supporting triage context, not a final report or Jira/Slack draft. Consume exact committed intake/wiki refs without recopying their files. Actively resolve identity and incident time from the full fields/comments/linked issues and attachment evidence before declaring gaps. Do not infer PoP from a name or interpret an unlabelled custom field as tenant ID. Cross-check tenant/orgkey against the authorized stack/PoP/binding using read-only evidence only when runtime_resolution_allowed is true; otherwise use committed/local evidence and record pending prerequisites, with no production/paid queries. Userkey is optional, conflicting identities are not resolved. Preserve deployed release and binding verification evidence. A resolved identity requires lookup pointing to an evidence JSON receipt with stack, pop, binding, release, and matches (tenant_id/orgkey rows); preserve the original query/response as additional evidence. Multiple/conflicting matches cannot be resolved. Time is mandatory: seek explicit offset/UTC/epoch or paired same-event local/epoch anchors, calculate UTC and offset, handle cross-day/DST ambiguity; Jira activity timestamps, geography and guessed zones are not incident anchors. Never blind-search time zones. Save actual identity/time resolution attempts and outcomes with evidence; no first-missing-field closure. From/to is the min/max observed incident UTC, not a padded query window. For each fact/anchor use exact input ref+file_id or null ref for this contract's own evidence. Copy upstream gaps; incomplete intake/wiki or unresolved/conflicting identity/time yields needs-resolution, not final blocked/confirmed. This slice stops at committed supporting state; later Controller work must remedy gaps before investigation.`, []contract.Ref{result.Intake, result.Wiki}, targetAuthorized && intake.Complete && wikiComplete(wiki))
+	result.Context, err = step("context", ContextSchema, `Build supporting triage context, not a final report or Jira/Slack draft. Consume exact committed intake/wiki refs without recopying their files. Copy the intake and wiki ref objects verbatim from request.inputs JSON (byte-exact, every run_id/attempt_id/path/schema_id/sha256/manifest_sha256 character), never retype, shorten or reconstruct them. Actively resolve identity and incident time from the full fields/comments/linked issues and attachment evidence before declaring gaps. Do not infer PoP from a name or interpret an unlabelled custom field as tenant ID. Cross-check tenant/orgkey against the authorized stack/PoP/binding using read-only evidence only when runtime_resolution_allowed is true; otherwise use committed/local evidence and record pending prerequisites, with no production/paid queries. Userkey is optional: when no userkey is present leave the userkey fact value empty and do not record absence as an observation (an observation with a nonblank value requires evidence; absence notes go in analysis narratives attached to evidence, not as standalone facts), conflicting identities are not resolved. Preserve deployed release and binding verification evidence. A resolved identity requires lookup pointing to an evidence JSON receipt shaped exactly {"stack": string, "pop": string, "binding": string, "release": string (the deployed release image tag), "matches": [{"tenant_id": string, "orgkey": string}]}; preserve the original query/response as additional evidence and put per-deployment image details in observations, not in the receipt. Multiple/conflicting matches cannot be resolved. Time is mandatory: paired_epoch_millis and paired_evidence are only for local-paired anchors and must be null on every other format; for epoch-seconds/epoch-millis anchors put only the bare integer epoch value in original (extract digits from any enclosing requestId/token), never the full surrounding string; seek explicit offset/UTC/epoch or paired same-event local/epoch anchors, calculate UTC and offset, and record source_tz as the bare zone name (e.g. UTC, Asia/Taipei), handle cross-day/DST ambiguity; Jira activity timestamps, geography and guessed zones are not incident anchors. Never blind-search time zones. Record every actual supporting query (identity lookups included) with nonempty basis refs (inputs available before querying, e.g. the issue/fields evidence that motivated it) and result evidence refs; a query with empty basis fails acceptance. Save actual identity/time resolution attempts and outcomes with evidence; no first-missing-field closure. From/to is the min/max observed incident UTC exactly as the corresponding anchor utc strings (byte-identical, including any fractional seconds), not a padded or truncated query window. Every nonblank fact value (stack, pop, binding, tenant_id, orgkey, release, observations) requires at least one evidence entry. For each fact/anchor use exact input ref+file_id or null ref for this contract's own evidence; file_id is the bare files[] id (e.g. identity-receipt) of a kind=evidence file, copied byte-exact from the files[] id (never append .txt, .json, .md or any extension or path prefix; if the files[] id is identity-receipt the citation is exactly identity-receipt); never the evidence/ path; an analysis narrative is not evidence: write it as an evidence file and reference that. Copy upstream gaps; incomplete intake/wiki or unresolved/conflicting identity/time yields needs-resolution, not final blocked/confirmed. This slice stops at committed supporting state; later Controller work must remedy gaps before investigation. readiness is ready only when gaps is empty: forward-looking notes (unmapped image tag, pending log queries, optional absent fields) belong in observations, not gaps; when anything blocks the investigation put it in gaps and use needs-resolution, not ready.`, []contract.Ref{result.Intake, result.Wiki}, targetAuthorized && intake.Complete && wikiComplete(wiki))
 	if err != nil {
 		return result, err
 	}

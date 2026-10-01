@@ -148,7 +148,7 @@ func (p *plannerCaller) verify(ctx context.Context) (retErr error) {
 					AllowedEvidence []Evidence   `json:"allowed_evidence"`
 					Requirements    string       `json:"requirements"`
 				}{filepath.Join(p.r.Dir(), "triage-work"), "verify-" + role.name, role.name, claimRef, claim.Candidate.AllowedEvidence, verifierRequirements + "\n" + triageWorkspaceRequirements}
-				ref, err := taskStepRecovery(ctx, p.r, attemptScope, role.policy.Model, task.Stage, key, task, VerificationSchema, inputs, true)
+				ref, err := taskStepRetry(ctx, p.r, attemptScope, role.policy.Model, task.Stage, key, task, VerificationSchema, inputs, true)
 				if err != nil {
 					return ref, err
 				}

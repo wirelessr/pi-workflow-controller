@@ -147,3 +147,23 @@ type manifest struct {
 	ContractSHA256 string         `json:"contract_sha256"`
 	Files          []manifestFile `json:"files"`
 }
+
+// RefSetEqual reports whether two ref slices contain the exact same refs,
+// ignoring order. Refs are immutable committed identities, so ordering
+// carries no ownership meaning; echo order is presentation, not semantics.
+func RefSetEqual(a, b []Ref) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[Ref]int, len(a))
+	for _, r := range a {
+		seen[r]++
+	}
+	for _, r := range b {
+		seen[r]--
+		if seen[r] < 0 {
+			return false
+		}
+	}
+	return true
+}

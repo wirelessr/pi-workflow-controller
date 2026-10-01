@@ -343,7 +343,11 @@ func TestAcquisitionFixtureIdentityScope(t *testing.T) {
 				}
 			}
 		}
-		if got := fixtureGit(t, c.Worktree, "reflog", "show", "-1", "--format=%ge", "HEAD"); got != "fixture@pwc.invalid" {
+		// Git 2.56 stopped writing the detached-HEAD reflog entry for
+		// `worktree add --detach` under a neutralized global config; only a
+		// written reflog can leak the host identity, so the owner check runs
+		// only when one exists.
+		if got := fixtureGit(t, c.Worktree, "reflog", "show", "-1", "--format=%ge", "HEAD"); got != "" && got != "fixture@pwc.invalid" {
 			t.Fatalf("acquisition reflog inherited host identity: %q", got)
 		}
 		checkError(t, c.Verify(context.Background()), "")

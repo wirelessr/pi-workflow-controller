@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 
@@ -62,7 +63,7 @@ type workerRequest struct {
 	Requirements string         `json:"requirements"`
 }
 
-const workerRequirements = `Load the relevant existing skills and use their normal tools for this complete authorized task. Do not create agents, select models or dispatch other work. Respect source_kind, responsibility, scope and task completion requirements. Evidence-only work acquires/extracts evidence and diagnostics, with an empty analysis array; analysis work may interpret supplied and newly acquired evidence. Evidence truth, applicability, hypotheses and next questions are your reasoning, not Controller verdicts. Do not expand production scope from discovered sources. Read the exact proposal/context/dependencies and true evidence owners in request.inputs. Return proposal, context, task_id and inputs exactly as dispatched. Record work actually performed, evidence, all actual supporting queries, analysis, gaps and next questions. Complete/incomplete means delivery status only, never root cause confirmation. Incomplete requires concrete gaps; execution failure or timeout is not a successful incomplete result. Preserve raw requests, results, receipts and failure/partial diagnostics under this attempt's evidence. Null evidence ref means only this result's own declared file; retained evidence uses its exact input owner ref and file_id, without copying or rebinding old evidence to the current context. A later consumer qualifies your local evidence with your result ref. For logs/metrics, search supplies an evidence-backed initial finite UTC window and source/filter, not per-query approval. Autonomously narrow, shift, split, expand or aggregate within the authorized task and tool limits, retaining actual query conditions, UTC basis, complete/partial/unavailable status, outcomes, raw results and diagnostics even after later success. Do not guess timezones or overwrite observed incident anchors with query windows. Empty small windows, partial data and timeouts do not prove incident-wide absence. Preserve existing target/DB receipts and UTC calculations. Do not write back, publish drafts or produce a final report. Next questions are not dispatch authorization.`
+const workerRequirements = `Load the relevant existing skills and use their normal tools for this complete authorized task. Do not create agents, select models or dispatch other work. Respect source_kind, responsibility, scope and task completion requirements. Evidence-only work acquires/extracts evidence and diagnostics, with an empty analysis array; analysis work may interpret supplied and newly acquired evidence. Evidence truth, applicability, hypotheses and next questions are your reasoning, not Controller verdicts. Do not expand production scope from discovered sources. Read the exact proposal/context/dependencies and true evidence owners in request.inputs; a ref and its file_id must come from the same owner: the file_id must appear in that exact ref's files[] list (pair a context ref with context-owned file ids, a worker ref with worker-owned file ids), never a file id from a different publication under another ref. Return proposal, context, task_id and inputs exactly as dispatched. Record work actually performed, evidence, all actual supporting queries, analysis, gaps and next questions. Every recorded query uses the exact schema fields: source, filter, from, to, basis, status, outcome and evidence (never a result field: the schema has no result key), with a strictly nonzero UTC window and a nonempty basis array (the inputs available before querying that motivated it, e.g. the issue/context evidence, prior queries or the dispatched task basis; a query with empty basis fails acceptance): from strictly before to (from == to is always rejected); for snapshot or point-in-time commands (git, gh, kubectl, file reads) record the actual execution start and a strictly later end, never from == to. Complete/incomplete means delivery status only, never root cause confirmation. Incomplete requires concrete gaps; execution failure or timeout is not a successful incomplete result. Preserve raw requests, results, receipts, failure/partial diagnostics and your own analysis narratives under this attempt's evidence, declaring every file you cite as evidence (including analysis notes) as kind=evidence; kind artifact is reserved exclusively for final deliverable outputs never cited as evidence. An evidence citation of a file declared kind=artifact fails acceptance with unknown file: when in doubt, declare kind=evidence. Null evidence ref means only this result's own declared file; retained evidence uses its exact input owner ref and file_id, and that owner's files[] list must actually declare the named file_id; never invent or assume a file under any other ref (a planner or batch ref that declares no files owns nothing). A later consumer qualifies your local evidence with your result ref. For logs/metrics, search supplies an evidence-backed initial finite UTC window and source/filter, not per-query approval. Autonomously narrow, shift, split, expand or aggregate within the authorized task and tool limits, retaining actual query conditions, UTC basis, complete/partial/unavailable status, outcomes, raw results and diagnostics even after later success. Do not guess timezones or overwrite observed incident anchors with query windows. Empty small windows, partial data and timeouts do not prove incident-wide absence. Preserve existing target/DB receipts and UTC calculations. Do not write back, publish drafts or produce a final report. Next questions are not dispatch authorization.`
 
 // These records exist only within one acceptance pass. The caller retains just
 // accepted Refs, not a second publication registry or cross-Step byte cache.
@@ -242,7 +243,14 @@ func (a *acceptance) workerDispatch(scope Scope, proposal contract.Ref, taskID s
 
 func checkWorkerResult(p publication[WorkerResult], request workerRequest, inputs []contract.Ref, sources map[contract.Ref][]file) error {
 	v := p.Data
-	if v.Proposal != request.Proposal || v.Context != request.Context || v.TaskID != request.Task.ID || !slices.Equal(v.Inputs, inputs) {
+	// Inputs are an ownership set, not an ordering: the agent must return the
+	// exact same refs with no additions or omissions, but their order in the
+	// echoed array carries no semantic meaning and is not verified.
+	sameInputs := len(v.Inputs) == len(inputs) && contract.RefSetEqual(v.Inputs, inputs)
+	if v.Proposal != request.Proposal || v.Context != request.Context || v.TaskID != request.Task.ID || !sameInputs {
+		if os.Getenv("PWC_DEBUG_ACCEPT") != "" {
+			fmt.Fprintf(os.Stderr, "PWC_DEBUG_ACCEPT worker mismatch: proposal=%v context=%v taskID=%q vs %q sameInputs=%v inputs=%d vs %d\\n", v.Proposal != request.Proposal, v.Context != request.Context, v.TaskID, request.Task.ID, sameInputs, len(v.Inputs), len(inputs))
+		}
 		return fmt.Errorf("worker proposal/context/task/inputs mismatch")
 	}
 	if !nonblank(v.Work) || !texts(v.Gaps) || (v.Status != "complete" && v.Status != "incomplete") || (v.Status == "incomplete" && len(v.Gaps) == 0) {
@@ -261,7 +269,7 @@ func checkWorkerResult(p publication[WorkerResult], request workerRequest, input
 			}
 		}
 		if !hasFile(files, e.FileID) {
-			return fmt.Errorf("unknown worker evidence file %s", e.FileID)
+			return fmt.Errorf("%s", fileDiagnostic(files, e.FileID))
 		}
 		return nil
 	}
@@ -349,6 +357,7 @@ type preparedWorker struct {
 	recovery bool
 	request  workerRequest
 	inputs   []contract.Ref
+	sources  map[contract.Ref][]file
 	key      string
 }
 
@@ -359,10 +368,11 @@ func prepareWorker(ctx context.Context, r *engine.Run, scope Scope, contextRef, 
 	if err != nil {
 		return prepared, err
 	}
-	request, inputs, _, err := a.workerDispatch(scope, proposal, taskID, records)
+	request, inputs, sources, err := a.workerDispatch(scope, proposal, taskID, records)
 	if err != nil {
 		return prepared, err
 	}
+	prepared.sources = sources
 	if request.Context != contextRef {
 		return prepared, fmt.Errorf("worker proposal differs from current context")
 	}
@@ -372,7 +382,7 @@ func prepareWorker(ctx context.Context, r *engine.Run, scope Scope, contextRef, 
 	}
 	index := slices.IndexFunc(state.Data.WorkerTasks, func(task WorkerTask) bool { return task.ID == taskID })
 	key := fmt.Sprintf("worker-%s-%d", proposal.AttemptID, index)
-	return preparedWorker{request: request, inputs: inputs, key: key}, nil
+	return preparedWorker{request: request, inputs: inputs, sources: sources, key: key}, nil
 }
 
 func runWorker(ctx context.Context, r *engine.Run, s *engine.Scope, models sliceModels, prepared preparedWorker) (contract.Ref, error) {
@@ -400,7 +410,17 @@ func runWorker(ctx context.Context, r *engine.Run, s *engine.Scope, models slice
 		}
 	}
 	request.Requirements += "\n" + triageWorkspaceRequirements
-	return taskStepRecovery(ctx, r, s, model, request.Stage, key, request, WorkerSchema, inputs, prepared.recovery)
+	return taskStepValidate(ctx, r, s, model, request.Stage, key, request, WorkerSchema, inputs, prepared.recovery, func(ctx context.Context, ref contract.Ref) error {
+		// Full acceptance on every (re)published worker result; a rejected
+		// contract returns to the session as repair feedback, and the repaired
+		// one must pass these same gates again.
+		after := newAcceptance(ctx, r)
+		result, err := readAccepted[WorkerResult](after, ref, WorkerSchema)
+		if err != nil {
+			return err
+		}
+		return checkWorkerResult(result, prepared.request, prepared.inputs, prepared.sources)
+	})
 }
 
 func acceptWorker(ctx context.Context, r *engine.Run, scope Scope, proposal contract.Ref, accepted []contract.Ref, prepared preparedWorker, ref contract.Ref) error {
@@ -409,15 +429,19 @@ func acceptWorker(ctx context.Context, r *engine.Run, scope Scope, proposal cont
 	if err != nil {
 		return err
 	}
-	expected, expectedInputs, sources, err := after.workerDispatch(scope, proposal, prepared.request.Task.ID, records)
-	if err != nil {
+	// The dispatch-time snapshot is authoritative for the expected request,
+	// inputs and sources: parallel siblings in the same batch may have
+	// completed since dispatch, and their sources must not leak into this
+	// worker's expected inputs. The recomputed dispatch still validates that
+	// the task and its dependencies are accepted.
+	if _, _, _, err := after.workerDispatch(scope, proposal, prepared.request.Task.ID, records); err != nil {
 		return err
 	}
 	result, err := readAccepted[WorkerResult](after, ref, WorkerSchema)
 	if err != nil {
 		return err
 	}
-	if err := checkWorkerResult(result, expected, expectedInputs, sources); err != nil {
+	if err := checkWorkerResult(result, prepared.request, prepared.inputs, prepared.sources); err != nil {
 		return fmt.Errorf("worker result acceptance: %w", err)
 	}
 	return r.Root().Decision(ctx, prepared.key+"-recorded", "Worker delivery accepted for Planner interpretation, not a verified conclusion", append(slices.Clone(prepared.inputs), ref))
