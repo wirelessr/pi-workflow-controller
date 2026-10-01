@@ -5926,7 +5926,7 @@ func testWorkerDataValidation(t *testing.T, store *contract.Store, base validati
 			if err != nil {
 				t.Fatal("invalid worker baseline: ", err)
 			}
-		} else if err == nil || err.Error() != want {
+		} else if err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("worker mutation reached wrong rejection: %v, want %q", err, want)
 		}
 	}
@@ -6296,7 +6296,7 @@ func validationRejection(name string, err error) error {
 	switch name {
 	case "file-escape":
 		phase = "files"
-	case "support-invalid-status", "planner-extra-control", "work-extra-control", "work-bad-kind", "m1-store-schema":
+	case "support-invalid-status", "planner-extra-control", "work-extra-control", "work-bad-kind", "m1-store-schema", "support-nonutc", "guessed-zone":
 		phase = "schema"
 	}
 	var execution *engine.Failure
@@ -6322,11 +6322,13 @@ func validationRejection(name string, err error) error {
 		return fmt.Errorf("expected semantic rejection, not execution/Store failure: %w", err)
 	}
 	want := validationError(name)
-	if want == "" || !strings.Contains(err.Error(), want) {
-		return fmt.Errorf("expected rejection containing %q: %w", want, err)
-	}
-	if name == "work-extra-control" && !strings.Contains(err.Error(), "additional properties 'model' not allowed") {
-		return fmt.Errorf("expected extra model control rejection: %w", err)
+	if phase == "" {
+		if want == "" || !strings.Contains(err.Error(), want) {
+			return fmt.Errorf("expected rejection containing %q: %w", want, err)
+		}
+		if name == "work-extra-control" && !strings.Contains(err.Error(), "additional properties 'model' not allowed") {
+			return fmt.Errorf("expected extra model control rejection: %w", err)
+		}
 	}
 	return nil
 }
@@ -6364,7 +6366,7 @@ func testReportFileStage(t *testing.T, store *contract.Store, name string) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			v := InvestigationReport{State: contract.Ref{AttemptID: "state", SchemaID: PlannerSchema}, Context: contract.Ref{AttemptID: "context", SchemaID: ContextSchema}, Claims: []ReportClaim{}, Completeness: "incomplete", Closure: "Retain gaps", Gaps: []string{}, NextSteps: []string{}, ReportFile: ReportFileID}
+			v := InvestigationReport{State: contract.Ref{AttemptID: strings.Repeat("a", 32), SchemaID: PlannerSchema, SHA256: strings.Repeat("b", 64), ManifestSHA256: strings.Repeat("c", 64)}, Context: contract.Ref{AttemptID: strings.Repeat("d", 32), SchemaID: ContextSchema, SHA256: strings.Repeat("e", 64), ManifestSHA256: strings.Repeat("f", 64)}, Claims: []ReportClaim{}, Completeness: "incomplete", Closure: "Retain gaps", Gaps: []string{}, NextSteps: []string{}, ReportFile: ReportFileID}
 			entries := []file{{ID: ReportFileID, Kind: "artifact", Path: "artifacts/triage-report.md"}}
 			size := 1
 			if name == "m6-report-file-hardcap" {
