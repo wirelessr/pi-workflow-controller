@@ -72,7 +72,7 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 
 ## 匿名 intake → context 切片
 
-切片的初始階段使用三個獨立 Step／session，沿用真 engine、Store、committed resolver 與 RPC protocol harness。匿名 HTTP 案例在 provider 邊界實際呼叫 workflow-owned acquisition helper，將其原始檔案直接交給同一 candidate／Store 路徑；其他 Agent 分析、wiki 與 DB receipt 仍為匿名 fixtures。沒有新增通用 orchestrator、工具 adapter 層、共通 instructions 或 launcher。Private `executeSlice`／`resolveSlice`／`refreshSlice`／`updateSlice` 及下述 Planner caller 現由產品 Definition 與匿名測試重用，Pi 啟動沿用共用 runtime 的 shared-discovery preflight。GLM binding、thinking 與初版產品設定見上節；共同 guard 與匿名接線不代表已驗證真環境啟動或模型能力。
+切片的初始階段使用三個獨立 Step／session，沿用真 engine、Store、committed resolver 與 RPC protocol harness。匿名案例在 provider 邊界以靜態 intake fixtures 代替 Agent 的 Jira 取得，交給同一 candidate／Store 路徑；其他 Agent 分析、wiki 與 DB receipt 仍為匿名 fixtures。沒有新增通用 orchestrator、工具 adapter 層、共通 instructions 或 launcher。Private `executeSlice`／`resolveSlice`／`refreshSlice`／`updateSlice` 及下述 Planner caller 現由產品 Definition 與匿名測試重用，Pi 啟動沿用共用 runtime 的 shared-discovery preflight。GLM binding、thinking 與初版產品設定見上節；共同 guard 與匿名接線不代表已驗證真環境啟動或模型能力。
 
 - `triage.intake.v1`：完整 issue/raw fields、field metadata、各 comment 原始頁、linked issue snapshots、附件 content／analysis manifest、來源 URL／取得時間及 gaps。Go 核對 raw key、必要欄位、分頁 offset／total／唯一 comment IDs、linked／attachment inventory 及附件 byte size；historical content 在其真正 owner 版本驗 byte metadata，不以新版 issue 的 size 否定舊 bytes。拒絕省略 inventory、截斷本次下載或偽稱 complete。部分／缺失／unsafe／too-large／未完成分析保留為明確缺口，不等於空結果。
 - `triage.wiki.v1`：綁定 exact intake Ref，保存搜尋詞、wiki-only scope、搜尋證據與已讀頁面；區分完成有結果、完成無結果、partial、unavailable、not-run。未完成不得偽裝 no matches。本次開發只使用匿名 wiki fixtures，不存取實際 vault。
@@ -81,19 +81,7 @@ Jira triage 從 `DefaultRunPolicy()` 起設 `DisableRunTimeout = true`，不增�
 - Ticket-only 授權仍可執行 intake/wiki/local triage，不要求先知道 tenant/PoP 才能保存資料。只有 caller 已明確授權 target 且 intake/wiki 完整時，task 才允許唯讀 runtime resolution；此 task 規則不是 shell sandbox。
 - 每個成功 Step 提交後確認舊 session cleanup，才開下一個 session。輸出為 supporting context，`ready` 只代表本切片前提驗收；`needs-resolution` 保留待補工作，不是 blocked 結案。沒有 `FinalSelection`、報告、draft、publish 或 confirmed root cause。Step failure／取消／hard cap／cleanup failure 原樣返回，不重新標為缺資料。
 
-完整性驗收檢查 contracts／raw snapshots 與算術／版本關係，不能證明模型正確理解原始證據，也不是 live DB 或 wiki 驗證。匿名 acquisition 現在另有實際 HTTP／archive 邊界測試，不再只靠 unsafe／oversized 狀態 fixtures；既有純 contract 案例仍保留作產物拒絕測試。
-
-### 匿名 acquisition 測試支援
-
-既有未 export 的 `acquireIntake` 目前只有測試 callers，用於產生真 localhost HTTP／ZIP evidence，再交給 engine／Store 驗收。保留這些既有實作與 regression，不把它升格為 Agent 必須呼叫的產品工具：沒有獨立 executable、helper 路徑接線或 credential configuration 介面。
-
-以下是該 Go helper 已測的資料處理行為，不代表真 Agent 已透過既有 skill 完成 acquisition，也不是新增 shell 入口的待辦：
-
-- 請求 `/rest/api/3/issue/<key>?fields=*all`、field metadata、獨立 comments endpoint 的所有頁及 linked issue snapshots；從 issue 原始 inventory 取得附件。保留 unabridged JSON／ADF／raw pages；總數變動、錯 offset、重複 IDs、缺頁、HTTP failure／截斷、malformed response 都留下 partial 與 gaps，不當成空結果。
-- Body 從第一筆直接串流寫入 attempt evidence，以 generated IDs exclusive create，不用來源 filename 當落盤路徑。純文字通過格式檢查後由 analysis 引用原 content，不另存相同副本。不先落別處或以摘要替換 raw。`acquisition` Source 指向受限額計算的 metadata evidence，包含 HTTP status、取得時間、logical source ID、origin、comment offset、partial diagnostics，以及 ZIP filename → extracted file ID 對照。
-- Authorization 僅送至設定的 HTTPS exact origin（scheme／host／port）；跨 origin redirect 後不恢復認證，拒絕 userinfo／HTTPS downgrade，保留 redirect body。匿名 localhost HTTP 不送認證；不繼承 process proxy、不停用 TLS 驗證。診斷不記錄 Authorization／cookies／query；原始 API body 自帶的附件 URL 不改寫。
-- 預設亦為硬上限：單檔 8 MiB、單 acquisition 64 MiB／96 files、32 comment pages；可調低，metadata／raw／extraction 共用限額。這是 helper 資料取得上限，不是整體 run deadline 或調查輪數限制。
-- 實際 ZIP extraction 驗 traversal／absolute／backslash／drive path、symlink／special file、重名及展開 byte／count 上限；僅支援文字與非遞迴 ZIP 文字內容。拒絕或未完成時保存 archive／可取得的 partial evidence，不假稱 vision、完整 bundle 分析或 root cause。Cancellation 返回原 cause，filesystem failure 不改標成普通資料缺口。
+完整性驗收檢查 contracts／raw snapshots 與算術／版本關係，不能證明模型正確理解原始證據，也不是 live DB 或 wiki 驗證。Jira 取得與附件處理是 Agent 以既有 skills 完成的工作，Controller 沒有自帶取得器；匿名測試以靜態 intake fixtures 及 localhost provider fixtures 驗 Controller 對 Agent 產物的驗收，不證明真 Agent 已成功取得。
 
 ### Committed context 的局部補缺
 

@@ -197,7 +197,7 @@ func checkIntakePublication(ctx context.Context, ref contract.Ref, p publication
 			seen[f.ID] = true
 		}
 	}
-	var issue acquisitionIssue
+	var issue jiraIssue
 	if v.Issue.Status == "available" {
 		if err := decodeSource(v.Issue, &issue); err != nil {
 			return v, err
@@ -277,8 +277,8 @@ func checkIntakePublication(ctx context.Context, ref contract.Ref, p publication
 			return v, err
 		}
 	}
-	var links []acquisitionLink
-	var attachments []acquisitionAttachment
+	var links []jiraLink
+	var attachments []jiraAttachment
 	if inventory.Fields != nil {
 		if err := json.Unmarshal(inventory.Fields["issuelinks"], &links); err != nil {
 			return v, err
@@ -306,7 +306,7 @@ func checkIntakePublication(ctx context.Context, ref contract.Ref, p publication
 			return v, err
 		}
 		if l.Source.Status == "available" {
-			var raw acquisitionIssue
+			var raw jiraIssue
 			if err := decodeSource(l.Source, &raw); err != nil {
 				return v, err
 			}

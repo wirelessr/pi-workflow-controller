@@ -59,7 +59,7 @@ func decodeWorkflowInput(prompt string) (workflowInput, error) {
 	if err := decodeInputObject(scope, map[string]any{"ticket": &v.Scope.Ticket, "stack": &v.Scope.Stack, "pop": &v.Scope.Pop, "binding": &v.Scope.Binding, "tenant_ids": &v.Scope.TenantIDs}); err != nil {
 		return v, fmt.Errorf("triage scope: %w", err)
 	}
-	if !nonblank(v.Request) || !acquisitionKey.MatchString(v.Scope.Ticket) || !texts(v.Scope.TenantIDs) {
+	if !nonblank(v.Request) || !jiraKey.MatchString(v.Scope.Ticket) || !texts(v.Scope.TenantIDs) {
 		return v, fmt.Errorf("triage requires a nonblank request, explicit ticket and valid authorized target scope")
 	}
 	return v, nil

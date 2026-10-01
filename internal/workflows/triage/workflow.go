@@ -291,7 +291,7 @@ func closeTaskStep(ctx context.Context, r *engine.Run, h *engine.SessionHandle, 
 
 func executeSlice(ctx context.Context, r *engine.Run, scope Scope, models sliceModels) (ContextResult, error) {
 	var result ContextResult
-	if !acquisitionKey.MatchString(scope.Ticket) || !texts(scope.TenantIDs) {
+	if !jiraKey.MatchString(scope.Ticket) || !texts(scope.TenantIDs) {
 		return result, fmt.Errorf("explicit ticket and valid authorized target scope required")
 	}
 	targetAuthorized := nonblank(scope.Stack) && nonblank(scope.Pop) && nonblank(scope.Binding) && len(scope.TenantIDs) > 0

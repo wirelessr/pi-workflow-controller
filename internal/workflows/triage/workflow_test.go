@@ -1,7 +1,6 @@
 package triage
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -896,6 +895,114 @@ func updateHTTPFixture(t *testing.T, name string, observe func(*http.Request)) *
 	return server
 }
 
+func acquireFixture(t *testing.T, mode string, bundle []byte, mime string, observe ...func(*http.Request)) *httptest.Server {
+	t.Helper()
+	_, raw := intakeFixture("complete")
+	raw["bundle"] = bundle
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, record := range observe {
+			record(r)
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Error("HTTP fixture received Authorization")
+		}
+		var body []byte
+		switch r.URL.Path {
+		case "/rest/api/3/issue/CASE-17":
+			if r.URL.Query().Get("fields") != "*all" {
+				t.Error("not all fields")
+			}
+			var issue map[string]any
+			if err := json.Unmarshal(raw["issue"], &issue); err != nil {
+				t.Error(err)
+				return
+			}
+			issue["fields"].(map[string]any)["attachment"] = []any{map[string]any{"id": "a1", "size": len(bundle), "filename": "../../untrusted", "content": server.URL + "/attachment?signature=private", "mimeType": mime}}
+			body = testJSON(issue)
+			if mode == "malformed-issue" {
+				body = []byte(`{"key":`)
+			}
+			if mode == "issue-failure" {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				body = []byte("issue source unavailable")
+			}
+		case "/rest/api/3/field":
+			body = raw["fields"]
+			if mode == "malformed-fields" {
+				body = []byte(`{}`)
+			}
+		case "/rest/api/3/issue/CASE-18":
+			body = raw["linked"]
+			if mode == "linked-failure" {
+				w.WriteHeader(403)
+			}
+		case "/rest/api/3/issue/CASE-17/comment":
+			start := r.URL.Query().Get("startAt")
+			body = raw["page-"+start]
+			if mode == "page-short" && start == "0" {
+				body = []byte(`{"startAt":0,"total":2,"maxResults":100,"comments":[{"id":"c1","body":"first"}]}`)
+			}
+			if start == "1" {
+				switch mode {
+				case "page-failure":
+					w.WriteHeader(503)
+				case "page-malformed":
+					body = []byte(`{"startAt":`)
+				case "page-empty":
+					body = []byte(`{"startAt":1,"total":2,"comments":[]}`)
+				case "page-offset":
+					body = []byte(`{"startAt":0,"total":2,"comments":[{"id":"c2","body":"second"}]}`)
+				case "page-duplicate":
+					body = []byte(`{"startAt":1,"total":2,"comments":[{"id":"c1","body":"duplicate"}]}`)
+				case "page-total":
+					body = []byte(`{"startAt":1,"total":3,"comments":[{"id":"c2","body":"second"}]}`)
+				case "page-short":
+					body = []byte(`{"startAt":1,"total":2,"maxResults":100,"comments":[]}`)
+				case "page-null":
+					body = []byte(`{"startAt":1,"total":2,"comments":[{"id":"c2","body":null}]}`)
+				case "page-partial":
+					w.Header().Set("Content-Length", "9999")
+				}
+			}
+		case "/attachment":
+			body = bundle
+			if mode == "attachment-partial" {
+				body = body[:len(body)-1]
+			}
+		default:
+			w.WriteHeader(404)
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// Initial intake as a Jira-fetching Agent would leave it: saved raw responses,
+// an acquisition metadata file and the attachment text as its own analysis.
+// Variants mirror the partial outcomes the revision servers also produce.
+func acquiredIntakeFixture(variant string) (Intake, map[string][]byte) {
+	v, files := intakeFixture("complete")
+	delete(files, "extracted")
+	v.Acquisition = &Source{Status: "available", FileID: "acquisition-metadata"}
+	v.Attachments[0].Analysis = available("bundle")
+	partial := false
+	switch variant {
+	case "page-failure":
+		v.Comments[1].Source = Source{Status: "partial", FileID: "page-1", Reason: "HTTP status 503"}
+		v.Complete, v.Gaps, partial = false, []string{"comment page 1: HTTP status 503"}, true
+	case "attachment-partial":
+		files["bundle"] = files["bundle"][:len(files["bundle"])-1]
+		v.Attachments[0].Content = Source{Status: "partial", FileID: "bundle", Reason: "attachment size mismatch"}
+		v.Attachments[0].Analysis = Source{Status: "missing", Reason: "attachment content incomplete"}
+		v.Complete, v.Gaps, partial = false, []string{"attachment 0 content: attachment size mismatch", "attachment 0 analysis: attachment content incomplete"}, true
+	}
+	files["acquisition-metadata"] = testJSON(map[string]any{"partial": partial, "records": []any{}})
+	return v, files
+}
+
 // This is an external provider fixture, not a replacement Step/validator or a
 // product acquisition entry. Only anonymous localhost sources are read.
 func refreshIntakeFixture(t *testing.T, ctx context.Context, name string, count int, inputs []contract.Ref, task stageTask, base string) (Intake, map[string][]byte, int32) {
@@ -971,12 +1078,12 @@ func refreshIntakeFixture(t *testing.T, ctx context.Context, name string, count 
 			}
 		}
 		if v.Issue.Status == "available" {
-			var issue acquisitionIssue
+			var issue jiraIssue
 			if err := json.Unmarshal(files["new-issue"], &issue); err != nil {
 				t.Fatal(err)
 			}
-			var links []acquisitionLink
-			var attachments []acquisitionAttachment
+			var links []jiraLink
+			var attachments []jiraAttachment
 			_ = json.Unmarshal(issue.Fields["issuelinks"], &links)
 			_ = json.Unmarshal(issue.Fields["attachment"], &attachments)
 			oldLinks, oldAttachments := v.Linked, v.Attachments
@@ -5631,8 +5738,7 @@ var triageCases = []triageCase{
 	{"refresh-provider-failure", 4, true, false}, {"refresh-cancel", 4, true, false}, {"refresh-timeout", 4, true, false}, {"refresh-cleanup-failure", 4, true, false}, {"refresh-attempt-cap", 3, true, false}, {"refresh-uncommitted-input", 3, true, false},
 	{"missing-attachment-size", 1, true, false},
 	{"blank-stack", 3, true, false}, {"blank-pop", 3, true, false}, {"blank-binding", 3, true, false}, {"blank-target", 3, true, false}, {"whitespace-target", 3, true, false},
-	{"duplicate-attachment", 1, true, false}, {"conflicting-attachment", 1, true, false}, {"duplicate-empty-attachment", 1, true, false}, {"null-comment", 1, true, false}, {"http-page-null", 3, false, false},
-	{"http-complete", 3, false, true}, {"http-page-failure", 3, false, false}, {"http-page-total", 3, false, false}, {"http-page-empty", 3, false, false}, {"http-page-offset", 3, false, false}, {"http-page-duplicate", 3, false, false}, {"http-page-short", 3, false, false}, {"http-page-partial", 3, false, false}, {"http-malformed-issue", 3, false, false}, {"http-malformed-fields", 3, false, false}, {"http-linked-failure", 3, false, false}, {"http-attachment-partial", 3, false, false}, {"http-unsafe-zip", 3, false, false}, {"http-oversized", 3, false, false}, {"http-metadata-limit", 3, false, false},
+	{"duplicate-attachment", 1, true, false}, {"conflicting-attachment", 1, true, false}, {"duplicate-empty-attachment", 1, true, false}, {"null-comment", 1, true, false},
 	{"resolve-ready", 3, false, true}, {"resolve-acquisition-gap", 5, false, false},
 	{"resolve-wiki", 5, false, true}, {"resolve-wiki-unavailable", 5, false, true}, {"resolve-wiki-not-run", 5, false, true}, {"resolve-wiki-partial-again", 5, false, false}, {"resolve-repeat", 7, false, true}, {"resolve-time", 4, false, true}, {"resolve-identity", 4, false, true}, {"resolve-ticket-only", 4, false, false},
 	{"resolve-drop-gap", 5, true, false}, {"resolve-foreign-evidence", 5, true, false}, {"resolve-replace-valid-time", 5, true, false}, {"resolve-wrong-previous", 5, true, false}, {"resolve-old-evidence", 5, true, false}, {"resolve-dropped-history", 5, true, false},
@@ -6906,7 +7012,7 @@ func TestIntakeToContext(t *testing.T) {
 			planning := strings.HasPrefix(tc.name, "planner-") || working || m1
 			updating := strings.HasPrefix(tc.name, "update-") || tc.name == "planner-history" || (working && workKind == "update") || tc.name == "work-wrong-task" || tc.name == "work-resolve-changed-intake"
 			revising := refreshing || updating
-			acquiring := (resolving && !supporting) || revising || strings.HasPrefix(tc.name, "http-") || strings.HasPrefix(tc.name, "m4-support-")
+			acquiring := (resolving && !supporting) || revising || strings.HasPrefix(tc.name, "m4-support-")
 			mode := tc.name
 			if m2 {
 				mode = "complete"
@@ -6987,46 +7093,24 @@ func TestIntakeToContext(t *testing.T) {
 			if supporting || tc.name == "planner-support" {
 				supportingURL = supportingHTTPFixture(t, tc.name, &supportingRequests).URL
 			}
-			var requests, newRequests atomic.Int32
+			var newRequests atomic.Int32
 			var revisionURL string
 			if strings.HasPrefix(tc.name, "m4-support-update-") {
 				revisionURL = updateHTTPFixture(t, "update-replace", func(*http.Request) { newRequests.Add(1) }).URL
 			}
-			var acquisition acquisitionOptions
+			acquiredVariant := "complete"
 			if acquiring {
 				_, raw := intakeFixture("complete")
 				bundle, mime := raw["bundle"], "text/plain"
-				if tc.name == "http-unsafe-zip" {
-					var archive bytes.Buffer
-					writer := zip.NewWriter(&archive)
-					entry, err := writer.Create("../escape")
-					if err != nil {
-						t.Fatal(err)
-					}
-					if _, err := entry.Write([]byte("unsafe")); err != nil {
-						t.Fatal(err)
-					}
-					if err := writer.Close(); err != nil {
-						t.Fatal(err)
-					}
-					bundle = archive.Bytes()
-					mime = "application/zip"
-				}
-				if tc.name == "http-oversized" {
-					bundle = []byte(strings.Repeat("x", 8193))
-				}
-				httpMode := strings.TrimPrefix(tc.name, "http-")
 				if tc.name == "resolve-acquisition-gap" || refreshing || tc.name == "update-then-refresh" || tc.name == "update-page" || tc.name == "update-wrong-task" {
-					httpMode = "page-failure"
+					acquiredVariant = "page-failure"
 				}
 				if tc.name == "refresh-attachment" || tc.name == "update-retain-gap" || tc.name == "update-drop-gap" || tc.name == "update-resolve-gap" {
-					httpMode = "attachment-partial"
+					acquiredVariant = "attachment-partial"
 				}
 				if working && (tc.name == "work-update-incomplete" || (workKind == "refresh" && tc.name != "work-refresh-ready")) {
-					httpMode = "page-failure"
+					acquiredVariant = "page-failure"
 				}
-				server := acquireFixture(t, httpMode, bundle, mime, func(*http.Request) { requests.Add(1) })
-				acquisition = acquisitionOptions{BaseURL: server.URL}
 				if refreshing {
 					revisionMode := "complete"
 					if strings.HasPrefix(tc.name, "refresh-issue-") {
@@ -7061,12 +7145,6 @@ func TestIntakeToContext(t *testing.T) {
 						name = workFixture
 					}
 					revisionURL = updateHTTPFixture(t, name, func(*http.Request) { newRequests.Add(1) }).URL
-				}
-				if tc.name == "http-oversized" {
-					acquisition.MaxBytes = 8192
-				}
-				if tc.name == "http-metadata-limit" {
-					acquisition.MaxBytes = 2048
 				}
 			}
 			service := protocol.SourceWorkspace(t)
@@ -7670,10 +7748,7 @@ func TestIntakeToContext(t *testing.T) {
 			var syncCalls atomic.Int64
 			switch productName {
 			case "m5-claim-parent", "m5-claim-ledger", "m5-agent-inference", "m6-history-wrong-owner",
-				"attempt-cap", "attempt-timeout", "cancel", "complete", "http-attachment-partial", "http-complete",
-				"http-linked-failure", "http-malformed-fields", "http-malformed-issue", "http-metadata-limit", "http-oversized",
-				"http-page-duplicate", "http-page-empty", "http-page-failure", "http-page-null", "http-page-offset",
-				"http-page-partial", "http-page-short", "http-page-total", "initial-update", "m1-analysis", "m1-complete",
+				"attempt-cap", "attempt-timeout", "cancel", "complete", "initial-update", "m1-analysis", "m1-complete",
 				"m1-dependencies", "m1-dependencies-incomplete", "m1-file",
 				"m1-handoff-after", "m1-handoff-before", "m1-incomplete", "m1-logs",
 				"m1-pending", "m1-planner-drop", "m1-planner-invent", "m1-planner-invent-committed",
@@ -7807,8 +7882,7 @@ func TestIntakeToContext(t *testing.T) {
 			var wiki WikiSearch
 			var expectedContext Context
 			var initialIntake contract.Ref
-			var acquiredFiles []file
-			var acquiredRequests int32
+			var acquiredFiles map[string][]byte
 			var refreshRequests int32
 			var revisionIntake contract.Ref
 			observedSupportingRefs := map[contract.Ref]bool{}
@@ -8194,11 +8268,6 @@ func TestIntakeToContext(t *testing.T) {
 						session := snapshot.Sessions[snapshot.Attempts[req.Identity.AttemptID].HandleID]
 						if session.Role.Name != "triage-"+task.Stage || session.Role.Model != model {
 							t.Fatalf("M4 %s invocation %d model/role=%+v, want %+v", task.Stage, m4Phases[task.Stage], session.Role, model)
-						}
-						if strings.HasPrefix(tc.name, "m4-support-") && task.Stage != "intake" {
-							if requests.Load() == 0 || requests.Load() != acquiredRequests {
-								t.Fatal("support continuation reacquired Jira or skipped initial HTTP acquisition")
-							}
 						}
 					}
 					if req.Output.SchemaID == ContextSchema && !strings.Contains(task.Requirements, supportingResolutionRequirements) {
@@ -8683,11 +8752,8 @@ func TestIntakeToContext(t *testing.T) {
 								t.Fatal("intake inputs")
 							}
 							if acquiring {
-								intake, acquiredFiles, err = acquireIntake(ctx, filepath.Dir(e.Message.CandidatePath), scope, acquisition)
-								if err != nil {
-									t.Fatal(err)
-								}
-								acquiredRequests = requests.Load()
+								intake, files = acquiredIntakeFixture(acquiredVariant)
+								acquiredFiles = files
 							} else {
 								intake, files = intakeFixture(mode)
 							}
@@ -8708,10 +8774,10 @@ func TestIntakeToContext(t *testing.T) {
 							}
 							expectedContext, files = contextFixture(mode, scope, req.Inputs, intake, wiki)
 							if acquiring {
-								if !hasFile(acquiredFiles, "page-1") {
+								if _, ok := acquiredFiles["page-1"]; !ok {
 									expectedContext.Observations[0].Evidence[0].FileID = "issue"
 								}
-								if !hasFile(acquiredFiles, "bundle") || len(intake.Attachments) == 0 || intake.Attachments[0].Content.Status != "available" || intake.Attachments[0].Analysis.Status != "available" {
+								if _, ok := acquiredFiles["bundle"]; !ok || len(intake.Attachments) == 0 || intake.Attachments[0].Content.Status != "available" || intake.Attachments[0].Analysis.Status != "available" {
 									expectedContext.Time = TimeResolution{Status: "unresolved", Anchors: []TimeAnchor{}}
 									expectedContext.Attempts[1].Evidence[0].FileID = "issue"
 									expectedContext.Attempts[1].Outcome = "attachment unavailable or incomplete; trustworthy incident anchor pending"
@@ -8837,7 +8903,7 @@ func TestIntakeToContext(t *testing.T) {
 								default:
 									t.Fatal("unexpected revision stage")
 								}
-								if requests.Load() != acquiredRequests || newRequests.Load() != refreshRequests {
+								if newRequests.Load() != refreshRequests {
 									t.Fatal("revision repeated original acquisition or missed designated work")
 								}
 								break
@@ -8846,7 +8912,7 @@ func TestIntakeToContext(t *testing.T) {
 							if revising {
 								expectedIntake = revisionIntake
 							}
-							if (!resolving && !revising) || req.Inputs[0] != expectedIntake || task.Previous == nil || requests.Load() != acquiredRequests {
+							if (!resolving && !revising) || req.Inputs[0] != expectedIntake || task.Previous == nil {
 								t.Fatal("resolution reacquired intake or lost committed input")
 							}
 							switch task.Stage {
@@ -8930,21 +8996,13 @@ func TestIntakeToContext(t *testing.T) {
 						v.Scope.TenantIDs = append(slices.Clone(v.Scope.TenantIDs), "999")
 						data = v
 					}
-					if acquiring && count == 1 {
-						writeEnvelope(t, e.Message, req, data, acquiredFiles)
-					} else {
-						writeCandidate(t, e.Message, req, data, files, tc.name == "file-escape")
-					}
+					writeCandidate(t, e.Message, req, data, files, tc.name == "file-escape")
 					if repairCache != nil {
 						entries := []file{}
 						cached := map[string][]byte{}
 						for id, b := range files {
 							entries = append(entries, file{ID: id, Kind: "evidence", Path: filepath.Join("evidence", id)})
 							cached[id] = b
-						}
-						if acquiring && count == 1 {
-							entries = nil
-							cached = nil
 						}
 						writeKey := task.Stage
 						var writeProbe struct {
@@ -9641,8 +9699,8 @@ func TestIntakeToContext(t *testing.T) {
 						t.Fatal("support update resume repeated Jira acquisition")
 					}
 				}
-				if m4Phases["intake"] != 1 || m4Phases[wikiPhase] != wantWiki || m4Phases[contextPhase] != wantContext || requests.Load() == 0 || requests.Load() != acquiredRequests {
-					t.Fatalf("support repeated acquisition/completed phases: phases=%v HTTP=%d initial=%d", m4Phases, requests.Load(), acquiredRequests)
+				if m4Phases["intake"] != 1 || m4Phases[wikiPhase] != wantWiki || m4Phases[contextPhase] != wantContext {
+					t.Fatalf("support repeated acquisition/completed phases: phases=%v", m4Phases)
 				}
 			}
 			if m4 && !tc.failure && !m6 {
@@ -10552,9 +10610,6 @@ func TestIntakeToContext(t *testing.T) {
 				}
 			}
 			if (resolving || revising) && !strings.HasSuffix(tc.name, "-uncommitted-input") {
-				if requests.Load() != acquiredRequests || (!supporting && acquiredRequests == 0) {
-					t.Fatal("resolution repeated HTTP acquisition")
-				}
 				if tc.failure && !reflect.DeepEqual(result, beforeResolution) {
 					t.Fatal("failed resolution replaced the last accepted state")
 				}
