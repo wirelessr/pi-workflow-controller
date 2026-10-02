@@ -82,7 +82,9 @@ type harnessResult struct {
 
 // runHarness executes a workflow over the real engine, runtime and RPC
 // protocol. agent writes each candidate; the fake Pi then settles.
-func runHarness(t *testing.T, prompt string, execute engine.Workflow, agent func(*testing.T, agentCall)) harnessResult {
+// agent returns the fake Pi's answer to the prompt: "" settles, "hold"
+// leaves the prompt running until the attempt times out.
+func runHarness(t *testing.T, prompt string, execute engine.Workflow, agent func(*testing.T, agentCall) string) harnessResult {
 	t.Helper()
 	dir := t.TempDir()
 	bridge := filepath.Join(dir, "bridge")
@@ -160,8 +162,11 @@ func runHarness(t *testing.T, prompt string, execute engine.Workflow, agent func
 			mu.Lock()
 			roles = append(roles, tk.Role)
 			mu.Unlock()
-			agent(t, agentCall{Role: tk.Role, Request: req, Task: tk, Candidate: e.Message.CandidatePath})
-			if err := e.Reply(protocol.Control{Type: "settle"}); err != nil {
+			ack := agent(t, agentCall{Role: tk.Role, Request: req, Task: tk, Candidate: e.Message.CandidatePath})
+			if ack == "" {
+				ack = "settle"
+			}
+			if err := e.Reply(protocol.Control{Type: ack}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -210,41 +215,25 @@ func factsFor(call agentCall) Facts {
 		Gaps:           []Gap{}}
 }
 
-func checkFor(call agentCall, verdict func(id string) string) FactCheck {
-	var subject Facts
-	raw, err := os.ReadFile(call.Task.Subject.Path)
+func checkFor(t *testing.T, call agentCall, verdict func(id string) string) FactCheck {
+	t.Helper()
+	ref := call.citable("facts under review")
+	raw, err := os.ReadFile(ref.Path)
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	var env struct {
 		Data Facts `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
-	subject = env.Data
 	intake := call.citable("intake")
-	out := FactCheck{Subject: *call.Task.Subject, Items: []FactVerdict{}, Gaps: []Gap{}}
-	for _, id := range append(factIDs(subject), anchorIDs(subject)...) {
+	out := FactCheck{Subject: ref, Items: []FactVerdict{}, Warnings: []Warning{}, Gaps: []Gap{}}
+	for _, id := range judgedIDs(env.Data) {
 		out.Items = append(out.Items, FactVerdict{ID: id, Verdict: verdict(id), Reason: "checked against the cited comment", Basis: []Evidence{cite(intake, "page-0")}})
 	}
 	return out
-}
-
-func factIDs(f Facts) []string {
-	var ids []string
-	for _, x := range f.Facts {
-		ids = append(ids, x.ID)
-	}
-	return ids
-}
-
-func anchorIDs(f Facts) []string {
-	var ids []string
-	for _, a := range f.TimeAnchors {
-		ids = append(ids, a.ID)
-	}
-	return ids
 }
 
 func s0Workflow(t *testing.T, source string, out *S0, retries int) engine.Workflow {
@@ -278,66 +267,96 @@ func decodeRef[T any](t *testing.T, r *engine.Run, ref contract.Ref) T {
 }
 
 func TestS0(t *testing.T) {
+	inferredPop := func(id string) string {
+		if id == "pop" {
+			return "unsupported"
+		}
+		return "supported"
+	}
+	allSupported := func(string) string { return "supported" }
 	for _, tc := range []struct {
-		name     string
-		retries  int
-		agent    func(t *testing.T, call agentCall, round int)
-		roles    string
-		accepted string
-		degraded string
-		failure  string
+		name    string
+		retries int
+		verdict func(id string) string
+		agent   func(t *testing.T, call agentCall, round int) bool
+		roles   string
+		gaps    string
+		failure string
 	}{
-		{name: "all facts accepted", retries: 1, roles: "intake facts fact-check", accepted: "tenant orgkey pop event"},
-		{name: "a rejected fact is corrected on retry", retries: 1, roles: "intake facts fact-check facts fact-check", accepted: "tenant orgkey event",
-			agent: func(t *testing.T, call agentCall, round int) {
-				if call.Role == "facts" && round == 2 {
-					f := factsFor(call)
-					f.Facts = f.Facts[:2]
-					call.reply(t, f, nil)
+		{name: "all facts accepted", retries: 1, verdict: allSupported, roles: "intake facts fact-check"},
+		{name: "a rejected fact is corrected on retry", retries: 1, verdict: inferredPop, roles: "intake facts fact-check facts fact-check",
+			agent: func(t *testing.T, call agentCall, round int) bool {
+				if call.Role != "facts" || round != 2 {
+					return false
 				}
+				fb := call.Request.Feedback
+				if fb == nil || !strings.Contains(fb.Message, "pop (unsupported)") || len(fb.Refs) != 2 || fb.Refs[0].SchemaID != FactsSchema || fb.Refs[1].SchemaID != FactCheckSchema {
+					t.Errorf("retry feedback = %+v, want the rejected item and the facts and check Refs", fb)
+				}
+				f := factsFor(call)
+				f.Facts = f.Facts[:2]
+				call.reply(t, f, nil)
+				return true
 			}},
-		{name: "a fact still rejected after the retries is absent with a gap", retries: 1, roles: "intake facts fact-check facts fact-check", accepted: "tenant orgkey event", degraded: "pop:inferred"},
-		{name: "missing identity and time are gaps, not failures", retries: 0, roles: "intake facts fact-check", accepted: "",
-			agent: func(t *testing.T, call agentCall, round int) {
-				if call.Role == "facts" {
-					f := factsFor(call)
-					f.Facts, f.TimeAnchors = []Fact{}, []TimeAnchor{}
-					f.Gaps = []Gap{{ID: "no-pop", Text: "No PoP candidate in any text source"}, {ID: "no-time", Text: "No incident timestamp with a zone"}}
-					call.reply(t, f, nil)
+		{name: "a fact still rejected after the retries is absent with a gap", retries: 1, verdict: inferredPop, roles: "intake facts fact-check facts fact-check", gaps: "not-accepted-1:Item pop was judged unsupported "},
+		{name: "missing identity and time are gaps, not failures", retries: 0, verdict: allSupported, roles: "intake facts fact-check",
+			agent: func(t *testing.T, call agentCall, round int) bool {
+				if call.Role != "facts" {
+					return false
 				}
+				f := factsFor(call)
+				f.Facts, f.TimeAnchors = []Fact{}, []TimeAnchor{}
+				f.Gaps = []Gap{{ID: "no-pop", Text: "No PoP candidate in any text source"}, {ID: "no-time", Text: "No incident timestamp with a zone"}}
+				call.reply(t, f, nil)
+				return true
 			}},
-		{name: "a bad citation is repaired in the same session", retries: 0, roles: "intake facts facts fact-check", accepted: "tenant orgkey pop event",
-			agent: func(t *testing.T, call agentCall, round int) {
-				if call.Role == "facts" && round == 1 && call.Request.Feedback == nil {
-					f := factsFor(call)
-					f.Facts[0].Evidence = []Evidence{{FileID: "page-0"}}
-					call.reply(t, f, nil)
+		{name: "a bad citation is repaired in the same session", retries: 0, verdict: allSupported, roles: "intake facts facts fact-check",
+			agent: func(t *testing.T, call agentCall, round int) bool {
+				if call.Role != "facts" || call.Request.Feedback != nil {
+					return false
 				}
+				f := factsFor(call)
+				f.Facts[0].Evidence = []Evidence{{FileID: "page-0"}}
+				call.reply(t, f, nil)
+				return true
 			}},
 		{name: "an intake whose completeness the raw sources contradict fails after repair", retries: 0, roles: "intake intake", failure: "complete/gaps",
-			agent: func(t *testing.T, call agentCall, round int) {
-				if call.Role == "intake" {
-					v, files := intakeFiles()
-					delete(files, "page-1")
-					v.Comments = v.Comments[:1]
-					call.reply(t, v, files)
+			agent: func(t *testing.T, call agentCall, round int) bool {
+				if call.Role != "intake" {
+					return false
 				}
+				v, files := intakeFiles()
+				delete(files, "page-1")
+				v.Comments = v.Comments[:1]
+				call.reply(t, v, files)
+				return true
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			skills := newSkillFixture(t)
 			var out S0
 			rounds := map[string]int{}
-			res := runHarness(t, "CASE-17 pop=pop-a please check", s0Workflow(t, skills.source, &out, tc.retries), func(t *testing.T, call agentCall) {
-				if call.Request.Feedback == nil || !strings.HasPrefix(call.Request.Feedback.Message, "Previous contract") {
+			sessions := map[string][]string{}
+			res := runHarness(t, "CASE-17 pop=pop-a please check", s0Workflow(t, skills.source, &out, tc.retries), func(t *testing.T, call agentCall) string {
+				repair := call.Request.Feedback != nil && strings.HasPrefix(call.Request.Feedback.Message, "Previous contract")
+				if !repair {
 					rounds[call.Role]++
 				}
-				before, _ := os.Stat(call.Candidate)
-				if tc.agent != nil {
-					tc.agent(t, call, rounds[call.Role])
+				if !strings.HasPrefix(call.Task.Requirements, baselineRequirements) {
+					t.Errorf("%s request does not start with the environment overrides", call.Role)
 				}
-				if after, _ := os.Stat(call.Candidate); before != nil || after != nil {
-					return
+				sessions[call.Role] = append(sessions[call.Role], call.Request.Identity.InvocationID)
+				if call.Role == "fact-check" {
+					var labels []string
+					for _, in := range call.Task.Citable {
+						labels = append(labels, in.Label)
+					}
+					if strings.Join(labels, ",") != "intake,caller prompt,facts under review" || len(call.Request.Inputs) != 3 || call.Request.Feedback != nil {
+						t.Errorf("validator sees %v, %d inputs, feedback %v; want only the evidence and the facts", labels, len(call.Request.Inputs), call.Request.Feedback)
+					}
+				}
+				if tc.agent != nil && tc.agent(t, call, rounds[call.Role]) {
+					return ""
 				}
 				switch call.Role {
 				case "intake":
@@ -346,13 +365,9 @@ func TestS0(t *testing.T) {
 				case "facts":
 					call.reply(t, factsFor(call), nil)
 				case "fact-check":
-					call.reply(t, checkFor(call, func(id string) string {
-						if id == "pop" && tc.name != "all facts accepted" && tc.name != "a bad citation is repaired in the same session" {
-							return "inferred"
-						}
-						return "supported"
-					}), nil)
+					call.reply(t, checkFor(t, call, tc.verdict), nil)
 				}
+				return ""
 			})
 			if got := strings.Join(res.Roles, " "); got != tc.roles {
 				t.Fatalf("dispatched roles = %q, want %q", got, tc.roles)
@@ -367,15 +382,30 @@ func TestS0(t *testing.T) {
 				t.Fatalf("outcome = %s: %v", res.Report.Outcome, res.Report.Failure)
 			}
 			status := decodeRef[FactStatus](t, res.Run, out.Status)
-			var degraded []string
-			for _, d := range status.Degraded {
-				degraded = append(degraded, d.ID+":"+d.Verdict)
+			var gaps []string
+			for _, g := range status.Gaps {
+				gaps = append(gaps, g.ID+":"+g.Text[:min(len(g.Text), 32)])
 			}
-			if strings.Join(status.Accepted, " ") != tc.accepted || strings.Join(degraded, " ") != tc.degraded || len(status.Gaps) != len(status.Degraded) {
-				t.Fatalf("status accepted %v degraded %v gaps %+v", status.Accepted, degraded, status.Gaps)
+			if strings.Join(gaps, " ") != tc.gaps {
+				t.Fatalf("status gaps = %v, want %q", gaps, tc.gaps)
 			}
 			if status.Facts != out.Facts || status.Check != out.Check || !res.Run.ControllerAttached(out.Status) || !res.Run.ControllerAttached(out.Prompt) {
 				t.Fatalf("status record does not bind the final facts and check: %+v", status)
+			}
+			if tc.name == "a bad citation is repaired in the same session" {
+				if ids := sessions["facts"]; len(ids) != 2 {
+					t.Fatalf("facts dispatches = %v", ids)
+				}
+				snapshot := res.Report.Snapshot
+				var factsSessions []string
+				for _, a := range snapshot.Attempts {
+					if a.Key == "facts" || strings.HasSuffix(a.Scope, "contract-repair-facts") {
+						factsSessions = append(factsSessions, a.HandleID)
+					}
+				}
+				if len(factsSessions) != 2 || factsSessions[0] != factsSessions[1] {
+					t.Fatalf("repair did not reuse the session: %v", factsSessions)
+				}
 			}
 			prompt := decodeRef[CallerPrompt](t, res.Run, out.Prompt)
 			if prompt.Ticket != "CASE-17" || prompt.Hints != "pop=pop-a please check" {
@@ -388,8 +418,9 @@ func TestS0(t *testing.T) {
 func TestS0RejectsAPromptWithoutTicket(t *testing.T) {
 	skills := newSkillFixture(t)
 	var out S0
-	res := runHarness(t, "please check the incident", s0Workflow(t, skills.source, &out, 0), func(t *testing.T, call agentCall) {
+	res := runHarness(t, "please check the incident", s0Workflow(t, skills.source, &out, 0), func(t *testing.T, call agentCall) string {
 		t.Errorf("dispatched %s for a prompt without a ticket", call.Role)
+		return ""
 	})
 	if res.Report.Outcome != engine.Failed || !strings.Contains(fmt.Sprint(res.Report.Failure), "must start with a ticket key") || len(res.Report.Snapshot.Sessions) != 0 {
 		t.Fatalf("outcome = %s failure = %v sessions = %d", res.Report.Outcome, res.Report.Failure, len(res.Report.Snapshot.Sessions))

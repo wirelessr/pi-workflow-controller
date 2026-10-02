@@ -12,11 +12,11 @@ import (
 	"pi-workflow-controller/internal/runtime"
 )
 
-const intakeRequirements = `Mechanical retrieval only. With the existing Jira tools and the intake skill, save as this attempt's evidence files: the complete issue JSON with all fields unabridged; field metadata as a bare top-level JSON array of field objects with id and name; every raw comment page from start 0 to the total (with zero comments, exactly one page with start 0, total 0 and an empty comments array); one snapshot per formal issue link in fields.issuelinks (a parent epic or a ticket only mentioned in text is not a link); and every attachment, with mechanical extraction such as an unpacked bundle as its analysis. Stay within tool and Store limits and never follow an attachment redirect with credentials to an unrelated host. Record url as the canonical browse URL and fetched_at in UTC. A genuine absence confirmed from raw evidence (zero comments, no links, no attachments) is completeness, not a gap: gaps list only retrieval that remains undone or failed, and complete is true only when nothing is missing. Do not interpret images, query other systems or decide anything about the incident.`
+const intakeRequirements = `Mechanical retrieval only. Save the raw sources the intake schema asks for as this attempt's evidence files: raw API JSON, not a formatted or markdown view, which is not the complete ticket; the complete issue with all fields unabridged; every comment page; one snapshot per formal issue link; and every attachment with its mechanical extraction. Stay within tool and Store limits and never follow an attachment redirect with credentials to an unrelated host. Do not interpret images, query systems other than the ticket system, or decide anything about the incident.`
 
-const factsRequirements = `Extract candidate facts from text only: the committed intake evidence files and the caller prompt, whose hints are candidate sources, not authorization. Read the full issue, field metadata, every comment page, linked issues and attachment extractions. Do not run any runtime or database query: identity is confirmed later. Record each candidate tenant id, orgkey, UI hostname, home PoP, customer name or user with the evidence it was read from. Keep every candidate when sources disagree; never derive a home PoP from a hostname or tenant name, or a tenant id from an unlabelled field. Record observed incident timestamps as time_anchors, computing utc and offset_seconds yourself; Jira activity timestamps, geography and guessed zones are not incident anchors, and never guess a zone. List image attachments whose content you need in vision_requests with the question to answer; do not read images. Missing identity or time is a gap, not a failure.`
+const factsRequirements = `Declare candidate facts from text: the committed intake files, the caller prompt (its hints are candidate sources, not authorization) and anything intake did not land that you fetch read-only from the ticket system into this contract's evidence files. Run no runtime or database query; identity is confirmed later. Missing identity or time is a gap, not a failure.`
 
-const factCheckRequirements = `Judge the subject facts contract item by item. For each fact and time anchor, read the evidence it cites and decide: supported (the evidence states it), unsupported (it does not) or inferred (derived from a name, hostname, geography or guess rather than stated). For an anchor, also check that its original, zone and event match the evidence. Cite what you relied on in basis. Judge only whether the cited sources support the item, not whether it is true in production, and run no runtime queries. Give exactly one verdict per fact and anchor id.`
+const factCheckRequirements = `You are an independent reader of the facts under review. Give one verdict per fact and time anchor by reading the evidence each cites; report disagreements as warnings. Judge support only, not truth, and run no runtime or database query.`
 
 // S0Models binds each S0 role to its model; the workflow definition names
 // them, nothing here defaults.
@@ -42,7 +42,7 @@ func runS0(ctx context.Context, r *engine.Run, skills Skills, models S0Models, f
 	}
 	root := r.Root()
 	out := S0{Ticket: caller.Ticket}
-	if err := os.MkdirAll(filepath.Join(r.Dir(), "triage-work"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(r.Dir(), workDir), 0700); err != nil {
 		return out, err
 	}
 	out.Prompt, err = root.Attach(ctx, engine.AttachSpec{Key: "caller-prompt", Output: contract.Spec{SchemaID: PromptSchema}, Data: caller,
@@ -80,45 +80,48 @@ func runS0(ctx context.Context, r *engine.Run, skills Skills, models S0Models, f
 		out.Facts = ref
 		vt := newTask(r, "fact-check", caller.Ticket, []string{skills.Entry("validator")}, factCheckRequirements, citationRequirements)
 		vt.Citable = []LabeledRef{{"intake", out.Intake}, {"caller prompt", out.Prompt}, {"facts under review", out.Facts}}
-		vt.Subject = &out.Facts
 		out.Check, err = RunTaskStep(ctx, r, TaskStep{Scope: s, Model: models.Validator, Stage: "fact-check", Key: "fact-check", Task: vt, Schema: FactCheckSchema, Inputs: vt.inputs(),
 			Validate: func(ctx context.Context, ref contract.Ref) error {
 				var err error
-				check, err = checkFactCheck(ctx, r, ref, out.Facts, out.Intake, out.Prompt, facts)
+				check, err = checkFactCheck(ctx, r, ref, out.Facts, facts)
 				return err
 			}})
 		if err != nil {
 			return engine.RetryAction{}, err
 		}
-		var rejected []string
-		for _, item := range check.Items {
-			if item.Verdict != "supported" {
-				rejected = append(rejected, fmt.Sprintf("%s (%s): %s", item.ID, item.Verdict, item.Reason))
-			}
-		}
+		rejected := notSupported(check)
 		result := engine.RetryAction{Result: engine.Result{Outputs: map[string]contract.Ref{"facts": out.Facts, "check": out.Check}}}
 		if len(rejected) == 0 || state.RetryCount >= state.MaxRetries {
 			return result, nil
 		}
+		var reasons []string
+		for _, item := range rejected {
+			reasons = append(reasons, fmt.Sprintf("%s (%s): %s", item.ID, item.Verdict, item.Reason))
+		}
 		return engine.RetryAction{Again: true, Feedback: &engine.Feedback{
-			Message: "The independent check did not accept these items: " + strings.Join(rejected, "; ") + ". Extract the facts again: correct or drop each listed item, citing evidence that states it, and keep accepted items unchanged.",
+			Message: "The independent check did not accept these items: " + strings.Join(reasons, "; ") + ". Extract the facts again: correct or drop each listed item, citing evidence that states it, and keep accepted items unchanged.",
 			Refs:    []contract.Ref{out.Facts, out.Check}}}, nil
 	})
 	if err != nil {
 		return out, err
 	}
-	status := FactStatus{Facts: out.Facts, Check: out.Check, Accepted: []string{}, Degraded: []DegradedFact{}, Gaps: []Gap{}}
-	for _, item := range check.Items {
-		if item.Verdict == "supported" {
-			status.Accepted = append(status.Accepted, item.ID)
-			continue
-		}
-		status.Degraded = append(status.Degraded, DegradedFact{ID: item.ID, Verdict: item.Verdict})
-		status.Gaps = append(status.Gaps, Gap{ID: fmt.Sprintf("fact-not-accepted-%d", len(status.Gaps)+1),
-			Text: fmt.Sprintf("Fact %s was judged %s by the independent check and is treated as absent: %s", item.ID, item.Verdict, item.Reason)})
+	status := FactStatus{Facts: out.Facts, Check: out.Check, Gaps: []Gap{}}
+	for i, item := range notSupported(check) {
+		status.Gaps = append(status.Gaps, Gap{ID: fmt.Sprintf("not-accepted-%d", i+1),
+			Text: fmt.Sprintf("Item %s was judged %s by the independent check and is treated as absent: %s", item.ID, item.Verdict, item.Reason)})
 	}
 	if out.Status, err = root.Attach(ctx, engine.AttachSpec{Key: "fact-status", Output: contract.Spec{SchemaID: FactStatusSchema}, Data: status}); err != nil {
 		return out, err
 	}
 	return out, root.Decision(ctx, "facts-recorded", "Candidate facts and their independent check recorded; facts not accepted are absent with a gap", []contract.Ref{out.Facts, out.Check, out.Status})
+}
+
+func notSupported(c FactCheck) []FactVerdict {
+	var out []FactVerdict
+	for _, item := range c.Items {
+		if item.Verdict != "supported" {
+			out = append(out, item)
+		}
+	}
+	return out
 }

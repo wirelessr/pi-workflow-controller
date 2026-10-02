@@ -51,6 +51,27 @@ func TestCheckFactsAndFactCheck(t *testing.T) {
 		{"vision request for an intake file", func(f *Facts, in refs) {
 			f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: cite(in.intake, "bundle"), Question: "what does it show"}}
 		}, ""},
+		{"locator into the raw issue", func(f *Facts, in refs) {
+			p := "/fields/customfield_1"
+			f.Facts[0].Evidence = []Evidence{{Ref: &in.intake, FileID: "issue", Locator: &Locator{Pointer: &p}}}
+		}, ""},
+		{"locator to a missing JSON member", func(f *Facts, in refs) {
+			p := "/fields/customfield_9"
+			f.Facts[0].Evidence = []Evidence{{Ref: &in.intake, FileID: "issue", Locator: &Locator{Pointer: &p}}}
+		}, `"/fields/customfield_9" does not exist`},
+		{"byte range within the file", func(f *Facts, in refs) {
+			o, l := int64(0), int64(5)
+			f.Facts[0].Evidence = []Evidence{{Ref: &in.intake, FileID: "bundle", Locator: &Locator{Offset: &o, Length: &l}}}
+		}, ""},
+		{"byte range past the end", func(f *Facts, in refs) {
+			o, l := int64(10), int64(1000)
+			f.Facts[0].Evidence = []Evidence{{Ref: &in.intake, FileID: "bundle", Locator: &Locator{Offset: &o, Length: &l}}}
+		}, "the cited file has"},
+		{"pointer into a text file", func(f *Facts, in refs) {
+			p := "/x"
+			f.Facts[0].Evidence = []Evidence{{Ref: &in.intake, FileID: "bundle", Locator: &Locator{Pointer: &p}}}
+		}, "not JSON"},
+		{"blank anchor event", func(f *Facts, _ refs) { f.TimeAnchors[0].Event = "\u00a0" }, "event and source_tz"},
 	} {
 		t.Run("facts/"+tc.name, func(t *testing.T) {
 			var err error
@@ -80,6 +101,10 @@ func TestCheckFactsAndFactCheck(t *testing.T) {
 		{"verdict for an unknown id", func(c *FactCheck) { c.Items[0].ID = "other" }, `got "other"`},
 		{"two verdicts for one id", func(c *FactCheck) { c.Items[1].ID = c.Items[0].ID }, "already has a verdict"},
 		{"basis outside the inputs", func(c *FactCheck) { c.Items[0].Basis = []Evidence{{FileID: "nothing"}} }, "items[0].basis[0].file_id"},
+		{"warning citing the facts under review", func(c *FactCheck) {
+			c.Warnings = []Warning{{Text: "the caller prompt and the ticket disagree", Basis: []Evidence{cite(c.Subject, "nothing")}}}
+		}, "warnings[0].basis[0].file_id"},
+		{"blank gap text", func(c *FactCheck) { c.Gaps = []Gap{{ID: "g", Text: "\u00a0"}} }, "gaps[0].text"},
 	} {
 		t.Run("factcheck/"+tc.name, func(t *testing.T) {
 			var err error
@@ -87,13 +112,13 @@ func TestCheckFactsAndFactCheck(t *testing.T) {
 				in := inputs(ctx, r)
 				f := baseFacts(in)
 				factsRef := attach(ctx, r, "facts", FactsSchema, f, nil)
-				c := FactCheck{Subject: factsRef, Gaps: []Gap{}}
-				for _, id := range append(factIDs(f), anchorIDs(f)...) {
+				c := FactCheck{Subject: factsRef, Warnings: []Warning{}, Gaps: []Gap{}}
+				for _, id := range judgedIDs(f) {
 					c.Items = append(c.Items, FactVerdict{ID: id, Verdict: "supported", Reason: "stated", Basis: []Evidence{cite(in.intake, "page-0")}})
 				}
 				tc.change(&c)
 				ref := attach(ctx, r, "check", FactCheckSchema, c, nil)
-				_, err = checkFactCheck(ctx, r, ref, factsRef, in.intake, in.prompt, f)
+				_, err = checkFactCheck(ctx, r, ref, factsRef, f)
 				return nil
 			})
 			if report.Outcome != engine.Succeeded {

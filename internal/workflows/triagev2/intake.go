@@ -385,7 +385,7 @@ func checkIntakePublication(ctx context.Context, ref contract.Ref, p contract.Pu
 	if len(seen) != len(sizes) {
 		return v, fmt.Errorf("attachments: got %d entries; the raw issue has %d attachments", len(seen), len(sizes))
 	}
-	if err := CheckGapIDs("gaps", v.Gaps); err != nil {
+	if err := checkGaps("gaps", v.Gaps); err != nil {
 		return v, err
 	}
 	if v.Complete != complete || complete != (len(v.Gaps) == 0) {

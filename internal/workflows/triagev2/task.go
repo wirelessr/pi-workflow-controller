@@ -21,7 +21,10 @@ const baselineRequirements = `These environment overrides take precedence over a
 
 const workspaceRequirements = `Use the absolute workspace for scratch files and downloads, and the explicit Step request, candidate and evidence paths for outputs; never resolve output paths relative to the Pi working directory. Scratch files are not committed evidence: downstream work consumes only exact committed Refs.`
 
-const citationRequirements = `Cite evidence as {ref, file_id}: ref is one of citable_inputs copied byte-exact from this request (every field), with the bare files[] id of a kind=evidence file of that input; or ref null with the bare id of a kind=evidence file this contract declares. background_inputs may be read but never cited.`
+const citationRequirements = `Cite only the citable_inputs of this request, with their refs copied byte-exact, or this contract's own evidence files; add a locator for the place you read.`
+
+// workDir is the run-owned scratch directory every Step may write.
+const workDir = "triage-work"
 
 // LabeledRef tells the Agent what an exact input is.
 type LabeledRef struct {
@@ -31,18 +34,16 @@ type LabeledRef struct {
 
 // task is the request prompt of every Step of this workflow.
 type task struct {
-	Role         string        `json:"role"`
-	Skills       []string      `json:"skills,omitempty"`
-	Requirements string        `json:"requirements"`
-	Workspace    string        `json:"workspace"`
-	Ticket       string        `json:"ticket"`
-	Citable      []LabeledRef  `json:"citable_inputs"`
-	Background   []LabeledRef  `json:"background_inputs,omitempty"`
-	Subject      *contract.Ref `json:"subject,omitempty"`
+	Role         string       `json:"role"`
+	Skills       []string     `json:"skills,omitempty"`
+	Requirements string       `json:"requirements"`
+	Workspace    string       `json:"workspace"`
+	Ticket       string       `json:"ticket"`
+	Citable      []LabeledRef `json:"citable_inputs"`
 }
 
 func newTask(r *engine.Run, role, ticket string, skills []string, requirements ...string) task {
-	t := task{Role: role, Ticket: ticket, Skills: skills, Workspace: filepath.Join(r.Dir(), "triage-work"), Citable: []LabeledRef{}}
+	t := task{Role: role, Ticket: ticket, Skills: skills, Workspace: filepath.Join(r.Dir(), workDir), Citable: []LabeledRef{}}
 	parts := []string{baselineRequirements}
 	if len(skills) > 0 {
 		parts = append(parts, "Read each SKILL.md in skills in full before working, and follow it within these requirements.")
@@ -55,11 +56,8 @@ func newTask(r *engine.Run, role, ticket string, skills []string, requirements .
 
 func (t task) inputs() []contract.Ref {
 	var refs []contract.Ref
-	for _, in := range append(append([]LabeledRef{}, t.Citable...), t.Background...) {
+	for _, in := range t.Citable {
 		refs = append(refs, in.Ref)
-	}
-	if t.Subject != nil {
-		refs = AppendUniqueRefs(refs, *t.Subject)
 	}
 	return refs
 }

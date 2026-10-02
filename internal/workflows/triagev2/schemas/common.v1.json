@@ -46,7 +46,7 @@
         "ref",
         "file_id"
       ],
-      "description": "A cited kind=evidence file. ref null cites this contract's own files[]; otherwise ref is one of the Step's citable inputs and file_id is that input's files[] id",
+      "description": "A cited kind=evidence file, optionally narrowed by a locator. ref null cites this contract's own files[]; otherwise ref is one of the Step's citable inputs and file_id is that input's files[] id",
       "properties": {
         "ref": {
           "anyOf": [
@@ -62,6 +62,56 @@
           "type": "string",
           "minLength": 1,
           "description": "Bare files[] id, never a path or a name with an added extension"
+        },
+        "locator": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Where in the file: a JSON pointer (RFC 6901) into a JSON file, or offset and length in bytes for any file",
+          "properties": {
+            "pointer": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "pointer"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "offset"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "length"
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "required": [
+                "offset",
+                "length"
+              ],
+              "not": {
+                "required": [
+                  "pointer"
+                ]
+              }
+            }
+          ]
         }
       }
     },
@@ -134,7 +184,7 @@
         "utc": {
           "type": "string",
           "pattern": "Z$",
-          "description": "The anchor converted to UTC, an RFC 3339 string ending in Z; from/to must be byte-identical to the min/max of these"
+          "description": "The anchor converted to UTC, an RFC 3339 string ending in Z"
         },
         "offset_seconds": {
           "type": "integer",

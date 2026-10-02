@@ -62,43 +62,39 @@ type FactVerdict struct {
 	Basis   []Evidence `json:"basis"`
 }
 
+type Warning struct {
+	Text  string     `json:"text"`
+	Basis []Evidence `json:"basis"`
+}
+
 type FactCheck struct {
-	Subject contract.Ref  `json:"subject"`
-	Items   []FactVerdict `json:"items"`
-	Gaps    []Gap         `json:"gaps"`
+	Subject  contract.Ref  `json:"subject"`
+	Items    []FactVerdict `json:"items"`
+	Warnings []Warning     `json:"warnings"`
+	Gaps     []Gap         `json:"gaps"`
 }
 
-type DegradedFact struct {
-	ID      string `json:"id"`
-	Verdict string `json:"verdict"`
-}
-
+// FactStatus binds the final facts and check; each item the check did not
+// judge supported is absent and has a gap. Verdicts stay in the check.
 type FactStatus struct {
-	Facts    contract.Ref   `json:"facts"`
-	Check    contract.Ref   `json:"check"`
-	Accepted []string       `json:"accepted"`
-	Degraded []DegradedFact `json:"degraded"`
-	Gaps     []Gap          `json:"gaps"`
+	Facts contract.Ref `json:"facts"`
+	Check contract.Ref `json:"check"`
+	Gaps  []Gap        `json:"gaps"`
 }
 
-// classify reads the files of each exact input for citation checks.
-func classify(ctx context.Context, r *engine.Run, citable, background []LabeledRef) (Inputs, error) {
-	in := Inputs{Citable: map[contract.Ref][]contract.FileEntry{}, Background: map[contract.Ref][]contract.FileEntry{}}
-	for _, group := range []struct {
-		refs []LabeledRef
-		into map[contract.Ref][]contract.FileEntry
-	}{{citable, in.Citable}, {background, in.Background}} {
-		for _, l := range group.refs {
-			raw, err := engine.ReadContract(ctx, r, l.Ref)
-			if err != nil {
-				return in, err
-			}
-			p, err := contract.DecodePublication[struct{}](raw)
-			if err != nil {
-				return in, err
-			}
-			group.into[l.Ref] = p.Files
+// citable reads the files of each exact input for citation checks.
+func citable(ctx context.Context, r *engine.Run, refs ...contract.Ref) (Inputs, error) {
+	in := Inputs{Citable: map[contract.Ref][]contract.FileEntry{}}
+	for _, ref := range refs {
+		raw, err := engine.ReadContract(ctx, r, ref)
+		if err != nil {
+			return in, err
 		}
+		p, err := contract.DecodePublication[struct{}](raw)
+		if err != nil {
+			return in, err
+		}
+		in.Citable[ref] = p.Files
 	}
 	return in, nil
 }
@@ -128,11 +124,11 @@ func checkFacts(ctx context.Context, r *engine.Run, ref contract.Ref, intake, pr
 	if err := sameRef("prompt", v.Prompt, prompt); err != nil {
 		return v, err
 	}
-	in, err := classify(ctx, r, []LabeledRef{{"intake", intake}, {"caller prompt", prompt}}, nil)
+	in, err := citable(ctx, r, intake, prompt)
 	if err != nil {
 		return v, err
 	}
-	cite := func(field string, e Evidence) error { return in.CheckEvidence(field, e, p.Files) }
+	cite := citations{ctx, in, ref, p.Files}.check
 	ids := map[string]string{}
 	unique := func(field, id string) error {
 		if prior, ok := ids[id]; ok {
@@ -157,6 +153,9 @@ func checkFacts(ctx context.Context, r *engine.Run, ref contract.Ref, intake, pr
 		if err := unique(field, a.ID); err != nil {
 			return v, err
 		}
+		if !nonblank(a.Event) || !nonblank(a.SourceTZ) {
+			return v, fmt.Errorf("%s: event and source_tz must not be blank", field)
+		}
 		if err := checkAnchor(field, a, cite); err != nil {
 			return v, err
 		}
@@ -173,13 +172,13 @@ func checkFacts(ctx context.Context, r *engine.Run, ref contract.Ref, intake, pr
 			return v, err
 		}
 	}
-	return v, CheckGapIDs("gaps", v.Gaps)
+	return v, checkGaps("gaps", v.Gaps)
 }
 
 // checkFactCheck requires exactly one verdict per fact and anchor of the
 // subject, each with resolvable basis citations. The verdicts are the
 // validator's judgment; Go does not second-guess them.
-func checkFactCheck(ctx context.Context, r *engine.Run, ref, subject, intake, prompt contract.Ref, facts Facts) (FactCheck, error) {
+func checkFactCheck(ctx context.Context, r *engine.Run, ref, subject contract.Ref, facts Facts) (FactCheck, error) {
 	p, err := readAccepted[FactCheck](ctx, r, ref, FactCheckSchema)
 	if err != nil {
 		return FactCheck{}, err
@@ -188,16 +187,15 @@ func checkFactCheck(ctx context.Context, r *engine.Run, ref, subject, intake, pr
 	if err := sameRef("subject", v.Subject, subject); err != nil {
 		return v, err
 	}
-	in, err := classify(ctx, r, []LabeledRef{{"intake", intake}, {"caller prompt", prompt}, {"facts under review", subject}}, nil)
+	in, err := citable(ctx, r, facts.Intake, facts.Prompt, subject)
 	if err != nil {
 		return v, err
 	}
+	cite := citations{ctx, in, ref, p.Files}.check
+	ids := judgedIDs(facts)
 	want := map[string]bool{}
-	for _, f := range facts.Facts {
-		want[f.ID] = true
-	}
-	for _, a := range facts.TimeAnchors {
-		want[a.ID] = true
+	for _, id := range ids {
+		want[id] = true
 	}
 	seen := map[string]bool{}
 	for i, item := range v.Items {
@@ -210,24 +208,38 @@ func checkFactCheck(ctx context.Context, r *engine.Run, ref, subject, intake, pr
 		}
 		seen[item.ID] = true
 		for j, e := range item.Basis {
-			if err := in.CheckEvidence(fmt.Sprintf("%s.basis[%d]", field, j), e, p.Files); err != nil {
+			if err := cite(fmt.Sprintf("%s.basis[%d]", field, j), e); err != nil {
+				return v, err
+			}
+		}
+	}
+	for i, w := range v.Warnings {
+		for j, e := range w.Basis {
+			if err := cite(fmt.Sprintf("warnings[%d].basis[%d]", i, j), e); err != nil {
 				return v, err
 			}
 		}
 	}
 	var missing []string
-	for _, f := range facts.Facts {
-		if !seen[f.ID] {
-			missing = append(missing, f.ID)
-		}
-	}
-	for _, a := range facts.TimeAnchors {
-		if !seen[a.ID] {
-			missing = append(missing, a.ID)
+	for _, id := range ids {
+		if !seen[id] {
+			missing = append(missing, id)
 		}
 	}
 	if len(missing) > 0 {
 		return v, fmt.Errorf("items: no verdict for %s; want exactly one per fact and time anchor", strings.Join(missing, ", "))
 	}
-	return v, CheckGapIDs("gaps", v.Gaps)
+	return v, checkGaps("gaps", v.Gaps)
+}
+
+// judgedIDs are the facts and time anchors the check must judge, in order.
+func judgedIDs(f Facts) []string {
+	var ids []string
+	for _, x := range f.Facts {
+		ids = append(ids, x.ID)
+	}
+	for _, a := range f.TimeAnchors {
+		ids = append(ids, a.ID)
+	}
+	return ids
 }

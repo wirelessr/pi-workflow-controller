@@ -53,7 +53,6 @@
     },
     "url": {
       "type": "string",
-      "pattern": "^https://[^/?#]+/browse/[A-Z][A-Z0-9_]*-[1-9][0-9]*$",
       "description": "Canonical browse URL https://<host>/browse/<ticket>, never a REST API endpoint"
     },
     "fetched_at": {

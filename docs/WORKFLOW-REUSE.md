@@ -33,7 +33,7 @@
 | RPC 測試 transport | `testutil/protocol.NewHost`／`Host.Events`／`Event.Reply`／`Host.Close`、`RegisterCleanup` 及 `WriteEnvelope` | review workflow/check integration、triage RPC driver 共用 host 與 late-bound cancel/close/join；原 domain scenarios 與 Store-only 分層不變 |
 | Skill extraction／report renderer | `contract/reportresource.ExtractFresh`／embedded `pwc_report_io.py`；review `ExtractSkills`／renderer 與 triage `ExtractReport`／report Step | R5：兩個真 consumer 共用機械，業務模板／report binding 各自保留 |
 
-表中的 triage consumers 指已刪除的舊版 Planner triage；共用入口仍由其他 consumers 使用，v2 的對應 consumer 落地時更新本表。上述相對路徑均位於 `internal/`。角色模型、PR Pin、code-location Evidence、investigation Ref/file Evidence、Source status 及 verdict 不屬於通用登記項，保留 workflow-specific 語義。
+表中的 triage consumers 指已刪除的舊版 Planner triage；共用入口仍由其他 consumers 使用。v2（`internal/workflows/triagev2`）目前使用 `engine.ReadContract`＋`contract.DecodePublication`（`readAccepted`、citation 檢查）、`contract.ReadBounded`（`rawFile`，與舊版相同的二次讀取 adapter）、`reportresource.ExtractFresh`（`PrepareSkills`）、`contract.ReadStable`，以及 `Scope.Attach`、`StepSpec.Observe`。上述相對路徑均位於 `internal/`。角色模型、PR Pin、code-location Evidence、investigation Ref/file Evidence、Source status 及 verdict 不屬於通用登記項，保留 workflow-specific 語義。
 
 ## 3. 共用 refactor 單元與順序
 
@@ -128,7 +128,7 @@ R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入�
 
 ## 4. 後續 triage milestones 的依賴鎖
 
-> **現況：**以下 M1–M7 是舊版 Planner triage 的歷史接線；該 workflow 未通過 alpha，已自 registry 移除，程式碼也已刪除（可從版本歷史取得）。v2 以新 package 改寫；v2 的共用項與相依於落地時更新本文件，下表不再是施工順序。目前 `internal/workflows/triagev2` 已承接 typed recovery（`Recoverable`、`ConfirmTaskRecovery`、`RetryInputs` 等）與 fresh-session task Step（`RunTaskStep`／`CloseTaskStep`），錯誤字串不變；外部 skill 目錄的展開（`triagev2.PrepareSkills`）以 `contract.ReadStable`（Store 既有的 no-symlink／regular-file／NONBLOCK／大小上限／讀取期間穩定檢查，僅新增匯出）讀入記憶體，再交給既有 `reportresource.ExtractFresh`（只展開六個角色子樹，略過 `.` 開頭的項目，每個角色必須有 `SKILL.md`；讀來源與比對上游各有期限，前者逾時為執行失敗，後者逾時記為未檢查的缺口）；`ExtractFresh` 本身與其 embed consumers 不變。`runtime/preflight.go` 的 discovery 讀取不遷移：它在 runtime 層（不 import contract）、讀的是他人 process 寫的 discovery 檔，只做唯讀判斷，政策是最後一段 NOFOLLOW、1 MiB、不需要讀取期間穩定檢查，與 run 內複製的信任邊界不同。
+> **現況：**以下 M1–M7 是舊版 Planner triage 的歷史接線；該 workflow 未通過 alpha，已自 registry 移除，程式碼也已刪除（可從版本歷史取得）。v2 以新 package 改寫；v2 的共用項與相依於落地時更新本文件，下表不再是施工順序。目前 `internal/workflows/triagev2` 已承接 typed recovery（`Recoverable`、`ConfirmTaskRecovery`、`RetryInputs` 等）與 fresh-session task Step（`RunTaskStep`／`CloseTaskStep`），錯誤字串不變；S0（caller prompt 以 Attach 記錄、intake、facts、獨立 fact-check validator、未通過的事實以 Controller 記錄降級為缺口）已在 `runS0`，intake 驗收移植自舊版初始 intake，去掉 revision 欄位。外部 skill 目錄的展開（`triagev2.PrepareSkills`）以 `contract.ReadStable`（Store 既有的 no-symlink／regular-file／NONBLOCK／大小上限／讀取期間穩定檢查，僅新增匯出）讀入記憶體，再交給既有 `reportresource.ExtractFresh`（只展開六個角色子樹，略過 `.` 開頭的項目，每個角色必須有 `SKILL.md`；讀來源與比對上游各有期限，前者逾時為執行失敗，後者逾時記為未檢查的缺口）；`ExtractFresh` 本身與其 embed consumers 不變。`runtime/preflight.go` 的 discovery 讀取不遷移：它在 runtime 層（不 import contract）、讀的是他人 process 寫的 discovery 檔，只做唯讀判斷，政策是最後一段 NOFOLLOW、1 MiB、不需要讀取期間穩定檢查，與 run 內複製的信任邊界不同。
 
 R1–R4 的匿名驗收與 consumer 遷移完成後才啟動 M1，不因某個 helper 尚未共用就在 triage 寫私有替代品。Live 驗收是 M7 的獨立 gate，不阻止已授權的匿名實作，也不因匿名通過被解除。
 
@@ -142,7 +142,7 @@ R1–R4 的匿名驗收與 consumer 遷移完成後才啟動 M1，不因某個 h
 | M6 最終報告 | M5；本單元完成前必須閉合R5 | Result/FinalSelection/FinalDelivery、共用 renderer 機械部分 | 以實際triage report consumer啟動R5，完成deterministic report資料/模板/同版驗證binding；不加writer Agent、drafts/發布或final registry |
 | M7 產品入口／完整驗收 | M6、R1 | 既有 registry、Definition、RoleSpec、共用 startup | 明確模型/授權scope/live驗收；不再造launcher/權限框架，不猜GLM ID或默換模型 |
 
-M1 已接入 `plannerCaller.work` 的單項明列 worker 派工與 Planner 結果交接；`taskStepRecovery` 供既有 slice adapter 與 worker 共用（M4 前為 `taskStep`，無 caller 的轉送 wrapper 已移除），原 session/Step/strict-close 語義不另造。`worker_results` 明交 exact refs 及真正 owners，fresh handoff／support 改版不重綁歷史結果；原 query checker/schema 等義共用。這不是自動批次、產品入口或 live 驗收，具體 contracts 見 [Jira triage](JIRA-TRIAGE.md)。逐次 review/gates/commit 狀態仍在外部工程紀錄。
+M1 已接入 `plannerCaller.work` 的單項明列 worker 派工與 Planner 結果交接；`taskStepRecovery` 供既有 slice adapter 與 worker 共用（M4 前為 `taskStep`，無 caller 的轉送 wrapper 已移除），原 session/Step/strict-close 語義不另造。`worker_results` 明交 exact refs 及真正 owners，fresh handoff／support 改版不重綁歷史結果；原 query checker/schema 等義共用。這不是自動批次、產品入口或 live 驗收，具體 contracts 見舊版文件（已刪除，見版本歷史）。逐次 review/gates/commit 狀態仍在外部工程紀錄。
 
 M2 已以 `executeInvestigation`／`adapt` 接明列 action，`workReady` 先限制最多三個 ready tasks 再使用真 Parallel，live Planner 另計。Ledger 只依 Agent 明報 changes 及 exact batch Refs 計數，不由 Go 比較領域內容。Reframe wiki 是獨立 committed Ref，沿原 WikiSearch/completeness，歷史 context binding 不重寫；模型由 caller 分別明示，不能將 Planner 默綁一般分析模型。單項 worker 及 supporting/fresh handoff 舊 callers 沿用共同執行機械。Live 模型／技能／production 驗收尚未完成，產品入口已接。
 

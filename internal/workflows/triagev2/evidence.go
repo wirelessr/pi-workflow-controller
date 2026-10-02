@@ -11,13 +11,24 @@ import (
 // Evidence cites a kind=evidence file. A nil Ref means this contract's own
 // file; otherwise Ref must be one of the Step's citable inputs.
 type Evidence struct {
-	Ref    *contract.Ref `json:"ref"`
-	FileID string        `json:"file_id"`
+	Ref     *contract.Ref `json:"ref"`
+	FileID  string        `json:"file_id"`
+	Locator *Locator      `json:"locator,omitempty"`
 }
 
 type Gap struct {
 	ID   string `json:"id"`
 	Text string `json:"text"`
+}
+
+// checkGaps requires unique ids and text that is not only whitespace.
+func checkGaps(field string, gaps []Gap) error {
+	for i, g := range gaps {
+		if !nonblank(g.Text) {
+			return fmt.Errorf("%s[%d].text: got only whitespace; want what remains undone or failed", field, i)
+		}
+	}
+	return CheckGapIDs(field, gaps)
 }
 
 // CheckGapIDs enforces id uniqueness within one contract. JSON Schema

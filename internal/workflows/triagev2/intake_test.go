@@ -121,6 +121,33 @@ func TestCheckIntakePublication(t *testing.T) {
 		}, "snapshot is of"},
 		{"missing attachment", func(v *Intake, _ map[string][]byte) { v.Attachments = []Attachment{} }, "attachments: got 0"},
 		{"truncated attachment", func(_ *Intake, files map[string][]byte) { files["bundle"] = []byte("cut") }, "bytes; the raw issue says"},
+		{"duplicate raw attachment ids", func(_ *Intake, files map[string][]byte) {
+			setIssue(files, func(f map[string]any) {
+				f["attachment"] = []any{map[string]any{"id": "a1", "size": len(files["bundle"])}, map[string]any{"id": "a1", "size": len(files["bundle"])}}
+			})
+		}, "unique id and a size"},
+		{"raw attachment without a size", func(_ *Intake, files map[string][]byte) {
+			setIssue(files, func(f map[string]any) { f["attachment"] = []any{map[string]any{"id": "a1"}} })
+		}, "unique id and a size"},
+		{"comment total changed during retrieval is incomplete", func(v *Intake, files map[string][]byte) {
+			files["page-1"] = []byte(`{"startAt":1,"total":3,"comments":[{"id":"c2","body":"x"}]}`)
+			v.Complete, v.Gaps = false, []Gap{{ID: "total", Text: "comment total changed during retrieval"}}
+		}, ""},
+		{"comments past the total", func(_ *Intake, files map[string][]byte) {
+			files["page-1"] = []byte(`{"startAt":1,"total":2,"comments":[{"id":"c2","body":"x"},{"id":"c3","body":"y"}]}`)
+		}, "extend past the total"},
+		{"duplicate page start", func(v *Intake, _ map[string][]byte) { v.Comments[1].Start = 0 }, "listed twice"},
+		{"unsafe attachment with a partial file", func(v *Intake, files map[string][]byte) {
+			files["partial"] = []byte("first bytes")
+			v.Attachments[0].Content = Source{Status: "unsafe", FileID: "partial", Reason: "archive with absolute paths"}
+			v.Attachments[0].Analysis = Source{Status: "missing", Reason: "not extracted"}
+			v.Complete, v.Gaps = false, []Gap{{ID: "a1", Text: "attachment not landed safely"}}
+		}, ""},
+		{"partial file that is not declared", func(v *Intake, _ map[string][]byte) {
+			v.Attachments[0].Content = Source{Status: "partial", FileID: "absent", Reason: "download cut"}
+			v.Attachments[0].Analysis = Source{Status: "missing", Reason: "not extracted"}
+			v.Complete, v.Gaps = false, []Gap{{ID: "a1", Text: "download cut"}}
+		}, "attachments[0].content.file_id"},
 		{"analysis without content", func(v *Intake, _ map[string][]byte) {
 			v.Attachments[0].Content = Source{Status: "missing", Reason: "download failed"}
 			v.Complete, v.Gaps = false, []Gap{{ID: "a1", Text: "download failed"}}
@@ -216,5 +243,21 @@ func TestRawFileBoundaries(t *testing.T) {
 				t.Fatalf("body = %q (nil %t), want %q", raw, raw == nil, tc.want)
 			}
 		})
+	}
+}
+
+func TestSchemaIDs(t *testing.T) {
+	want := map[string]bool{SkillsSchema: true, PromptSchema: true, IntakeSchema: true, FactsSchema: true, FactCheckSchema: true, FactStatusSchema: true}
+	registry, err := contract.NewRegistry(Resources(), Schemas())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := range want {
+		if !registry.Has(id) {
+			t.Errorf("schema %s is not registered", id)
+		}
+	}
+	if len(Schemas()) != len(want) {
+		t.Errorf("registered %d schemas, want %d", len(Schemas()), len(want))
 	}
 }
