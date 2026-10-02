@@ -33,10 +33,9 @@ func TestCheckEvidenceDiagnostics(t *testing.T) {
 	ref := func(attempt string) contract.Ref {
 		return contract.Ref{RunID: "run", AttemptID: attempt, Path: "/runs/" + attempt + "/contract.json", SchemaID: "triage.example.v1", SHA256: strings.Repeat("a", 64), ManifestSHA256: strings.Repeat("b", 64)}
 	}
-	ticket, history := ref("ticket"), ref("history")
+	ticket := ref("ticket")
 	inputs := Inputs{
-		Citable:    map[contract.Ref][]contract.FileEntry{ticket: {{ID: "issue", Kind: "evidence", Path: "evidence/issue.json"}, {ID: "summary", Kind: "artifact", Path: "artifacts/summary.md"}}},
-		Background: map[contract.Ref][]contract.FileEntry{history: {{ID: "notes", Kind: "evidence", Path: "evidence/notes.md"}}},
+		Citable: map[contract.Ref][]contract.FileEntry{ticket: {{ID: "issue", Kind: "evidence", Path: "evidence/issue.json"}, {ID: "summary", Kind: "artifact", Path: "artifacts/summary.md"}}},
 	}
 	own := []contract.FileEntry{{ID: "identity-receipt", Kind: "evidence", Path: "evidence/receipt.json"}, {ID: "report", Kind: "artifact", Path: "artifacts/report.md"}}
 	tampered := ticket
@@ -65,8 +64,6 @@ func TestCheckEvidenceDiagnostics(t *testing.T) {
 			`facts[0].evidence[1].file_id: got "comments", which input attempt ticket (triage.example.v1) does not declare in files[]; want a kind=evidence id from that input's files[]`},
 		{"input file of wrong kind", Evidence{Ref: &ticket, FileID: "summary"},
 			`facts[0].evidence[1].file_id: got "summary", which input attempt ticket (triage.example.v1) declares as kind=artifact; want a kind=evidence file`},
-		{"background input", Evidence{Ref: &history, FileID: "notes"},
-			`facts[0].evidence[1].ref: got attempt history (triage.example.v1), a background input; want an evidence owner from this Step's citable inputs: background inputs may be read but not cited`},
 		{"mistyped citable ref", Evidence{Ref: &tampered, FileID: "issue"},
 			"facts[0].evidence[1].ref: got attempt ticket with sha256 \"" + strings.Repeat("c", 64) + "\" (committed \"" + strings.Repeat("a", 64) + "\"); want the ref copied byte-exact from the request"},
 		{"ref with several mistyped fields", Evidence{Ref: &moved, FileID: "issue"},
@@ -129,6 +126,22 @@ func TestCommonSchemaDefinitions(t *testing.T) {
 		{"gap with extra field", func(v map[string]any) { v["gaps"].([]any)[0].(map[string]any)["status"] = "open" }, false},
 		{"evidence with extra field", func(v map[string]any) { v["evidence"].([]any)[0].(map[string]any)["path"] = "evidence/f" }, false},
 		{"evidence without ref", func(v map[string]any) { delete(v["evidence"].([]any)[0].(map[string]any), "ref") }, false},
+		{"locator with a pointer", func(v map[string]any) {
+			v["evidence"].([]any)[0].(map[string]any)["locator"] = map[string]any{"pointer": "/a"}
+		}, true},
+		{"locator with a byte range", func(v map[string]any) {
+			v["evidence"].([]any)[0].(map[string]any)["locator"] = map[string]any{"offset": 0, "length": 3}
+		}, true},
+		{"empty locator", func(v map[string]any) { v["evidence"].([]any)[0].(map[string]any)["locator"] = map[string]any{} }, false},
+		{"locator with both forms", func(v map[string]any) {
+			v["evidence"].([]any)[0].(map[string]any)["locator"] = map[string]any{"pointer": "", "offset": 0}
+		}, false},
+		{"locator with an offset only", func(v map[string]any) {
+			v["evidence"].([]any)[0].(map[string]any)["locator"] = map[string]any{"offset": 0}
+		}, false},
+		{"locator with a zero length", func(v map[string]any) {
+			v["evidence"].([]any)[0].(map[string]any)["locator"] = map[string]any{"offset": 0, "length": 0}
+		}, false},
 		{"gap id empty", func(v map[string]any) { v["gaps"].([]any)[0].(map[string]any)["id"] = "" }, false},
 		{"gap text blank", func(v map[string]any) { v["gaps"].([]any)[0].(map[string]any)["text"] = " \n" }, false},
 		{"gap without id", func(v map[string]any) { delete(v["gaps"].([]any)[0].(map[string]any), "id") }, false},

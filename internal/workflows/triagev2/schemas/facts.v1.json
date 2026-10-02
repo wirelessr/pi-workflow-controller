@@ -56,7 +56,7 @@
             "type": "array",
             "minItems": 1,
             "items": {
-              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence"
             }
           },
           "note": {
@@ -87,7 +87,8 @@
             "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
           },
           "attachment": {
-            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
+            "description": "The image file: an intake attachment, or one this contract fetched itself (ref null)"
           },
           "question": {
             "type": "string",

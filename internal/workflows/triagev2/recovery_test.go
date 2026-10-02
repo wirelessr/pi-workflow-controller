@@ -83,11 +83,3 @@ func TestRecoveryErrorKeepsCurrentBoundaryFirst(t *testing.T) {
 		})
 	}
 }
-
-func TestAppendUniqueRefs(t *testing.T) {
-	a, b := contract.Ref{AttemptID: "a"}, contract.Ref{AttemptID: "b"}
-	got := AppendUniqueRefs([]contract.Ref{a}, contract.Ref{}, a, b, b)
-	if len(got) != 2 || got[0] != a || got[1] != b {
-		t.Fatalf("AppendUniqueRefs = %v, want [a b] without zero or duplicate refs", got)
-	}
-}

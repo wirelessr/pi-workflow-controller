@@ -1,13 +1,11 @@
 // Package triagev2 is the replacement Jira triage workflow. It is under
-// construction and not registered; the previous triage package temporarily
-// imports the pieces already moved here and is deleted piece by piece.
+// construction and not registered.
 package triagev2
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"pi-workflow-controller/internal/contract"
@@ -245,13 +243,4 @@ func RetryInputs(ctx context.Context, r *engine.Run, scope *engine.Scope, key, o
 		return contract.Ref{}, failures, RecoveryError(err, causes...)
 	}
 	return ref, failures, nil
-}
-
-func AppendUniqueRefs(refs []contract.Ref, more ...contract.Ref) []contract.Ref {
-	for _, ref := range more {
-		if ref != (contract.Ref{}) && !slices.Contains(refs, ref) {
-			refs = append(refs, ref)
-		}
-	}
-	return refs
 }

@@ -107,7 +107,11 @@ func runS0(ctx context.Context, r *engine.Run, skills Skills, models S0Models, f
 	}
 	status := FactStatus{Facts: out.Facts, Check: out.Check, Gaps: []Gap{}}
 	for i, item := range notSupported(check) {
-		status.Gaps = append(status.Gaps, Gap{ID: fmt.Sprintf("not-accepted-%d", i+1),
+		id := "not-accepted-" + item.ID
+		if len(id) > 128 {
+			id = fmt.Sprintf("not-accepted-%d", i+1)
+		}
+		status.Gaps = append(status.Gaps, Gap{ID: id,
 			Text: fmt.Sprintf("Item %s was judged %s by the independent check and is treated as absent: %s", item.ID, item.Verdict, item.Reason)})
 	}
 	if out.Status, err = root.Attach(ctx, engine.AttachSpec{Key: "fact-status", Output: contract.Spec{SchemaID: FactStatusSchema}, Data: status}); err != nil {

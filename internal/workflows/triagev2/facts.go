@@ -165,8 +165,8 @@ func checkFacts(ctx context.Context, r *engine.Run, ref contract.Ref, intake, pr
 		if err := unique(field, q.ID); err != nil {
 			return v, err
 		}
-		if q.Attachment.Ref == nil || *q.Attachment.Ref != intake {
-			return v, fmt.Errorf("%s.attachment.ref: want the intake input, whose files hold the attachments", field)
+		if q.Attachment.Ref != nil && *q.Attachment.Ref != intake {
+			return v, fmt.Errorf("%s.attachment.ref: want the intake input or null for an image this contract fetched itself", field)
 		}
 		if err := cite(field+".attachment", q.Attachment); err != nil {
 			return v, err

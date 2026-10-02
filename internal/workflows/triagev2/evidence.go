@@ -45,12 +45,10 @@ func CheckGapIDs(field string, gaps []Gap) error {
 	return nil
 }
 
-// Inputs classifies a Step's exact committed inputs by their files. Citable
-// inputs are evidence owners whose kind=evidence files may be cited;
-// background inputs may be read but never cited.
+// Inputs holds a Step's citable inputs: exact committed Refs whose
+// kind=evidence files may be cited, with their files.
 type Inputs struct {
-	Citable    map[contract.Ref][]contract.FileEntry
-	Background map[contract.Ref][]contract.FileEntry
+	Citable map[contract.Ref][]contract.FileEntry
 }
 
 // CheckEvidence reports exactly which part of a citation is wrong, what was
@@ -62,9 +60,6 @@ func (in Inputs) CheckEvidence(field string, e Evidence, own []contract.FileEntr
 	ref := *e.Ref
 	if files, ok := in.Citable[ref]; ok {
 		return checkFile(field, e.FileID, files, "input "+describeRef(ref), "that input's files[]")
-	}
-	if _, ok := in.Background[ref]; ok {
-		return fmt.Errorf("%s.ref: got %s, a background input; want an evidence owner from this Step's citable inputs: background inputs may be read but not cited", field, describeRef(ref))
 	}
 	for known := range in.Citable {
 		if known.AttemptID == ref.AttemptID {

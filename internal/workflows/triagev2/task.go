@@ -21,7 +21,7 @@ const baselineRequirements = `These environment overrides take precedence over a
 
 const workspaceRequirements = `Use the absolute workspace for scratch files and downloads, and the explicit Step request, candidate and evidence paths for outputs; never resolve output paths relative to the Pi working directory. Scratch files are not committed evidence: downstream work consumes only exact committed Refs.`
 
-const citationRequirements = `Cite only the citable_inputs of this request, with their refs copied byte-exact, or this contract's own evidence files; add a locator for the place you read.`
+const citationRequirements = `Cite only the citable_inputs of this request, with their refs copied byte-exact, or this contract's own evidence files.`
 
 // workDir is the run-owned scratch directory every Step may write.
 const workDir = "triage-work"

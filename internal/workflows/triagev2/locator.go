@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -54,12 +55,13 @@ func resolveLocator(field string, l Locator, raw []byte) error {
 		var doc any
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
-		if err := dec.Decode(&doc); err != nil {
-			return fmt.Errorf("%s.pointer: the cited file is not JSON, so cite a byte range instead", field)
+		if dec.Decode(&doc) != nil || dec.Decode(&struct{}{}) != io.EOF {
+			return fmt.Errorf("%s.pointer: the cited file is not a single JSON document, so cite a byte range instead", field)
 		}
 		return walkPointer(field+".pointer", *l.Pointer, doc)
 	case l.Pointer == nil && l.Offset != nil && l.Length != nil:
-		if *l.Offset < 0 || *l.Length <= 0 || *l.Offset+*l.Length > int64(len(raw)) {
+		size := int64(len(raw))
+		if *l.Offset < 0 || *l.Length <= 0 || *l.Offset > size || *l.Length > size-*l.Offset {
 			return fmt.Errorf("%s: got bytes %d..%d; the cited file has %d bytes", field, *l.Offset, *l.Offset+*l.Length, len(raw))
 		}
 		return nil
@@ -78,6 +80,9 @@ func walkPointer(field, pointer string, doc any) error {
 	}
 	at := ""
 	for _, token := range strings.Split(pointer[1:], "/") {
+		if strings.Contains(strings.NewReplacer("~0", "", "~1", "").Replace(token), "~") {
+			return fmt.Errorf("%s: %q has a ~ that is not ~0 or ~1", field, pointer)
+		}
 		token = strings.ReplaceAll(strings.ReplaceAll(token, "~1", "/"), "~0", "~")
 		at += "/" + token
 		switch v := doc.(type) {

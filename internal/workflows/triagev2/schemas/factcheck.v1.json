@@ -47,7 +47,7 @@
             "type": "array",
             "minItems": 1,
             "items": {
-              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence"
             }
           }
         }
@@ -78,7 +78,7 @@
             "type": "array",
             "minItems": 1,
             "items": {
-              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence"
             }
           }
         }

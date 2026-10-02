@@ -26,6 +26,7 @@ func TestCheckFactsAndFactCheck(t *testing.T) {
 	}
 	inputs := func(ctx context.Context, r *engine.Run) refs {
 		v, files := intakeFiles()
+		files["lines"] = []byte("{\"a\":1}\n{\"a\":2}\n")
 		return refs{
 			intake: attach(ctx, r, "intake", IntakeSchema, v, files),
 			prompt: attach(ctx, r, "prompt", PromptSchema, CallerPrompt{Ticket: "CASE-17"}, map[string][]byte{"prompt": []byte("CASE-17")}),
@@ -41,15 +42,15 @@ func TestCheckFactsAndFactCheck(t *testing.T) {
 	}{
 		{"valid", func(*Facts, refs) {}, ""},
 		{"mistyped intake ref", func(f *Facts, in refs) { f.Intake.SHA256 = strings.Repeat("0", 64) }, "intake: got attempt"},
-		{"citing the prompt file", func(f *Facts, in refs) { f.Facts[0].Evidence = []Evidence{cite(in.prompt, "prompt")} }, ""},
+		{"citing the prompt file", func(f *Facts, in refs) { f.Facts[0].Evidence = []Evidence{citeRange(in.prompt, "prompt", 0, 7)} }, ""},
 		{"citing a file the intake does not declare", func(f *Facts, in refs) { f.Facts[0].Evidence = []Evidence{cite(in.intake, "issue.json")} }, "facts[0].evidence[0].file_id"},
 		{"id reused by an anchor", func(f *Facts, _ refs) { f.TimeAnchors[0].ID = "tenant" }, `"tenant" is already used at facts[0]`},
 		{"anchor conversion wrong", func(f *Facts, _ refs) { f.TimeAnchors[0].UTC = "2025-01-02T00:30:00Z" }, "time_anchors[0].utc"},
 		{"vision request not citing the intake", func(f *Facts, in refs) {
-			f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: cite(in.prompt, "prompt"), Question: "what does it show"}}
+			f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: &in.prompt, FileID: "prompt"}, Question: "what does it show"}}
 		}, "vision_requests[0].attachment.ref"},
 		{"vision request for an intake file", func(f *Facts, in refs) {
-			f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: cite(in.intake, "bundle"), Question: "what does it show"}}
+			f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: &in.intake, FileID: "bundle"}, Question: "what does it show"}}
 		}, ""},
 		{"locator into the raw issue", func(f *Facts, in refs) {
 			p := "/fields/customfield_1"
@@ -70,8 +71,27 @@ func TestCheckFactsAndFactCheck(t *testing.T) {
 		{"pointer into a text file", func(f *Facts, in refs) {
 			p := "/x"
 			f.Facts[0].Evidence = []Evidence{{Ref: &in.intake, FileID: "bundle", Locator: &Locator{Pointer: &p}}}
-		}, "not JSON"},
+		}, "not a single JSON document"},
 		{"blank anchor event", func(f *Facts, _ refs) { f.TimeAnchors[0].Event = "\u00a0" }, "event and source_tz"},
+		{"own fetched file with a locator", func(f *Facts, _ refs) {
+			p := "/fetched"
+			f.Facts[0].Evidence = []Evidence{{FileID: "fetched", Locator: &Locator{Pointer: &p}}}
+		}, ""},
+		{"own fetched file with a missing member", func(f *Facts, _ refs) {
+			p := "/other"
+			f.Facts[0].Evidence = []Evidence{{FileID: "fetched", Locator: &Locator{Pointer: &p}}}
+		}, `"/other" does not exist`},
+		{"byte range that overflows", func(f *Facts, in refs) {
+			f.Facts[0].Evidence = []Evidence{citeRange(in.intake, "bundle", 1<<62, 1<<62)}
+		}, "the cited file has"},
+		{"JSON lines cited by pointer", func(f *Facts, in refs) {
+			p := "/a"
+			f.Facts[0].Evidence = []Evidence{{Ref: &in.intake, FileID: "lines", Locator: &Locator{Pointer: &p}}}
+		}, "not a single JSON document"},
+		{"pointer with an invalid escape", func(f *Facts, in refs) {
+			p := "/fields/a~2b"
+			f.Facts[0].Evidence = []Evidence{{Ref: &in.intake, FileID: "issue", Locator: &Locator{Pointer: &p}}}
+		}, "not ~0 or ~1"},
 	} {
 		t.Run("facts/"+tc.name, func(t *testing.T) {
 			var err error
@@ -79,7 +99,7 @@ func TestCheckFactsAndFactCheck(t *testing.T) {
 				in := inputs(ctx, r)
 				f := baseFacts(in)
 				tc.change(&f, in)
-				ref := attach(ctx, r, "facts", FactsSchema, f, nil)
+				ref := attach(ctx, r, "facts", FactsSchema, f, map[string][]byte{"fetched": []byte(`{"fetched":true}`)})
 				_, err = checkFacts(ctx, r, ref, in.intake, in.prompt)
 				return nil
 			})
@@ -100,8 +120,15 @@ func TestCheckFactsAndFactCheck(t *testing.T) {
 		{"missing a verdict", func(c *FactCheck) { c.Items = c.Items[1:] }, "no verdict for tenant"},
 		{"verdict for an unknown id", func(c *FactCheck) { c.Items[0].ID = "other" }, `got "other"`},
 		{"two verdicts for one id", func(c *FactCheck) { c.Items[1].ID = c.Items[0].ID }, "already has a verdict"},
-		{"basis outside the inputs", func(c *FactCheck) { c.Items[0].Basis = []Evidence{{FileID: "nothing"}} }, "items[0].basis[0].file_id"},
-		{"warning citing the facts under review", func(c *FactCheck) {
+		{"basis outside the inputs", func(c *FactCheck) {
+			whole := ""
+			c.Items[0].Basis = []Evidence{{FileID: "nothing", Locator: &Locator{Pointer: &whole}}}
+		}, "items[0].basis[0].file_id"},
+		{"insufficient verdict", func(c *FactCheck) { c.Items[0].Verdict = "insufficient" }, ""},
+		{"warning citing the facts file under review", func(c *FactCheck) {
+			c.Warnings = []Warning{{Text: "the caller prompt and the ticket disagree", Basis: []Evidence{cite(c.Subject, "fetched")}}}
+		}, ""},
+		{"warning citing a file the facts do not declare", func(c *FactCheck) {
 			c.Warnings = []Warning{{Text: "the caller prompt and the ticket disagree", Basis: []Evidence{cite(c.Subject, "nothing")}}}
 		}, "warnings[0].basis[0].file_id"},
 		{"blank gap text", func(c *FactCheck) { c.Gaps = []Gap{{ID: "g", Text: "\u00a0"}} }, "gaps[0].text"},
@@ -111,7 +138,7 @@ func TestCheckFactsAndFactCheck(t *testing.T) {
 			report := runSkills(t, func(ctx context.Context, r *engine.Run) error {
 				in := inputs(ctx, r)
 				f := baseFacts(in)
-				factsRef := attach(ctx, r, "facts", FactsSchema, f, nil)
+				factsRef := attach(ctx, r, "facts", FactsSchema, f, map[string][]byte{"fetched": []byte(`{"fetched":true}`)})
 				c := FactCheck{Subject: factsRef, Warnings: []Warning{}, Gaps: []Gap{}}
 				for _, id := range judgedIDs(f) {
 					c.Items = append(c.Items, FactVerdict{ID: id, Verdict: "supported", Reason: "stated", Basis: []Evidence{cite(in.intake, "page-0")}})

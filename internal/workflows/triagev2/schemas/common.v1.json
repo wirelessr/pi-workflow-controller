@@ -192,7 +192,7 @@
           "maximum": 86400
         },
         "evidence": {
-          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence"
         },
         "paired_epoch_millis": {
           "anyOf": [
@@ -207,7 +207,7 @@
         "paired_evidence": {
           "anyOf": [
             {
-              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence"
             },
             {
               "type": "null"
@@ -297,7 +297,7 @@
                 "description": "Same-event absolute epoch millis; never null when format is local-paired"
               },
               "paired_evidence": {
-                "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
+                "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence",
                 "description": "Evidence of the paired absolute timestamp; never null when format is local-paired"
               }
             }
@@ -305,6 +305,19 @@
         }
       ],
       "description": "One observed incident timestamp with its UTC conversion; the Controller recomputes utc and offset_seconds from original"
+    },
+    "located_evidence": {
+      "allOf": [
+        {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+        },
+        {
+          "required": [
+            "locator"
+          ]
+        }
+      ],
+      "description": "Evidence with the place read: pointer \"\" cites a whole JSON document, offset 0 with the file size a whole other file"
     }
   }
 }

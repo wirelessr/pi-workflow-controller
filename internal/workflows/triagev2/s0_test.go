@@ -200,7 +200,15 @@ func intakeFiles() (Intake, map[string][]byte) {
 		Complete:    true, Gaps: []Gap{}}, files
 }
 
-func cite(ref contract.Ref, id string) Evidence { return Evidence{Ref: &ref, FileID: id} }
+// cite cites a whole JSON file; citeRange cites bytes of any file.
+func cite(ref contract.Ref, id string) Evidence {
+	whole := ""
+	return Evidence{Ref: &ref, FileID: id, Locator: &Locator{Pointer: &whole}}
+}
+
+func citeRange(ref contract.Ref, id string, offset, length int64) Evidence {
+	return Evidence{Ref: &ref, FileID: id, Locator: &Locator{Offset: &offset, Length: &length}}
+}
 
 func factsFor(call agentCall) Facts {
 	intake, prompt := call.citable("intake"), call.citable("caller prompt")
@@ -266,6 +274,10 @@ func decodeRef[T any](t *testing.T, r *engine.Run, ref contract.Ref) T {
 	return env.Data
 }
 
+// firstRound holds round 1's facts Ref, captured from the fact-check that
+// judged it.
+var firstRound struct{ facts contract.Ref }
+
 func TestS0(t *testing.T) {
 	inferredPop := func(id string) string {
 		if id == "pop" {
@@ -290,15 +302,24 @@ func TestS0(t *testing.T) {
 					return false
 				}
 				fb := call.Request.Feedback
-				if fb == nil || !strings.Contains(fb.Message, "pop (unsupported)") || len(fb.Refs) != 2 || fb.Refs[0].SchemaID != FactsSchema || fb.Refs[1].SchemaID != FactCheckSchema {
-					t.Errorf("retry feedback = %+v, want the rejected item and the facts and check Refs", fb)
+				if fb == nil || !strings.Contains(fb.Message, "pop (unsupported)") || len(fb.Refs) != 2 || fb.Refs[0] != firstRound.facts || fb.Refs[1].SchemaID != FactCheckSchema {
+					t.Fatalf("retry feedback = %+v, want the rejected item and round 1's exact facts and check Refs %+v", fb, firstRound)
+				}
+				if check := decodeRef[FactCheck](t, nil, fb.Refs[1]); check.Subject != firstRound.facts {
+					t.Errorf("retry feedback check judged %+v, not round 1's facts", check.Subject)
 				}
 				f := factsFor(call)
 				f.Facts = f.Facts[:2]
 				call.reply(t, f, nil)
 				return true
 			}},
-		{name: "a fact still rejected after the retries is absent with a gap", retries: 1, verdict: inferredPop, roles: "intake facts fact-check facts fact-check", gaps: "not-accepted-1:Item pop was judged unsupported "},
+		{name: "a fact still rejected after the retries is absent with a gap", retries: 1, verdict: inferredPop, roles: "intake facts fact-check facts fact-check", gaps: "not-accepted-pop:Item pop was judged unsupported "},
+		{name: "an undecidable fact is absent with a gap", retries: 0, verdict: func(id string) string {
+			if id == "orgkey" {
+				return "insufficient"
+			}
+			return "supported"
+		}, roles: "intake facts fact-check", gaps: "not-accepted-orgkey:Item orgkey was judged insuffici"},
 		{name: "missing identity and time are gaps, not failures", retries: 0, verdict: allSupported, roles: "intake facts fact-check",
 			agent: func(t *testing.T, call agentCall, round int) bool {
 				if call.Role != "facts" {
@@ -337,6 +358,7 @@ func TestS0(t *testing.T) {
 			var out S0
 			rounds := map[string]int{}
 			sessions := map[string][]string{}
+			defer func() { firstRound.facts = contract.Ref{} }()
 			res := runHarness(t, "CASE-17 pop=pop-a please check", s0Workflow(t, skills.source, &out, tc.retries), func(t *testing.T, call agentCall) string {
 				repair := call.Request.Feedback != nil && strings.HasPrefix(call.Request.Feedback.Message, "Previous contract")
 				if !repair {
@@ -354,6 +376,9 @@ func TestS0(t *testing.T) {
 					if strings.Join(labels, ",") != "intake,caller prompt,facts under review" || len(call.Request.Inputs) != 3 || call.Request.Feedback != nil {
 						t.Errorf("validator sees %v, %d inputs, feedback %v; want only the evidence and the facts", labels, len(call.Request.Inputs), call.Request.Feedback)
 					}
+				}
+				if call.Role == "fact-check" && rounds["fact-check"] == 1 {
+					firstRound.facts = call.citable("facts under review")
 				}
 				if tc.agent != nil && tc.agent(t, call, rounds[call.Role]) {
 					return ""
