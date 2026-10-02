@@ -30,6 +30,8 @@ go vet -p 1 ./...
 go build -p 1 ./...
 python3 -B testdata/live/review_test.py
 python3 -B testdata/ci/suite_test.py
+python3 -B testdata/ci/terms_test.py
+python3 -B testdata/ci/terms.py   # needs the private term list; SKIP is not a pass
 git diff --check
 
 RELEASE_DIR="/path/to/owned/release-dir"
@@ -191,7 +193,8 @@ PWC_LIVE_PI=1 go test -race -count=1 ./internal/engine \
 3. **檢查所有格式。** 包含 Markdown、Go tests、JSON、embedded skills/scripts/resources、hidden files、binary/archives；不只掃副檔名。不要執行未知 repo 程式碼來做安全掃描，也不把私有內容上傳外部 scanner。
 4. **檢查本地 links。** 對每份 Markdown 的相對路徑依文件所在目錄解析；確認檔案存在、anchors 有效，沒有已刪報告或私有備份回指。範例使用 placeholders／`github.com/owner/repo`，不使用真任務識別或版本 hash。
 5. **另查 Git history。** 工作樹乾淨不代表歷史安全；掃即將發布的所有可達 commits/branches/tags、path names 與 blobs，另查交付 archive 是否夾帶 `.git`、bundle、ignored binary/logs。若需移除私有歷史，先取得獨立授權並在 repo 外確認受限備份，不能只刪當前文件便宣稱歷史已清。
-6. **人工覆核與 release gate。** 對 scanner 命中逐項核對，無法確定即 blocked；確認無敏感資料、broken local links 或誤導性驗收宣稱再發布。安全 scan 不等於 tests/build/review 通過；每組單獨判定。
+6. **內部名詞 gate。** 公開 repo 不得含公司內部系統、架構、主機與環境名稱。詞表含這些名詞本身，因此只存 repo 外私有目錄（`$PWC_TRIAGE_SKILLS_DIR/denylist.txt`），不得複製進 repo。格式：`[hard]`／`[soft]` 分段，每行一個不分大小寫、以字詞邊界比對的 regex，`#` 開頭為註解；hard 命中即失敗，soft 命中列出供人工判斷。以 `python3 -B testdata/ci/terms.py` 掃 tracked 與未忽略的 untracked 檔案內容及路徑名，只輸出位置與詞表行號；找不到詞表時結果為 SKIP（exit 2），**不算通過**。CI 沒有詞表，只跑 `terms_test.py` 的匿名 parser／比對測試；實際 gate 在本機發布前執行。
+7. **人工覆核與 release gate。** 對 scanner 命中逐項核對，無法確定即 blocked；確認無敏感資料、broken local links 或誤導性驗收宣稱再發布。安全 scan 不等於 tests/build/review 通過；每組單獨判定。
 
 實際 scan finding、檔案 manifests、執行命令/輸出、日期、SHA 及稽核結果只寫 repo 外受限紀錄，不將本機報告、真實 traces/history/email 或私有備份位置加入 commit。若發現洩漏，不將原文複製到 issue/PR，依授權處理。
 

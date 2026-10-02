@@ -10,11 +10,10 @@
 |---|---|
 | `smoke-echo` | 將單行 Prompt 當資料，經 Pi 產出 JSON contract；committed Decode 必須精確符合輸入。只有 contract，沒有 Markdown artifact |
 | `code-review` | 固定 deep 靜態 PR review：Prepare、Code／Scale-Failure／Simplicity 平行審閱、獨立 Validation，交付結構化 contract 與繁中 Markdown report |
-| `jira-triage` | 以明列 Scope/request JSON 進行 intake/wiki/context、adaptive 調查、獨立三方驗證及固定報告收尾；交付繁中調查報告，不發布或生成 Jira/Slack drafts |
 
 `code-review` 只讀 pinned code／來源，不執行被審 repository 的 tests/build/scripts，不發 comments 或其他外部寫入。合法 `limited` report 可以是執行成功，但不代表 PR 全面通過；必要 reviewer 失敗不能 exit 0。模型、來源及失敗語義見 [CODE-REVIEW](docs/CODE-REVIEW.md)。
 
-`jira-triage` 的模型與初版數字集中在 `internal/workflows/triage/definition.go`，沒有外部 workflow config 或隱含模型 fallback。合法 incomplete report 可以 execution 成功，但不是 root cause confirmed；未恢復的必要 execution error 或提早 resource-limited 收尾仍非零。產品接線及匿名測試不代表真 Pi/provider、圖片理解、skills 或 live 容量已驗，詳 [JIRA-TRIAGE](docs/JIRA-TRIAGE.md)。
+`jira-triage` 目前未註冊：原 Planner 版未通過 alpha，正以 v2（固定階段 intake／facts、身分確認、調查 rounds、稽核與對抗驗證）改寫，完成前 `list` 不列出、`run jira-triage` 視為未知 workflow。舊實作暫留於 `internal/workflows/triage/` 供逐步搬移，其說明見 [JIRA-TRIAGE](docs/JIRA-TRIAGE.md)，不代表可執行能力。
 
 ## CI 與 coverage
 
@@ -51,16 +50,13 @@ pi-workflow-controller list
 pi-workflow-controller run <workflow> "一行 Prompt"
 pi-workflow-controller run smoke-echo "範例文字"
 pi-workflow-controller run code-review "https://github.com/owner/repo/pull/123"
-pi-workflow-controller run jira-triage '{"scope":{"ticket":"CASE-1","stack":"example","pop":"example","binding":"example-target","tenant_ids":["100"]},"request":"Investigate the anomaly and preserve uncertainty"}'
 ```
-
-Jira triage 的範例 Scope 值都是占位，執行前須替換為實際已授權範圍；`binding` 不是 credential。Scope 是 caller 授權邊界，不是已證實身份，`request` 原樣交給 intake、正常／fresh Planner 與報告。也可只給 ticket 做合法前置，但省略 target 不授權 runtime 查詢，缺項依原 prerequisites 保留；ticket/linked issue 不能擴權。JSON 必須是單一 shell argument；request 內換行以 JSON `\n` escape 表示。未知／重複／錯大小寫欄位、null／錯型及空白 request 拒絕，不猜輸入。
 
 不從 stdin 讀 Prompt，不接受 task naming、input-file 或 config flags。未知 workflow、空／多行／非法 UTF-8／超限 Prompt 在建立 task 或啟動 Pi 前拒絕。每個 Controller 執行一個 run，資料路徑由 Controller 自動產生並顯示：`~/WIP/<task-id>/runs/<run-id>/`。
 
 可用單次環境設定 `PWC_PI_CWD=/absolute/path/to/service pi-workflow-controller run ...` 指定 Pi 預設工作目錄。CLI 只在 `run` 讀此值並傳入 `engine.Options.PiDefaultCWD`；不新增 flags 或全域設定。優先序為 workflow 明設的 `Role.CWD` → 預設目錄 → 啟動 Controller 時的 `Input.LaunchCWD`。相對值在建立 Run 時依 LaunchCWD 固定；unset／空字串停用，不 trim 空白、不展開 `~`。僅選用的 default 含 NUL 時提前拒絕，explicit Role.CWD／fallback LaunchCWD 保留原 runtime 驗證與會計；不存在或非目錄在實際 spawn 時失敗，未使用的壞 default 不阻擋 explicit role，`list` 不使用此設定。
 
-Triage 採上述 fallback，讓正常 Pi 從所選 cwd 載入既有 AGENTS／skills；來源 repository 與 siblings 依任務要求唯讀。Scratch／downloads 仍寫 Run 的 `triage-work`，candidate／evidence／committed Refs 仍使用原 Step 的絕對 owned paths。Review 保留 explicit `review-work` 與 pinned `task.Worktree`，smoke 使用一般 fallback。這是 cwd／任務接線，不是阻止 Agent 寫入來源的 sandbox；也不改變 Input、discovery anchor 或 session ownership。
+Review 保留 explicit `review-work` 與 pinned `task.Worktree`，smoke 使用一般 fallback。這是 cwd／任務接線，不是阻止 Agent 寫入來源的 sandbox；也不改變 Input、discovery anchor 或 session ownership。
 
 **共享 discovery 安全前提：**啟動 persisted Pi 可能觸發 deployed WebUI 的 recovery。每次啟動或 resume 前，唯讀核對 deployed recovery 判準、discovery 的父 `pid`（不只 `piPid`）及 `.recovering`。可能 delete/resume 他人 stale session、父 process 不可確認或有異常 claim 時停止，不代清理。無 truthy pid 的 hub-state 類 JSON 僅按實際 recovery 規則略過。Controller 的共用 runtime 在每次 version probe 成功後、persisted child spawn 前執行程式化 preflight，涵蓋所有 workflow 的 Pi 啟動；它不能代替部署版本核對，也不涵蓋 Controller 外的手動 resume。**獨立 task 目錄不是 discovery 隔離，preflight 不是鎖。**請在受控時段執行。
 
@@ -121,7 +117,7 @@ NODE_TLS_REJECT_UNAUTHORIZED=1 pi --session "$SESSION"
 | [IMPLEMENTATION](IMPLEMENTATION.md) | 開發維護路線、責任分工與 source/tests 入口 |
 | [ADDING-A-WORKFLOW](docs/ADDING-A-WORKFLOW.md) | Workflow authoring、registry／skills／交付與清理 |
 | [CODE-REVIEW](docs/CODE-REVIEW.md) | 固定靜態 review 的業務設計 |
-| [JIRA-TRIAGE](docs/JIRA-TRIAGE.md) | 已註冊的調查 workflow／runtime 適配，沿用既有 AGENTS.md／hooks；匿名產品接線與未驗 live 邊界 |
+| [JIRA-TRIAGE](docs/JIRA-TRIAGE.md) | 未註冊的舊調查 workflow 設計（v2 改寫中，僅供搬移參考） |
 | [FINAL-DELIVERY](docs/FINAL-DELIVERY.md) | FinalSelection／FinalDelivery／result.json.final |
 | [VERIFICATION](docs/VERIFICATION.md) | 分組測試 gates、共享環境安全與發布 scan 方法 |
 

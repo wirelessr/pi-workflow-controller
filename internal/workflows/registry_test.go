@@ -27,17 +27,17 @@ func TestRegistryContainsSmokeAndCodeReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 3 || definitions[0].Name != "code-review" || definitions[1].Name != "jira-triage" || definitions[2].Name != "smoke-echo" {
+	if len(definitions) != 2 || definitions[0].Name != "code-review" || definitions[1].Name != "smoke-echo" {
 		t.Fatalf("unexpected product workflows: %+v", definitions)
 	}
 	if _, err := registry.Lookup("smoke-echo"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.Lookup("jira-triage"); err != nil {
-		t.Fatal(err)
+	if _, err := registry.Lookup("jira-triage"); err == nil {
+		t.Fatal("jira-triage is registered before its replacement is ready")
 	}
 	schemas, err := contract.NewRegistry(workflows.Resources(), workflows.Schemas())
-	if err != nil || !schemas.Has("smoke.echo.v1") || !schemas.Has("triage.report.v1") || !schemas.Has("triage.planner.v1") {
+	if err != nil || !schemas.Has("smoke.echo.v1") || schemas.Has("triage.report.v1") {
 		t.Fatalf("smoke schemas unavailable: %v", err)
 	}
 }

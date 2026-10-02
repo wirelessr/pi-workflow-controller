@@ -55,6 +55,7 @@ jobs:
         run: |
           python3 -B testdata/live/review_test.py
           python3 -B testdata/ci/suite_test.py
+          python3 -B testdata/ci/terms_test.py
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.11.4

@@ -128,6 +128,8 @@ R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入�
 
 ## 4. 後續 triage milestones 的依賴鎖
 
+> **現況：**以下 M1–M7 是舊版 Planner triage 的歷史接線，該 workflow 已自 registry 移除（未通過 alpha）。v2 以新 package 改寫，舊實作邊搬移邊刪除；v2 的共用項與相依於落地時更新本文件，下表不再是施工順序。
+
 R1–R4 的匿名驗收與 consumer 遷移完成後才啟動 M1，不因某個 helper 尚未共用就在 triage 寫私有替代品。Live 驗收是 M7 的獨立 gate，不阻止已授權的匿名實作，也不因匿名通過被解除。
 
 | Milestone | 前置完成項 | 必須重用 | 允許新增的業務內容／禁止重造 |

@@ -10,22 +10,21 @@ import (
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
 	"pi-workflow-controller/internal/workflows/review"
-	"pi-workflow-controller/internal/workflows/triage"
 )
 
 const echoSchema = "smoke.echo.v1"
 const echoURI = "https://pi-workflow-controller.local/schemas/smoke-echo.v1.json"
 
 func Resources() []contract.Resource {
-	return append(append([]contract.Resource{{URI: echoURI, JSON: json.RawMessage(`{"type":"object","required":["echo"],"additionalProperties":false,"properties":{"echo":{"type":"string"}}}`)}}, review.Resources()...), triage.Resources()...)
+	return append([]contract.Resource{{URI: echoURI, JSON: json.RawMessage(`{"type":"object","required":["echo"],"additionalProperties":false,"properties":{"echo":{"type":"string"}}}`)}}, review.Resources()...)
 }
 
 func Schemas() []contract.SchemaDefinition {
-	return append(append([]contract.SchemaDefinition{{ID: echoSchema, URI: echoURI}}, review.Schemas()...), triage.Schemas()...)
+	return append([]contract.SchemaDefinition{{ID: echoSchema, URI: echoURI}}, review.Schemas()...)
 }
 
 func Definitions() []engine.Definition {
-	return []engine.Definition{{Name: "smoke-echo", Description: "Echo a one-line prompt through Pi and publish a verified contract", Version: "1", Policy: engine.DefaultRunPolicy(), Execute: smokeEcho}, review.Definition(), triage.Definition()}
+	return []engine.Definition{{Name: "smoke-echo", Description: "Echo a one-line prompt through Pi and publish a verified contract", Version: "1", Policy: engine.DefaultRunPolicy(), Execute: smokeEcho}, review.Definition()}
 }
 
 func smokeEcho(ctx context.Context, run *engine.Run, input engine.Input) (engine.Result, error) {

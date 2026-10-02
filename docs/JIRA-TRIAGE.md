@@ -1,5 +1,7 @@
 # Jira triage：workflow 與執行期適配
 
+> **現況：本文件描述的舊版 Planner workflow 已自 registry 移除，不可執行。** 它未通過 alpha，正以 v2 改寫並逐步搬移、刪除舊實作；v2 註冊時本文件將以新設計重寫。以下內容只作為搬移時的舊行為參考，不是現行能力宣稱。
+
 `jira-triage` 已透過既有 Definition／registry／CLI 接入 intake → wiki → context、局部補缺與 revision、Planner adaptive 調查、獨立三方驗證及固定報告收尾。保留 deadline、context usage、checkpoint／handoff、typed recovery、report reserve 與 cleanup。產品接線已有匿名 engine/Store/RPC 驗收；**未完成真 Pi／provider／production、模型技能、圖片理解或 live 容量驗收**。
 
 ## 責任邊界
