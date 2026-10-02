@@ -128,7 +128,7 @@ R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入�
 
 ## 4. 後續 triage milestones 的依賴鎖
 
-> **現況：**以下 M1–M7 是舊版 Planner triage 的歷史接線，該 workflow 已自 registry 移除（未通過 alpha）。v2 以新 package 改寫，舊實作邊搬移邊刪除；v2 的共用項與相依於落地時更新本文件，下表不再是施工順序。目前 `internal/workflows/triagev2` 已承接 typed recovery（`Recoverable`、`ConfirmTaskRecovery`、`RetryInputs` 等）與 fresh-session task Step（`RunTaskStep`／`CloseTaskStep`），錯誤字串不變；仍存在的舊碼暫時 import 它們，不另留副本。外部 skill 目錄的展開（`triagev2.PrepareSkills`）以 `contract.ReadStable`（Store 既有的 no-symlink／regular-file／NONBLOCK／大小上限／讀取期間穩定檢查，僅新增匯出）讀入記憶體，再交給既有 `reportresource.ExtractFresh`；`ExtractFresh` 本身與其 embed consumers 不變。`runtime/preflight.go` 的 discovery 讀取不遷移：它在 runtime 層（不 import contract）、讀的是他人 process 寫的 discovery 檔，只做唯讀判斷，政策是最後一段 NOFOLLOW、1 MiB、不需要讀取期間穩定檢查，與 run 內複製的信任邊界不同。
+> **現況：**以下 M1–M7 是舊版 Planner triage 的歷史接線，該 workflow 已自 registry 移除（未通過 alpha）。v2 以新 package 改寫，舊實作邊搬移邊刪除；v2 的共用項與相依於落地時更新本文件，下表不再是施工順序。目前 `internal/workflows/triagev2` 已承接 typed recovery（`Recoverable`、`ConfirmTaskRecovery`、`RetryInputs` 等）與 fresh-session task Step（`RunTaskStep`／`CloseTaskStep`），錯誤字串不變；仍存在的舊碼暫時 import 它們，不另留副本。外部 skill 目錄的展開（`triagev2.PrepareSkills`）以 `contract.ReadStable`（Store 既有的 no-symlink／regular-file／NONBLOCK／大小上限／讀取期間穩定檢查，僅新增匯出）讀入記憶體，再交給既有 `reportresource.ExtractFresh`（只展開六個角色子樹，略過 `.` 開頭的項目，每個角色必須有 `SKILL.md`；讀來源與比對上游各有期限，前者逾時為執行失敗，後者逾時記為未檢查的缺口）；`ExtractFresh` 本身與其 embed consumers 不變。`runtime/preflight.go` 的 discovery 讀取不遷移：它在 runtime 層（不 import contract）、讀的是他人 process 寫的 discovery 檔，只做唯讀判斷，政策是最後一段 NOFOLLOW、1 MiB、不需要讀取期間穩定檢查，與 run 內複製的信任邊界不同。
 
 R1–R4 的匿名驗收與 consumer 遷移完成後才啟動 M1，不因某個 helper 尚未共用就在 triage 寫私有替代品。Live 驗收是 M7 的獨立 gate，不阻止已授權的匿名實作，也不因匿名通過被解除。
 

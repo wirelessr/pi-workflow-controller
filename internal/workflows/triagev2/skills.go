@@ -9,13 +9,14 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing/fstest"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/contract/reportresource"
@@ -30,38 +31,42 @@ const SkillsSchema = "triage.skills.v1"
 var skillDirs = []string{"core", "intake", "identity", "investigator", "steward", "validator"}
 
 const (
-	skillFileLimit     = 1 << 20
-	skillTotalLimit    = 8 << 20
-	skillFileCount     = 128
-	upstreamFileLimit  = 4 << 20
-	manifestLimit      = 1 << 20
-	manifestSchema     = "pwc-triage-skills/manifest/v1"
-	skillReadTimeout   = time.Minute
-	skillsExtractName  = "triage-skills"
-	staleGapID         = "derived-skills-stale"
-	uncheckedGapID     = "derived-skills-staleness-unchecked"
-	stalenessCurrent   = "current"
-	stalenessStale     = "stale"
-	stalenessUnchecked = "unchecked"
+	skillFileLimit    = 1 << 20
+	skillTotalLimit   = 8 << 20
+	skillFileCount    = 128
+	manifestSchema    = "pwc-triage-skills/manifest/v1"
+	skillsExtractName = "triage-skills"
+	staleGapID        = "derived-skills-stale"
+	uncheckedGapID    = "derived-skills-staleness-unchecked"
+	gapPathLimit      = 20
+)
+
+// Deadlines and the directory opener are variables only so tests can
+// shorten them and simulate a blocking filesystem.
+var (
+	skillReadTimeout    = time.Minute
+	upstreamReadTimeout = 30 * time.Second
+	openRoot            = os.OpenRoot
 )
 
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// Skills is the run-owned expansion of the private skill directory.
+// Skills is the run-owned expansion of the private skill directory. Record
+// is the committed Controller record; branch on it, not on local state.
 type Skills struct {
-	Dir       string
-	Record    contract.Ref
-	Staleness string
+	Dir    string
+	Record contract.Ref
 }
 
 // Entry is the absolute SKILL.md path a Step request names for a role.
 func (s Skills) Entry(role string) string { return filepath.Join(s.Dir, role, "SKILL.md") }
 
+// SkillsRecord lists the expanded files and their digest, so a run's skill
+// version can be compared with another run's. Staleness appears only as gaps.
 type SkillsRecord struct {
-	Digest    string      `json:"digest"`
-	Files     []SkillFile `json:"files"`
-	Staleness string      `json:"staleness"`
-	Gaps      []Gap       `json:"gaps"`
+	Digest string      `json:"digest"`
+	Files  []SkillFile `json:"files"`
+	Gaps   []Gap       `json:"gaps"`
 }
 
 type SkillFile struct {
@@ -71,10 +76,10 @@ type SkillFile struct {
 
 // PrepareSkills copies the allow-listed skill subtrees of source into the
 // run, compares the manifest's upstream hashes with the current upstream
-// files, and commits a Controller record of the expanded set and the result.
-// Staleness never blocks the run; an unreadable or malformed source does.
-// The Controller copies files and digests bytes only; it never interprets
-// skill text.
+// files, and commits a Controller record of the expanded set and any
+// staleness gap. Staleness never blocks the run; an unreadable, slow,
+// malformed or incomplete source does. The Controller copies and digests
+// bytes only; it never interprets skill text.
 func PrepareSkills(ctx context.Context, r *engine.Run, scope *engine.Scope, source string) (Skills, error) {
 	if source == "" {
 		return Skills{}, errors.New("PWC_TRIAGE_SKILLS_DIR is not set: the triage workflow needs its private skill directory")
@@ -82,24 +87,35 @@ func PrepareSkills(ctx context.Context, r *engine.Run, scope *engine.Scope, sour
 	if !filepath.IsAbs(source) {
 		return Skills{}, fmt.Errorf("PWC_TRIAGE_SKILLS_DIR must be an absolute path, got %q", source)
 	}
-	read, err := readSkills(ctx, source)
+	read, err := abandonable(ctx, skillReadTimeout, fmt.Errorf("reading the skill directory took longer than %s (a cloud placeholder may not be downloaded; use a local copy)", skillReadTimeout), func(ctx context.Context) (skillSource, error) {
+		return readSkillSource(ctx, source)
+	})
+	if err != nil {
+		return Skills{}, err
+	}
+	files := read.files
+	upstream, err := parseManifest(read.manifest)
+	if err != nil {
+		return Skills{}, err
+	}
+	gaps, err := checkUpstream(ctx, upstream)
 	if err != nil {
 		return Skills{}, err
 	}
 	tree := fstest.MapFS{}
-	record := SkillsRecord{Files: []SkillFile{}, Staleness: read.staleness, Gaps: read.gaps}
+	record := SkillsRecord{Files: []SkillFile{}, Gaps: gaps}
 	var lines strings.Builder
-	names := make([]string, 0, len(read.files))
-	for name := range read.files {
+	names := make([]string, 0, len(files))
+	for name := range files {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		sum := sha256.Sum256(read.files[name])
+		sum := sha256.Sum256(files[name])
 		file := SkillFile{Path: name, SHA256: hex.EncodeToString(sum[:])}
 		record.Files = append(record.Files, file)
 		fmt.Fprintf(&lines, "%s  %s\n", file.SHA256, file.Path)
-		tree[name] = &fstest.MapFile{Data: read.files[name], Mode: 0600}
+		tree[name] = &fstest.MapFile{Data: files[name]}
 	}
 	sum := sha256.Sum256([]byte(lines.String()))
 	record.Digest = hex.EncodeToString(sum[:])
@@ -111,181 +127,219 @@ func PrepareSkills(ctx context.Context, r *engine.Run, scope *engine.Scope, sour
 	if err != nil {
 		return Skills{}, err
 	}
-	return Skills{Dir: dir, Record: ref, Staleness: read.staleness}, nil
+	return Skills{Dir: dir, Record: ref}, nil
 }
 
 type skillSource struct {
-	files     map[string][]byte
-	staleness string
-	gaps      []Gap
+	files    map[string][]byte
+	manifest []byte
 }
 
-// readSkills bounds the whole read. A directory on a synced cloud drive can
-// block in open or read on a placeholder that is not downloaded, which no
-// context check interrupts, so the read runs on its own goroutine and is
-// abandoned at the deadline; that goroutine may outlive the run.
-func readSkills(ctx context.Context, source string) (skillSource, error) {
-	ctx, cancel := context.WithTimeoutCause(ctx, skillReadTimeout, fmt.Errorf("reading the skill directory took longer than %s (a cloud placeholder may not be downloaded; use a local copy)", skillReadTimeout))
+// abandonable bounds read. A directory on a synced cloud drive can block in
+// open or read on a placeholder that is not downloaded, which no context
+// check interrupts, so read runs on its own goroutine and is abandoned at the
+// deadline. That goroutine only reads, never touches the run, and exits when
+// its blocked call returns; it may outlive the run.
+func abandonable[T any](ctx context.Context, timeout time.Duration, cause error, read func(context.Context) (T, error)) (T, error) {
+	ctx, cancel := context.WithTimeoutCause(ctx, timeout, cause)
 	defer cancel()
 	type result struct {
-		source skillSource
-		err    error
+		value T
+		err   error
 	}
 	done := make(chan result, 1)
 	go func() {
-		s, err := readSkillSource(ctx, source)
-		done <- result{s, err}
+		v, err := read(ctx)
+		done <- result{v, err}
 	}()
 	select {
 	case r := <-done:
-		return r.source, r.err
+		return r.value, r.err
 	case <-ctx.Done():
-		return skillSource{}, context.Cause(ctx)
+		var zero T
+		return zero, context.Cause(ctx)
 	}
 }
 
 func readSkillSource(ctx context.Context, source string) (skillSource, error) {
-	root, err := os.OpenRoot(source)
+	root, err := openRoot(source)
 	if err != nil {
 		return skillSource{}, fmt.Errorf("open skill directory: %w", err)
 	}
 	defer func() { _ = root.Close() }()
-	s := skillSource{files: map[string][]byte{}}
+	files := map[string][]byte{}
 	var total int64
 	for _, dir := range skillDirs {
-		if err := readSkillTree(ctx, root, dir, s.files, &total); err != nil {
-			return skillSource{}, err
+		// WalkDir follows a symlinked start directory, so check it first.
+		info, err := root.Lstat(dir)
+		if err != nil {
+			return skillSource{}, fmt.Errorf("skill directory %s: %w", dir, err)
 		}
-	}
-	raw, err := contract.ReadStable(ctx, root, "manifest.json", manifestLimit)
-	if err != nil {
-		return skillSource{}, fmt.Errorf("read skill manifest.json: %w", err)
-	}
-	s.staleness, s.gaps, err = checkUpstream(ctx, raw)
-	return s, err
-}
-
-func readSkillTree(ctx context.Context, root *os.Root, dir string, files map[string][]byte, total *int64) error {
-	info, err := root.Lstat(dir)
-	if err != nil {
-		return fmt.Errorf("skill directory %s: %w", dir, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("skill entry %s is not a directory", dir)
-	}
-	f, err := root.Open(dir)
-	if err != nil {
-		return fmt.Errorf("skill directory %s: %w", dir, err)
-	}
-	entries, err := f.ReadDir(-1)
-	err = errors.Join(err, f.Close())
-	if err != nil {
-		return fmt.Errorf("skill directory %s: %w", dir, err)
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	for _, entry := range entries {
-		if err := context.Cause(ctx); err != nil {
-			return err
+		if !info.IsDir() {
+			return skillSource{}, fmt.Errorf("skill entry %s is not a directory", dir)
 		}
-		name := path.Join(dir, entry.Name())
-		// Editor and sync clients leave dot files; they are not skill content.
-		if strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		switch {
-		case entry.IsDir():
-			if err := readSkillTree(ctx, root, name, files, total); err != nil {
+		err = fs.WalkDir(root.FS(), dir, func(name string, entry fs.DirEntry, err error) error {
+			if err != nil {
 				return err
 			}
-		case entry.Type().IsRegular():
-			if len(files) >= skillFileCount {
+			if cause := context.Cause(ctx); cause != nil {
+				return cause
+			}
+			// Editor and sync clients leave dot files; they are not skill content.
+			if name != dir && strings.HasPrefix(entry.Name(), ".") {
+				if entry.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if !utf8.ValidString(name) || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+				return fmt.Errorf("skill entry %q has a name that is not printable UTF-8", name)
+			}
+			switch {
+			case entry.IsDir():
+				return nil
+			case !entry.Type().IsRegular():
+				return fmt.Errorf("skill entry %s is not a regular file or directory (%s)", name, entry.Type())
+			case len(files) >= skillFileCount:
 				return fmt.Errorf("skill directory has more than %d files", skillFileCount)
 			}
 			raw, err := contract.ReadStable(ctx, root, filepath.FromSlash(name), skillFileLimit)
 			if err != nil {
 				return fmt.Errorf("skill file %s: %w", name, err)
 			}
-			if *total += int64(len(raw)); *total > skillTotalLimit {
+			if total += int64(len(raw)); total > skillTotalLimit {
 				return fmt.Errorf("skill files exceed %d bytes", skillTotalLimit)
 			}
 			files[name] = raw
-		default:
-			return fmt.Errorf("skill entry %s is not a regular file or directory (%s)", name, entry.Type())
+			return nil
+		})
+		if err != nil {
+			return skillSource{}, err
+		}
+		if _, ok := files[dir+"/SKILL.md"]; !ok {
+			return skillSource{}, fmt.Errorf("skill directory %s has no SKILL.md", dir)
 		}
 	}
-	return nil
+	manifest, err := contract.ReadStable(ctx, root, "manifest.json", skillFileLimit)
+	if err != nil {
+		return skillSource{}, fmt.Errorf("read skill manifest.json: %w", err)
+	}
+	return skillSource{files, manifest}, nil
 }
 
-// checkUpstream reads only the manifest fields the Controller contract
-// names: schema, upstream_root, upstream[].path and upstream[].sha256.
-func checkUpstream(ctx context.Context, raw []byte) (string, []Gap, error) {
-	var m struct {
-		Schema       string `json:"schema"`
-		UpstreamRoot string `json:"upstream_root"`
-		Upstream     []struct {
-			Path   string `json:"path"`
-			SHA256 string `json:"sha256"`
-		} `json:"upstream"`
+type upstreamFiles struct {
+	root  string
+	paths []string
+	sums  []string
+}
+
+// parseManifest reads only the fields the Controller contract names, by
+// exact key: schema, upstream_root, upstream[].path and upstream[].sha256.
+func parseManifest(raw []byte) (upstreamFiles, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return upstreamFiles{}, fmt.Errorf("skill manifest.json: %w", err)
 	}
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return "", nil, fmt.Errorf("skill manifest.json: %w", err)
+	var schema, root string
+	var entries []map[string]json.RawMessage
+	for key, target := range map[string]any{"schema": &schema, "upstream_root": &root, "upstream": &entries} {
+		if err := json.Unmarshal(top[key], target); err != nil {
+			return upstreamFiles{}, fmt.Errorf("skill manifest.json: field %s: %w", key, err)
+		}
 	}
-	if m.Schema != manifestSchema {
-		return "", nil, fmt.Errorf("skill manifest.json: schema %q, want %q", m.Schema, manifestSchema)
+	if schema != manifestSchema {
+		return upstreamFiles{}, fmt.Errorf("skill manifest.json: schema %q, want %q", schema, manifestSchema)
 	}
-	upstream := m.UpstreamRoot
-	if rest, ok := strings.CutPrefix(upstream, "~/"); ok {
+	if len(entries) == 0 {
+		return upstreamFiles{}, errors.New("skill manifest.json: upstream is empty")
+	}
+	u := upstreamFiles{root: root}
+	seen := map[string]bool{}
+	for i, entry := range entries {
+		var path, sum string
+		if json.Unmarshal(entry["path"], &path) != nil || !fs.ValidPath(path) || path == "." {
+			return upstreamFiles{}, fmt.Errorf("skill manifest.json: upstream[%d].path must be a slash-separated relative path without .. segments", i)
+		}
+		if json.Unmarshal(entry["sha256"], &sum) != nil || !sha256Hex.MatchString(sum) {
+			return upstreamFiles{}, fmt.Errorf("skill manifest.json: upstream[%d].sha256 must be 64 lowercase hex characters", i)
+		}
+		if seen[path] {
+			return upstreamFiles{}, fmt.Errorf("skill manifest.json: upstream[%d].path %q is listed twice", i, path)
+		}
+		seen[path] = true
+		u.paths, u.sums = append(u.paths, path), append(u.sums, sum)
+	}
+	if !strings.HasPrefix(root, "~/") && !filepath.IsAbs(root) {
+		return upstreamFiles{}, fmt.Errorf("skill manifest.json: upstream_root %q is not absolute or ~/-relative", root)
+	}
+	return u, nil
+}
+
+// checkUpstream compares hashes and existence only. Anything that keeps the
+// comparison from running (another machine, no HOME, unreadable or slow
+// files) is recorded as an unchecked gap; it never fails the run.
+func checkUpstream(ctx context.Context, u upstreamFiles) ([]Gap, error) {
+	unchecked := func(reason string) []Gap {
+		return []Gap{{ID: uncheckedGapID, Text: "The derived skills were not checked for staleness: " + reason}}
+	}
+	root := u.root
+	if rest, ok := strings.CutPrefix(root, "~/"); ok {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "", nil, fmt.Errorf("skill manifest.json upstream_root: %w", err)
+			return unchecked("the home directory is unknown, so the ~/ upstream root cannot be resolved."), nil
 		}
-		upstream = filepath.Join(home, rest)
+		root = filepath.Join(home, rest)
 	}
-	if !filepath.IsAbs(upstream) {
-		return "", nil, fmt.Errorf("skill manifest.json: upstream_root %q is not absolute or ~/-relative", m.UpstreamRoot)
-	}
-	if len(m.Upstream) == 0 {
-		return "", nil, errors.New("skill manifest.json: upstream is empty")
-	}
-	for i, u := range m.Upstream {
-		if !fs.ValidPath(u.Path) || u.Path == "." {
-			return "", nil, fmt.Errorf("skill manifest.json: upstream[%d].path %q must be a slash-separated relative path without .. segments", i, u.Path)
-		}
-		if !sha256Hex.MatchString(u.SHA256) {
-			return "", nil, fmt.Errorf("skill manifest.json: upstream[%d].sha256 is not 64 lowercase hex characters", i)
-		}
-	}
-	root, err := os.OpenRoot(upstream)
-	if err != nil {
-		return stalenessUnchecked, []Gap{{ID: uncheckedGapID, Text: "The upstream skill directory is not readable on this machine, so the derived skills were not checked for staleness."}}, nil
-	}
-	defer func() { _ = root.Close() }()
-	var changed, unreadable []string
-	for _, u := range m.Upstream {
-		current, err := contract.ReadStable(ctx, root, filepath.FromSlash(u.Path), upstreamFileLimit)
-		if err := context.Cause(ctx); err != nil {
-			return "", nil, err
-		}
+	type result struct{ changed, unreadable []string }
+	r, err := abandonable(ctx, upstreamReadTimeout, errors.New("upstream read timed out"), func(ctx context.Context) (result, error) {
+		var r result
+		dir, err := openRoot(root)
 		if err != nil {
-			unreadable = append(unreadable, u.Path)
-			continue
+			return r, errUpstreamRoot
 		}
-		if sum := sha256.Sum256(current); hex.EncodeToString(sum[:]) != u.SHA256 {
-			changed = append(changed, u.Path)
+		defer func() { _ = dir.Close() }()
+		for i, path := range u.paths {
+			current, err := contract.ReadStable(ctx, dir, filepath.FromSlash(path), skillFileLimit)
+			if cause := context.Cause(ctx); cause != nil {
+				return r, cause
+			}
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+				r.changed = append(r.changed, path+" (removed)")
+			case err != nil:
+				r.unreadable = append(r.unreadable, path+" ("+err.Error()+")")
+			case sha256Sum(current) != u.sums[i]:
+				r.changed = append(r.changed, path)
+			}
 		}
+		return r, nil
+	})
+	if cause := context.Cause(ctx); cause != nil {
+		return nil, cause
 	}
-	var gaps []Gap
-	staleness := stalenessCurrent
-	if len(unreadable) > 0 {
-		staleness = stalenessUnchecked
-		gaps = append(gaps, Gap{ID: uncheckedGapID, Text: "These upstream skill files could not be read, so the derived skills were not checked against them: " + strings.Join(unreadable, ", ")})
+	switch {
+	case errors.Is(err, errUpstreamRoot):
+		return unchecked("the upstream skill directory is not readable on this machine."), nil
+	case err != nil:
+		return unchecked(fmt.Sprintf("reading the upstream skill files took longer than %s.", upstreamReadTimeout)), nil
 	}
-	if len(changed) > 0 {
-		staleness = stalenessStale
-		gaps = append(gaps, Gap{ID: staleGapID, Text: "The derived skills may be stale: these upstream skill files changed since they were derived: " + strings.Join(changed, ", ")})
+	gaps := []Gap{}
+	if len(r.unreadable) > 0 {
+		gaps = append(gaps, unchecked("these upstream skill files could not be read: " + listPaths(r.unreadable))[0])
 	}
-	if gaps == nil {
-		gaps = []Gap{}
+	if len(r.changed) > 0 {
+		gaps = append(gaps, Gap{ID: staleGapID, Text: "The derived skills may be stale: these upstream skill files changed since they were derived: " + listPaths(r.changed)})
 	}
-	return staleness, gaps, nil
+	return gaps, nil
+}
+
+var errUpstreamRoot = errors.New("upstream root not readable")
+
+func sha256Sum(raw []byte) string { s := sha256.Sum256(raw); return hex.EncodeToString(s[:]) }
+
+func listPaths(paths []string) string {
+	if len(paths) > gapPathLimit {
+		return strings.Join(paths[:gapPathLimit], ", ") + fmt.Sprintf(" and %d more", len(paths)-gapPathLimit)
+	}
+	return strings.Join(paths, ", ")
 }

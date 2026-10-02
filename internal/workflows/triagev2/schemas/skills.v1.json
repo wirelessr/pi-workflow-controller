@@ -1,26 +1,47 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pi-workflow-controller.local/schemas/triage/skills.v1.json",
-  "description": "Controller record of the workflow skills expanded for this run and of their upstream staleness check",
+  "description": "Controller record of the workflow skills expanded for this run; upstream staleness appears only as gaps",
   "type": "object",
   "additionalProperties": false,
-  "required": ["digest", "files", "staleness", "gaps"],
+  "required": [
+    "digest",
+    "files",
+    "gaps"
+  ],
   "properties": {
-    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256 of the sorted \"<sha256>  <path>\\n\" lines of files"},
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 of the sorted \"<sha256>  <path>\\n\" lines of files"
+    },
     "files": {
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "sha256"],
+        "required": [
+          "path",
+          "sha256"
+        ],
         "properties": {
-          "path": {"type": "string", "minLength": 1},
-          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
         }
       }
     },
-    "staleness": {"enum": ["current", "stale", "unchecked"]},
-    "gaps": {"type": "array", "items": {"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"}}
+    "gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"
+      }
+    }
   }
 }

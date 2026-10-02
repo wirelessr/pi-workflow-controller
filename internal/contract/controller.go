@@ -40,7 +40,13 @@ func (s *Store) controllerEntries(id Identity, data json.RawMessage, files []Con
 	var total int64
 	for _, f := range files {
 		dir, name := filepath.Split(f.Path)
-		kind := map[string]string{"evidence/": "evidence", "artifacts/": "artifact"}[dir]
+		var kind string
+		switch dir {
+		case "evidence/":
+			kind = "evidence"
+		case "artifacts/":
+			kind = "artifact"
+		}
 		if kind == "" || name == "" || name == "." || name == ".." || len(name) > 255 || !utf8.ValidString(name) || strings.ContainsAny(name, "/\\\x00") {
 			return nil, failure(InvalidDefinition, "controller-candidate", id, fmt.Errorf("invalid controller file path %q", f.Path))
 		}
@@ -113,6 +119,12 @@ func (a *Attempt) WriteControllerCandidate(data json.RawMessage, files []Control
 		e := writeExclusive(s.root, path, f.Data, s.syncFile)
 		if e == nil || !errors.Is(e, os.ErrExist) {
 			written = append(written, path)
+		}
+		if errors.Is(e, os.ErrExist) {
+			// The attempt directory is fresh, so only another of these names
+			// can exist: a collision the case fold above cannot see (for
+			// example Unicode normalization), not a storage fault.
+			return failure(InvalidDefinition, "controller-candidate", a.id, fmt.Errorf("controller file path %q collides with another controller file", f.Path))
 		}
 		if e != nil {
 			return failure(StorageFailed, "controller-candidate", a.id, e)

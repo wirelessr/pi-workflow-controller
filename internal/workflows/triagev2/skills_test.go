@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
@@ -103,7 +105,7 @@ func TestPrepareSkills(t *testing.T) {
 	if report.Outcome != engine.Succeeded {
 		t.Fatalf("outcome = %s: %v", report.Outcome, report.Failure)
 	}
-	if !attached || skills.Staleness != stalenessCurrent || record.Staleness != stalenessCurrent || len(record.Gaps) != 0 {
+	if !attached || len(record.Gaps) != 0 {
 		t.Fatalf("skills = %+v record = %+v attached=%t", skills, record, attached)
 	}
 	if skills.Dir != filepath.Join(runDir, skillsExtractName) || skills.Entry("steward") != filepath.Join(skills.Dir, "steward", "SKILL.md") {
@@ -132,37 +134,52 @@ func TestPrepareSkills(t *testing.T) {
 
 func TestPrepareSkillsStaleness(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		change    func(*testing.T, skillFixture)
-		staleness string
-		gapIDs    string
+		name   string
+		change func(*testing.T, skillFixture)
+		gapIDs string
+		text   string
 	}{
 		{"upstream changed", func(t *testing.T, f skillFixture) {
 			if err := os.WriteFile(filepath.Join(f.upstream, "work", "rules", "SKILL.md"), []byte("upstream rules v2\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
-		}, stalenessStale, staleGapID},
-		{"upstream root absent on this machine", func(t *testing.T, f skillFixture) {
-			f.writeManifest(t, filepath.Join(f.upstream, "elsewhere"), sha(f.upstreamFile))
-		}, stalenessUnchecked, uncheckedGapID},
-		{"upstream file missing", func(t *testing.T, f skillFixture) {
+		}, staleGapID, "work/rules/SKILL.md"},
+		{"upstream file removed", func(t *testing.T, f skillFixture) {
 			if err := os.Remove(filepath.Join(f.upstream, "work", "rules", "SKILL.md")); err != nil {
 				t.Fatal(err)
 			}
-		}, stalenessUnchecked, uncheckedGapID},
+		}, staleGapID, "work/rules/SKILL.md (removed)"},
+		{"upstream file unreadable", func(t *testing.T, f skillFixture) {
+			path := filepath.Join(f.upstream, "work", "rules", "SKILL.md")
+			if err := os.Rename(path, path+".real"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(path+".real", path); err != nil {
+				t.Fatal(err)
+			}
+		}, uncheckedGapID, "work/rules/SKILL.md ("},
+		{"upstream root absent on this machine", func(t *testing.T, f skillFixture) {
+			f.writeManifest(t, filepath.Join(f.upstream, "elsewhere"), sha(f.upstreamFile))
+		}, uncheckedGapID, "not readable on this machine"},
 		{"home-relative upstream root", func(t *testing.T, f skillFixture) {
 			t.Setenv("HOME", filepath.Dir(f.upstream))
 			f.writeManifest(t, "~/"+filepath.Base(f.upstream), sha(f.upstreamFile))
-		}, stalenessCurrent, ""},
+		}, "", ""},
+		{"home unknown", func(t *testing.T, f skillFixture) {
+			t.Setenv("HOME", "")
+			f.writeManifest(t, "~/"+filepath.Base(f.upstream), sha(f.upstreamFile))
+		}, uncheckedGapID, "home directory is unknown"},
+		{"upstream read too slow", func(t *testing.T, f skillFixture) {
+			blockOpen(t, f.upstream, &upstreamReadTimeout)
+		}, uncheckedGapID, "took longer than"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSkillFixture(t)
 			tc.change(t, f)
-			var skills Skills
 			var record SkillsRecord
 			report := runSkills(t, func(ctx context.Context, r *engine.Run) error {
-				var err error
-				if skills, err = PrepareSkills(ctx, r, r.Root(), f.source); err != nil {
+				skills, err := PrepareSkills(ctx, r, r.Root(), f.source)
+				if err != nil {
 					return err
 				}
 				record, err = engine.Decode[SkillsRecord](ctx, r, skills.Record)
@@ -171,15 +188,34 @@ func TestPrepareSkillsStaleness(t *testing.T) {
 			if report.Outcome != engine.Succeeded {
 				t.Fatalf("staleness blocked the run: %v", report.Failure)
 			}
-			var ids []string
+			var ids, texts []string
 			for _, g := range record.Gaps {
-				ids = append(ids, g.ID)
+				ids, texts = append(ids, g.ID), append(texts, g.Text)
 			}
-			if skills.Staleness != tc.staleness || record.Staleness != tc.staleness || strings.Join(ids, ",") != tc.gapIDs {
-				t.Fatalf("staleness = %s/%s gaps = %+v, want %s %s", skills.Staleness, record.Staleness, record.Gaps, tc.staleness, tc.gapIDs)
+			if strings.Join(ids, ",") != tc.gapIDs || !strings.Contains(strings.Join(texts, "\n"), tc.text) {
+				t.Fatalf("gaps = %+v, want ids %q mentioning %q", record.Gaps, tc.gapIDs, tc.text)
 			}
 		})
 	}
+}
+
+// blockOpen makes opening dir block until the test ends, as a cloud
+// placeholder can, and shortens the deadline that bounds it.
+func blockOpen(t *testing.T, dir string, timeout *time.Duration) {
+	t.Helper()
+	release, returned := make(chan struct{}), make(chan struct{})
+	open, old := openRoot, *timeout
+	openRoot = func(name string) (*os.Root, error) {
+		if name == dir {
+			defer close(returned)
+			<-release
+		}
+		return open(name)
+	}
+	*timeout = 50 * time.Millisecond
+	// The abandoned reader holds the replaced opener until released; each
+	// caller opens dir exactly once.
+	t.Cleanup(func() { close(release); <-returned; openRoot, *timeout = open, old })
 }
 
 func TestPrepareSkillsRejectsUnsafeSources(t *testing.T) {
@@ -243,6 +279,38 @@ func TestPrepareSkillsRejectsUnsafeSources(t *testing.T) {
 			}
 			return f.source
 		}, "must be a slash-separated relative path"},
+		{"role without SKILL.md", func(t *testing.T, f skillFixture) string {
+			if err := os.Rename(filepath.Join(f.source, "intake", "SKILL.md"), filepath.Join(f.source, "intake", "skill.txt")); err != nil {
+				t.Fatal(err)
+			}
+			return f.source
+		}, "skill directory intake has no SKILL.md"},
+		{"too many skill files", func(t *testing.T, f skillFixture) string {
+			for i := range skillFileCount {
+				if err := os.WriteFile(filepath.Join(f.source, "core", fmt.Sprintf("extra-%03d.md", i)), []byte("x"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return f.source
+		}, "more than 128 files"},
+		{"skill files over the total limit", func(t *testing.T, f skillFixture) string {
+			for i := range skillTotalLimit/skillFileLimit + 1 {
+				if err := os.WriteFile(filepath.Join(f.source, "core", fmt.Sprintf("big-%d.md", i)), make([]byte, skillFileLimit), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return f.source
+		}, "skill files exceed"},
+		{"name with a control character", func(t *testing.T, f skillFixture) string {
+			if err := os.WriteFile(filepath.Join(f.source, "core", "a\nb.md"), []byte("x"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			return f.source
+		}, "not printable UTF-8"},
+		{"manifest with null upstream", manifestCase(`{"schema":"` + manifestSchema + `","upstream_root":"/x","upstream":null}`), "upstream is empty"},
+		{"manifest with a non-string digest", manifestCase(`{"schema":"` + manifestSchema + `","upstream_root":"/x","upstream":[{"path":"a.md","sha256":1}]}`), "upstream[0].sha256"},
+		{"manifest listing a path twice", manifestCase(`{"schema":"` + manifestSchema + `","upstream_root":"/x","upstream":[{"path":"a.md","sha256":"` + strings.Repeat("a", 64) + `"},{"path":"a.md","sha256":"` + strings.Repeat("b", 64) + `"}]}`), "listed twice"},
+		{"manifest keys differing in case", manifestCase(`{"schema":"` + manifestSchema + `","upstream_root":"/x","Upstream":[{"path":"a.md","sha256":"` + strings.Repeat("a", 64) + `"}]}`), "field upstream"},
 		{"relative upstream root", func(t *testing.T, f skillFixture) string {
 			f.writeManifest(t, "upstream", sha(f.upstreamFile))
 			return f.source
@@ -292,12 +360,29 @@ func TestPrepareSkillsKeepsExistingExpansion(t *testing.T) {
 	}
 }
 
-func TestReadSkillsDeadline(t *testing.T) {
+func TestPrepareSkillsSourceDeadline(t *testing.T) {
 	f := newSkillFixture(t)
-	ctx, cancel := context.WithCancelCause(context.Background())
-	stop := errors.New("caller deadline")
-	cancel(stop)
-	if _, err := readSkills(ctx, f.source); !errors.Is(err, stop) {
-		t.Fatalf("readSkills on an expired context = %v, want the caller's cause", err)
+	blockOpen(t, f.source, &skillReadTimeout)
+	var prepareErr error
+	var runDir string
+	report := runSkills(t, func(ctx context.Context, r *engine.Run) error {
+		runDir = r.Dir()
+		_, prepareErr = PrepareSkills(ctx, r, r.Root(), f.source)
+		return prepareErr
+	})
+	if prepareErr == nil || !strings.Contains(prepareErr.Error(), "took longer than") || report.Outcome != engine.Failed {
+		t.Fatalf("error = %v outcome = %s, want the source read deadline", prepareErr, report.Outcome)
+	}
+	if _, err := os.Lstat(filepath.Join(runDir, skillsExtractName)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("timed-out source was expanded: %v", err)
+	}
+}
+
+func manifestCase(raw string) func(*testing.T, skillFixture) string {
+	return func(t *testing.T, f skillFixture) string {
+		if err := os.WriteFile(filepath.Join(f.source, "manifest.json"), []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return f.source
 	}
 }
