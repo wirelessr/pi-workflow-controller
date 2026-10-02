@@ -34,7 +34,7 @@
 - 原始證據與分析結論分開落地，contract 透過 file ID 引用 evidence/artifacts，不必複製完整對話。
 - Workflow 定義自己的 data schema；框架驗 envelope、identity、JSON/schema、路徑、limits 與 digests，不硬編碼業務 verdict。
 - 每個 attempt 有獨立目錄、identity 與 dispatch token；舊 candidate、同名檔案或檔案存在不可當作本次成功。
-- Stage 建立固定 bytes 快照，Confirm 核對本次 execution，Publish 原子發布。**Publish 不等於 engine commit**；必要 journal append+Sync 與持久化提交完成後才授權下游 Ref。
+- Stage 建立固定 bytes 快照，Confirm 核對本次 execution，Publish 原子發布。Controller 自己產生的 bytes（例如原始 Prompt）走同一條 Stage／Publish／commit 取得 Ref，沒有 execution 可 Confirm，ownership 標為 Controller。**Publish 不等於 engine commit**；必要 journal append+Sync 與持久化提交完成後才授權下游 Ref。
 - Inputs、feedback refs、Decision、Decode／ReadContract、Retry／Parallel results 與最終結果使用同一 committed resolver；不能用自行計算 hash、掃描目錄或跨 run Ref 繞過。
 - 結構驗收失敗不交給下游 reviewer；業務語意及接受／退回條件由 workflow 明確驗收，schema 通過不證明內容正確。
 

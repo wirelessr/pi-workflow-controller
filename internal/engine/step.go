@@ -121,48 +121,10 @@ func (s *Scope) Step(ctx context.Context, spec StepSpec) (result StepResult, err
 		if v.State == "Busy" {
 			v.State = "Idle"
 		}
-		// Success is committed with the Ref below. Never submit a second terminal event.
-		current, exists := r.state.Attempts[id.AttemptID]
-		if exists && current.State == Succeeded {
-			return
-		}
-		if err == nil {
-			err = newFailure(WorkflowFailed, "Step", "attempt ended without a publication")
-		}
-		terminal, _ := outcome(err)
-		astate.State = terminal
-		astate.Failure = failureInfo(err)
-		astate.FinishedAt = time.Now()
-		astate.DispatchAccepted = normalize(err, "").DispatchAccepted
 		if receipt.Token != "" {
 			astate.Execution = &receipt
 		}
-		inv.State = terminal
-		inv.Provisional = terminal
-		for _, a := range s.ancestors {
-			if r.state.Retries[a].Active {
-				inv.State = AwaitingScope
-				break
-			}
-		}
-		e := r.commitLocked("Attempt"+string(terminal), map[string]any{"attempt": astate, "invocation": inv}, func(seq uint64) {
-			astate.LastSeq = seq
-			inv.LastSeq = seq
-			r.state.Attempts[id.AttemptID] = astate
-			r.state.Invocations[invocation] = inv
-			r.state.Sessions[h.id] = v
-		}, id)
-		if e != nil {
-			r.state.Attempts[id.AttemptID] = astate
-			r.state.Invocations[invocation] = inv
-			r.state.StatePersisted = false
-			err = e
-		}
-		if attempt != nil {
-			if e = r.storageLocked(filepath.Join("steps", invocation, "attempts", fmt.Sprintf("%04d-%s", attempt.Number(), id.AttemptID), "attempt.json"), "attempt_terminal", astate, id); e != nil {
-				err = e
-			}
-		}
+		err = r.finishAttemptLocked(s, attempt, astate, inv, err, "Step", func() { r.state.Sessions[h.id] = v })
 	}()
 	if err != nil {
 		return
@@ -274,37 +236,16 @@ func (s *Scope) Step(ctx context.Context, spec StepSpec) (result StepResult, err
 	if err = attemptError(attemptCtx, s.checkLocked(attemptCtx)); err != nil {
 		return
 	}
-	astate.State = Succeeded
-	astate.Output = &ref
-	astate.FinishedAt = time.Now()
-	inv.State = Succeeded
-	inv.Provisional = Succeeded
-	for _, a := range s.ancestors {
-		if r.state.Retries[a].Active {
-			inv.State = AwaitingScope
-			break
-		}
-	}
-	err = r.commitLocked("AttemptSucceeded", map[string]any{"attempt": astate, "invocation": inv, "ref": ref}, func(seq uint64) {
-		astate.LastSeq = seq
-		inv.LastSeq = seq
-		r.state.Attempts[id.AttemptID] = astate
-		r.state.Invocations[invocation] = inv
+	err = r.succeedAttemptLocked(s, attempt, &astate, &inv, ref, func() {
 		v := r.state.Sessions[h.id]
 		if v.State == "Busy" {
 			v.State = "Idle"
 			r.state.Sessions[h.id] = v
 		}
-	}, id)
+	})
 	if err != nil {
 		return
 	}
-	err = r.storageLocked(filepath.Join("steps", invocation, "attempts", fmt.Sprintf("%04d-%s", attempt.Number(), id.AttemptID), "attempt.json"), "attempt_terminal", astate, id)
-	if err != nil {
-		return
-	}
-	// Store.Publish is not authority. Membership follows durable journal commit.
-	r.publications[id.AttemptID] = publication{Ref: ref, Identity: id, Seq: astate.LastSeq}
 	result.Output = ref
 	result.Execution = receipt
 	return
@@ -328,4 +269,86 @@ func (r *Run) keepHandle(ctx context.Context, h *SessionHandle, f *Failure, disp
 	default:
 		return !dispatched || settled
 	}
+}
+
+// finishAttemptLocked records a terminal failure exactly once. A Succeeded
+// attempt was already committed with its Ref, so a later error (for example a
+// failed attempt snapshot) never submits a second terminal event.
+func (r *Run) finishAttemptLocked(s *Scope, attempt *contract.Attempt, astate AttemptState, inv InvocationState, err error, phase string, apply func()) error {
+	id := astate.Identity
+	current, exists := r.state.Attempts[id.AttemptID]
+	if exists && current.State == Succeeded {
+		return err
+	}
+	if err == nil {
+		err = newFailure(WorkflowFailed, phase, "attempt ended without a publication")
+	}
+	terminal, _ := outcome(err)
+	astate.State = terminal
+	astate.Failure = failureInfo(err)
+	astate.FinishedAt = time.Now()
+	astate.DispatchAccepted = normalize(err, "").DispatchAccepted
+	inv.State = terminal
+	inv.Provisional = terminal
+	for _, a := range s.ancestors {
+		if r.state.Retries[a].Active {
+			inv.State = AwaitingScope
+			break
+		}
+	}
+	e := r.commitLocked("Attempt"+string(terminal), map[string]any{"attempt": astate, "invocation": inv}, func(seq uint64) {
+		astate.LastSeq = seq
+		inv.LastSeq = seq
+		r.state.Attempts[id.AttemptID] = astate
+		r.state.Invocations[id.InvocationID] = inv
+		apply()
+	}, id)
+	if e != nil {
+		r.state.Attempts[id.AttemptID] = astate
+		r.state.Invocations[id.InvocationID] = inv
+		r.state.StatePersisted = false
+		err = e
+	}
+	if attempt != nil {
+		if e = r.storageLocked(attemptSnapshotPath(attempt, id), "attempt_terminal", astate, id); e != nil {
+			err = e
+		}
+	}
+	return err
+}
+
+// succeedAttemptLocked commits a published Ref. Store.Publish is not
+// authority: membership follows the durable journal commit and snapshots.
+func (r *Run) succeedAttemptLocked(s *Scope, attempt *contract.Attempt, astate *AttemptState, inv *InvocationState, ref contract.Ref, apply func()) error {
+	id := astate.Identity
+	astate.State = Succeeded
+	astate.Output = &ref
+	astate.FinishedAt = time.Now()
+	inv.State = Succeeded
+	inv.Provisional = Succeeded
+	for _, a := range s.ancestors {
+		if r.state.Retries[a].Active {
+			inv.State = AwaitingScope
+			break
+		}
+	}
+	err := r.commitLocked("AttemptSucceeded", map[string]any{"attempt": *astate, "invocation": *inv, "ref": ref}, func(seq uint64) {
+		astate.LastSeq = seq
+		inv.LastSeq = seq
+		r.state.Attempts[id.AttemptID] = *astate
+		r.state.Invocations[id.InvocationID] = *inv
+		apply()
+	}, id)
+	if err != nil {
+		return err
+	}
+	if err = r.storageLocked(attemptSnapshotPath(attempt, id), "attempt_terminal", *astate, id); err != nil {
+		return err
+	}
+	r.publications[id.AttemptID] = publication{Ref: ref, Identity: id, Seq: astate.LastSeq}
+	return nil
+}
+
+func attemptSnapshotPath(attempt *contract.Attempt, id contract.Identity) string {
+	return filepath.Join("steps", id.InvocationID, "attempts", fmt.Sprintf("%04d-%s", attempt.Number(), id.AttemptID), "attempt.json")
 }

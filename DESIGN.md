@@ -255,11 +255,14 @@ func (s *Scope) Retry(ctx context.Context, name string, maxRetries int,
     fn func(context.Context, *Scope, RetryState) (RetryAction, error)) (Result, error)
 func (s *Scope) Decision(ctx context.Context, name string,
     reason string, refs []contract.Ref) error
+func (s *Scope) Attach(ctx context.Context, spec AttachSpec) (contract.Ref, error)
+func (r *Run) ControllerAttached(ref contract.Ref) bool
 ```
 
 - 建構入口：`engine.New(ctx, Definition, Input, Options)`，先完成 definition/schema/prompt preflight，再建立 run；`Run.Execute()` 單次執行，回傳 outcome、exit code、result、cleanup、finalization errors 與 snapshot。`engine.NewRegistry` 提供穩定排序與查詢，沒有外部 workflow config。
 - `Run`、`Scope`、`SessionHandle` 是 concrete type。Workflow 不持有底層 Session 或 `exec.Cmd`。
 - `Step` 自動建 attempt，落 request，派送，檢查 execution，驗證並發布 output。任何階段失敗都留下結構化原因。
+- `Attach` 把 Controller 自己產生的 data 與檔案（例如 caller 原始 Prompt、Controller 記錄的缺口）走同一條 BeginAttempt → Stage → Publish → journal commit 取得 exact Ref；沒有 session、派送與 execution，`AttemptState.Controller=true`、`HandleID` 為空、`DispatchAccepted=no`。它與 Step 共用 scope key 命名空間、`MaxTotalAttempts` 額度（不退還）、AttemptTimeout、輸入 Ref resolver、終態與成功提交（同一段 commit 程式碼），journal 只有 AttemptStarted 與終態事件。Controller 的 data 不合 schema 時 attempt 為 Failed 並回傳 ContractInvalid；Storage／Journal 失敗照常 sticky fatal。`ControllerAttached(ref)` 只在 ref 是已 commit 且由 Attach 產生時為真；Agent Step 即使發布同 schema、同 file ID 也不是。
 - `Result.Outputs` 只持有已 committed Ref，不用 memory-only JSON 傳給下一個 Pi；`Result.Final` 明確選 output key 與可選 artifact file ID，不是任意檔案路徑。
 - Workflow 透過 `engine.Decode[T](ctx, run, ref)` 讀取業務資料，供 B verdict 等 Go 分支判斷；內部走本 run 的統一 Ref resolver（第 8.3 節）。這是 package function，不是 generic method，也不把 Store 的寫入權限暴露給 workflow。
 - Workflow 回傳成功後、outcome 鎖定前，engine 重新檢核 Result 裡所有 Ref，從 producer attempt 建立 `FinalDelivery`，並寫入 `result.json` 的 `run_id`、`outputs` 與可選 `final`。`final` 含 output、ref、artifact_path（若有）、handle_id、scope、step；Session ID/file/role 由 handle 查 `run.json.sessions`。結果檔不是成功證明，權威 outcome 在 RunFinalizing／RunFinished 事件及 run snapshot，持久化失敗另須看 EmergencyStatus。
@@ -296,6 +299,7 @@ func (s *Store) BeginAttempt(id Identity, request Request) (*Attempt, error)
 func (a *Attempt) Stage(ctx context.Context, spec Spec) (*Staged, error)
 func (a *Attempt) Publish(ctx context.Context, staged *Staged) (Ref, error)
 func (s *Store) Read(ctx context.Context, ref Ref) (json.RawMessage, error)
+func (a *Attempt) WriteControllerCandidate(data json.RawMessage, files []ControllerFile) error
 ```
 
 - Store 本身是 concrete type，測試使用真實 temp directory；只有 engine 持有 Store。`Read` 做 rooted filesystem、identity/schema/digest 檢查，engine resolver 在呼叫它之前另核對 committed publication membership。
@@ -627,7 +631,7 @@ Store 建構時將可信 `BaseDir` 建立後以 `EvalSymlinks` 正規化為 cano
 4. Schema 由 `go:embed` 或 Go 常數註冊，啟動時 compile；schema ID 不重複，全部 `$ref` 只能指向已註冊 resource。禁用 network/filesystem fallback loader，明確啟用 format assertion。Compile 前拒絕目前 validator 無法忠實表示的 schema numeric bounds、counts 及 const／enum 數值，避免規則被靜默忽略或反轉；validator panic 留在邊界轉成錯誤，不改用 float64。這不解決 candidate 的全部極端數值語義／資源問題，限制見第 12 節。Engine 將同一 registry 的 envelope 規格、output schema 及所有必要 resource 寫入 run.schemas；request.output 帶 schema ID、路徑、resource URI→path 對照與 digest。Pi 能直接讀到實際驗證規格，workflow 不在 Prompt 手抄另一份 schema。Controller 驗證仍使用 binary 內 registry，不信任落地 schema 的修改。
 5. Manifest ID 唯一；路徑必須相對於 attempt，限定 evidence/artifacts，拒絕 `..`、absolute path、symlink、非一般檔案與重複目標。以 rooted filesystem operation 防止檢查後改路徑逃逸；不只做字串 prefix 比對。
 6. 在同 filesystem 建私有 staging directory，複製當前 bytes，驗證拷貝與來源讀取的穩定性，為 staged files 計算 digest。發現讀取期間改變即失敗；不宣稱可對抗同 UID 惡意改寫。
-7. 寫 validation report；經 runtime Confirm 後，將 staging 目錄原子 rename 成 published。不得覆蓋既有 published；新 attempt 永遠用新位置。在 macOS 使用 rooted parent descriptors 與 `renameatx_np(RENAME_EXCL)`，連空目錄也不覆蓋。Manifest 讀取上限使用 Controller 保存的實際生成長度，避免 JSON escaping 膨脹與 policy 算式溢位。
+7. 寫 validation report；經 runtime Confirm 後（`Attach` 沒有 execution，candidate 由 Controller 以 exclusive create＋Sync 寫入，略過此步），將 staging 目錄原子 rename 成 published。不得覆蓋既有 published；新 attempt 永遠用新位置。在 macOS 使用 rooted parent descriptors 與 `renameatx_np(RENAME_EXCL)`，連空目錄也不覆蓋。Manifest 讀取上限使用 Controller 保存的實際生成長度，避免 JSON escaping 膨脹與 policy 算式溢位。
 8. Journal append+Sync AttemptSucceeded（含完整 Ref）與 provisional invocation 狀態，完成 run snapshot 及 attempt terminal snapshot 等必要持久化後，才在 engine 序列內登記 committed publication registry 並回傳 Ref；invocation 定案遵循第 7.1 節。Publish rename 不等於 commit。若 publish 後 journal／必要 snapshot 失敗，不登記 membership，產物只留診斷，run 失敗且不得向下游派送。
 9. 所有消費路徑使用第 8.3 節的統一 resolver；只有 digest 正確仍不夠，必須是本 run 已提交的發布紀錄。
 

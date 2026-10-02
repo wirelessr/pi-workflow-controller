@@ -152,7 +152,7 @@ func attemptError(ctx context.Context, err error) error {
 		return err
 	}
 	origin := normalize(root, "")
-	if origin.AttemptID == owner.Identity.AttemptID || (origin.AttemptID == "" && origin.HandleID == owner.HandleID) {
+	if origin.AttemptID == owner.Identity.AttemptID || (origin.AttemptID == "" && owner.HandleID != "" && origin.HandleID == owner.HandleID) {
 		return err
 	}
 	// A newly returned Store wrapper is its own I/O failure, not cancellation.

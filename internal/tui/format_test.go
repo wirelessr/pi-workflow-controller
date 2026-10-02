@@ -410,3 +410,15 @@ func TestElapsedBoundaries(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatSnapshotControllerAttempt(t *testing.T) {
+	now := time.Now()
+	s := displaySnapshot(now)
+	s.Invocations["inv-c"] = engine.InvocationState{Scope: "root", Key: "caller-prompt", Epoch: "epoch-c", LastAttemptID: "c1", State: engine.Succeeded}
+	s.Attempts["c1"] = engine.AttemptState{Number: 1, State: engine.Succeeded, Controller: true, StartedAt: now.Add(-time.Second), FinishedAt: now}
+	got := FormatSnapshot(s, now)
+	requireText(t, got, "root/caller-prompt", "latest attempt=c1 (#1)  state=Succeeded  elapsed=1s  producer=controller")
+	if strings.Contains(got, "latest attempt=c1 (#1)  state=Succeeded  elapsed=1s  session=") {
+		t.Fatal("controller attempt shown with a session")
+	}
+}

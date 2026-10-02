@@ -106,8 +106,12 @@ func formatSnapshot(s engine.Snapshot, timing elapsedFunc, styled bool, frame st
 		}
 		w.line("  %v%v/%v  invocation=%v  epoch=%v  state=%v  provisional=%v", indicator, v.Scope, v.Key, id, v.Epoch, v.State, v.Provisional)
 		if a, ok := s.Attempts[v.LastAttemptID]; ok {
-			h := s.Sessions[a.HandleID]
-			w.line("    latest attempt=%v (#%v)  state=%v  elapsed=%v  session=%v  model=%v/%v  accepted=%v", v.LastAttemptID, a.Number, a.State, duration(timing("attempt:"+v.LastAttemptID, a.StartedAt, a.FinishedAt)), a.HandleID, h.Role.Model.Provider, h.Role.Model.ID, a.DispatchAccepted)
+			if a.Controller {
+				w.line("    latest attempt=%v (#%v)  state=%v  elapsed=%v  producer=controller", v.LastAttemptID, a.Number, a.State, duration(timing("attempt:"+v.LastAttemptID, a.StartedAt, a.FinishedAt)))
+			} else {
+				h := s.Sessions[a.HandleID]
+				w.line("    latest attempt=%v (#%v)  state=%v  elapsed=%v  session=%v  model=%v/%v  accepted=%v", v.LastAttemptID, a.Number, a.State, duration(timing("attempt:"+v.LastAttemptID, a.StartedAt, a.FinishedAt)), a.HandleID, h.Role.Model.Provider, h.Role.Model.ID, a.DispatchAccepted)
+			}
 			feedbackDetails(w, "    ", a.Feedback)
 			failureInfo(w, "    Failure", a.Failure)
 		} else {

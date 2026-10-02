@@ -67,6 +67,9 @@ type AttemptState struct {
 	Output           *contract.Ref      `json:"output,omitempty"`
 	Feedback         *Feedback          `json:"feedback,omitempty"`
 	Failure          *FailureInfo       `json:"failure,omitempty"`
+	// Controller marks an attempt produced by Scope.Attach; it has no
+	// session, dispatch or execution.
+	Controller bool `json:"controller,omitempty"`
 }
 type InvocationState struct {
 	ID                 string   `json:"id"`
