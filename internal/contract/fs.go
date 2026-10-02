@@ -244,3 +244,11 @@ func renameExclusive(root *os.Root, from, to string) error {
 	}
 	return nil
 }
+
+// ReadStable reads a regular file under root with no symlink anywhere in its
+// path, at most max bytes, and verifies the bytes and metadata did not change
+// during the read. Cancellation is checked between reads; it cannot interrupt
+// a blocked open or read.
+func ReadStable(ctx context.Context, root *os.Root, path string, max int64) ([]byte, error) {
+	return readStable(ctx, root, path, max, nil)
+}
