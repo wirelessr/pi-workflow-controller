@@ -1,25 +1,30 @@
 package runtime
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"syscall"
 )
 
-// sessionFileLimit bounds the post-close read of Pi's session file. A larger
-// file is not read; the batch reports an uncertain tail instead.
-const sessionFileLimit = 64 << 20
+const (
+	// sessionFileLimit bounds how much of Pi's session file is read after
+	// Close, counted from where this dispatch's entries begin.
+	sessionFileLimit = 64 << 20
+	// sessionFileBatch entries are handed to the sink at a time, so the
+	// read never holds the whole file in memory.
+	sessionFileBatch = 256
+)
 
-// drainEntries is one best-effort audit read after a failure: an independent
-// short deadline, no lineage checks, and any error only ends the read. It runs
-// before Close so entries recorded up to the failure are not lost when the
-// process is killed.
+// drainEntries is one best-effort read on a failure that keeps the session
+// alive: an independent short deadline, no lineage checks, and any error only
+// ends the read. Paths that close the session read its file instead.
 func (s *session) drainEntries(t *dispatchTrace) {
-	if t == nil || t.sink == nil {
+	if t == nil || t.sink == nil || !t.sent {
 		return
 	}
 	s.mu.Lock()
@@ -33,72 +38,117 @@ func (s *session) drainEntries(t *dispatchTrace) {
 	defer cancel()
 	r, err := s.request(ctx, "get_entries", fields, s.options.Policy.AbortGrace, true)
 	if err != nil || r.frame.Success == nil || !*r.frame.Success {
+		if err == nil {
+			err = errors.New("get_entries rejected")
+		}
+		t.sink.Entries(EntryBatch{Source: EntriesUnverified, Err: fmt.Errorf("entries after the failure could not be read: %w", err)})
 		return
 	}
 	var data struct {
 		Entries []json.RawMessage `json:"entries"`
 	}
-	if json.Unmarshal(r.frame.Data, &data) != nil || len(data.Entries) == 0 {
+	if err := json.Unmarshal(r.frame.Data, &data); err != nil {
+		t.sink.Entries(EntryBatch{Source: EntriesUnverified, Err: fmt.Errorf("entries after the failure were malformed: %w", err)})
 		return
 	}
-	t.sink.Entries(EntryBatch{Entries: data.Entries, Source: EntriesUnverified})
+	if len(data.Entries) > 0 {
+		t.sink.Entries(EntryBatch{Entries: data.Entries, Source: EntriesUnverified})
+	}
 }
 
-// readSessionFile recovers entries written after the drain, including those
-// after abort, once Close has confirmed the process exited and the file can
-// no longer grow. Only entries after this dispatch's baseline are returned.
+// readSessionFile recovers entries written after the last poll, including
+// those after abort, once the process has exited and the file can no longer
+// grow. Only entries after this dispatch's baseline are delivered.
 func (s *session) readSessionFile(t *dispatchTrace, report CleanupReport) {
-	if t == nil || t.sink == nil {
+	if t == nil || t.sink == nil || !t.sent {
 		return
 	}
-	if !report.ConfirmsLocalClose(s.id.SessionID) {
-		t.sink.Entries(EntryBatch{Source: EntriesSessionFile, TailUncertain: true})
+	if report.Identity.SessionID != s.id.SessionID || !report.WaitCompleted || !report.ProcessExited {
+		t.sink.Entries(EntryBatch{Source: EntriesSessionFile, Err: errors.New("process exit was not confirmed, so the session file was not read and later entries may be missing")})
 		return
 	}
-	entries, err := sessionFileEntries(s.id.SessionFile, t.baselineLeaf)
-	t.sink.Entries(EntryBatch{Entries: entries, Source: EntriesSessionFile, TailUncertain: err != nil})
+	if err := sessionFileEntries(s.id.SessionFile, t.baselineLeaf, t.fileOffset, func(batch []json.RawMessage) {
+		t.sink.Entries(EntryBatch{Entries: batch, Source: EntriesSessionFile})
+	}); err != nil {
+		t.sink.Entries(EntryBatch{Source: EntriesSessionFile, Err: fmt.Errorf("session file: %w", err)})
+	}
 }
 
-func sessionFileEntries(path, baseline string) ([]json.RawMessage, error) {
+func sessionFileSize(path string) int64 {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return 0
+	}
+	return info.Size()
+}
+
+// sessionFileEntries streams the entries after baseline, starting at offset:
+// Pi only appends, so bytes past the size seen at dispatch are this
+// dispatch's. A file that has not reached offset was replaced.
+func sessionFileEntries(path, baseline string, offset int64, deliver func([]json.RawMessage)) error {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if !info.Mode().IsRegular() || info.Size() > sessionFileLimit {
-		return nil, errors.New("session file is not a regular file within the read limit")
+	if !info.Mode().IsRegular() {
+		return errors.New("not a regular file")
 	}
-	raw, err := io.ReadAll(io.LimitReader(f, sessionFileLimit+1))
-	if err != nil {
-		return nil, err
+	if info.Size() < offset {
+		return errors.New("shorter than when the dispatch started")
 	}
-	if len(raw) > sessionFileLimit {
-		return nil, errors.New("session file grew past the read limit")
+	if info.Size()-offset > sessionFileLimit {
+		return fmt.Errorf("more than %d bytes were written during the dispatch", sessionFileLimit)
 	}
-	var entries []json.RawMessage
-	found := baseline == ""
-	for _, line := range bytes.Split(raw, []byte("\n")) {
-		var e struct {
-			ID       string          `json:"id"`
-			Type     string          `json:"type"`
-			ParentID json.RawMessage `json:"parentId"`
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return err
+	}
+	// Past a nonzero offset every entry is new; from the start, skip through
+	// the baseline entry, which Pi writes with the history before it.
+	found := baseline == "" || offset > 0
+	reader := bufio.NewReaderSize(io.LimitReader(f, sessionFileLimit), 64<<10)
+	var batch []json.RawMessage
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 && line[len(line)-1] != '\n' && err == io.EOF {
+			if len(batch) > 0 {
+				deliver(batch)
+			}
+			// SIGKILL can cut the last write short.
+			return errors.New("the last line is incomplete, so the last entry may be missing")
 		}
-		// The session header and any partial last line are not entries.
-		if json.Unmarshal(line, &e) != nil || e.ID == "" || e.Type == "" || e.ParentID == nil {
-			continue
+		if len(line) > 0 {
+			var e struct {
+				ID       string          `json:"id"`
+				Type     string          `json:"type"`
+				ParentID json.RawMessage `json:"parentId"`
+			}
+			// The session header is not an entry.
+			if json.Unmarshal(line, &e) == nil && e.ID != "" && e.Type != "" && e.ParentID != nil {
+				if found {
+					batch = append(batch, json.RawMessage(line[:len(line)-1]))
+				} else {
+					found = e.ID == baseline
+				}
+			}
 		}
-		if !found {
-			found = e.ID == baseline
-			continue
+		if len(batch) == sessionFileBatch || err != nil && len(batch) > 0 {
+			deliver(batch)
+			batch = nil
 		}
-		entries = append(entries, json.RawMessage(bytes.Clone(line)))
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if !found {
-		return nil, errors.New("dispatch baseline entry not found in the session file")
+		return errors.New("the dispatch baseline entry is not in the file")
 	}
-	return entries, nil
+	return nil
 }

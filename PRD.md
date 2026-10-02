@@ -69,7 +69,7 @@ Worker → contract 結構檢核
 - RPC `prompt` ack 只表示接受，不表示完成；`agent_end`、silence 或 artifact 存在也不足夠。
 - 完成必須有本次 token 的 prompt／entry evidence、合格 terminal outcome、`agent_settled`、不變的 session/model/thinking binding 及 Stage 後 Confirm；無法證明歸屬就失敗，不猜測。
 - 已觀測的 abort／retry cancellation／compaction failure 不得被無法證明是恢復的後續成功覆蓋。Controller 自身取消、timeout、SIGINT／SIGTERM 仍是必要處理範圍。
-- `get_entries` 是記憶體觀測，不是磁碟持久化證明；session JSONL 寫檔仍由 Pi 負責。Workflow 可對個別 Step 開啟稽核觀測：entries 落地成 run 自有檔案與 tool call 索引；timeout／失敗時 Close 前 best-effort 再讀一次，Close 確認退出後讀 session JSONL 補齊並以 entry id 去重，取不到只標記覆蓋缺失，不蓋過原錯誤、不阻塞 cleanup。
+- `get_entries` 是記憶體觀測，不是磁碟持久化證明；session JSONL 寫檔仍由 Pi 負責。Workflow 可對個別 Step 開啟稽核觀測：entries 落地成 run 自有檔案與 tool call 索引；保留 session 的失敗再讀一次 entries，會關閉 session 的失敗（含 timeout）在 Close 確認 process 結束後讀 session JSONL 補齊，並以 entry id 去重；取不到只記錄覆蓋缺口，不蓋過原錯誤、不延後 cleanup。
 - 啟動 persisted Pi 可能觸發共享 discovery recovery。操作前須唯讀確認父 `pid` 與 `.recovering`，可能影響他人 session 時停止，不代清理。Preflight 不是鎖，獨立 task 不是 discovery 隔離。
 
 ## 7. 狀態、錯誤及收尾

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"pi-workflow-controller/internal/runtime"
@@ -13,23 +14,18 @@ import (
 
 // Observation is the audit record of one observed Step attempt: its raw
 // session entries in a run-owned JSONL file, one {"source","entry"} object
-// per line, and a bounded index of the tool calls they contain. It is
-// recorded for audit only; it never decides completion. Commit it with
-// Attach when a downstream consumer needs an exact Ref.
+// per line, and an index of the tool calls they contain (a structural
+// projection; Go does not interpret the calls). It is recorded for audit
+// only and never decides completion. Commit it with Attach when a
+// downstream consumer needs an exact Ref.
 type Observation struct {
 	Path    string     `json:"path"`
 	Entries int        `json:"entries"`
 	Calls   []ToolCall `json:"calls"`
-	// Complete is false when an entry or a tool call was dropped by a limit
-	// or a write error; the audit then lacks coverage.
-	Complete bool `json:"complete"`
-	// Unverified is true when some entries came from the reads after a
-	// failure, which skip the completion lineage checks.
-	Unverified bool `json:"unverified"`
-	// TailUncertain is true when the last entries may be missing: process
-	// exit was not confirmed or the session file could not be read.
-	TailUncertain bool   `json:"tail_uncertain"`
-	Error         string `json:"error,omitempty"`
+	// Gaps says why coverage may be incomplete: a limit or write error
+	// stopped recording, or entries after a failure could not be recovered.
+	// Empty means every entry the runtime delivered was recorded.
+	Gaps []string `json:"gaps"`
 }
 
 type ToolCall struct {
@@ -40,49 +36,59 @@ type ToolCall struct {
 }
 
 const (
-	observationBytes   = 32 << 20
-	observationEntries = 1 << 16
-	observationCalls   = 4096
-	argumentBytes      = 2 << 10
+	observationBytes    = 32 << 20
+	observationEntries  = 1 << 16
+	observationCalls    = 4096
+	argumentBytes       = 2 << 10
+	runObservationBytes = 1 << 30
 )
 
 // entrySink records entries as the runtime delivers them. It never fails the
-// Step; problems only reduce coverage.
+// Step: the first entry it cannot record stops recording and becomes a gap.
 type entrySink struct {
 	mu      sync.Mutex
 	file    *os.File
+	budget  *atomic.Int64
 	written int64
+	stopped bool
 	seen    map[string]bool
 	obs     Observation
 }
 
 func (r *Run) newEntrySink(handleID, attemptID string) *entrySink {
 	rel := filepath.Join("sessions", handleID, "observations", attemptID+".jsonl")
-	s := &entrySink{seen: map[string]bool{}, obs: Observation{Path: filepath.Join(r.Dir(), rel), Calls: []ToolCall{}, Complete: true}}
+	s := &entrySink{budget: &r.observedBytes, seen: map[string]bool{}, obs: Observation{Path: filepath.Join(r.Dir(), rel), Calls: []ToolCall{}, Gaps: []string{}}}
 	err := r.fs.MkdirAll(filepath.Dir(rel), 0700)
 	if err == nil {
 		s.file, err = r.fs.OpenFile(rel, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0600)
 	}
 	if err != nil {
-		s.fail(fmt.Errorf("open observation file: %w", err))
+		s.stop(fmt.Sprintf("observation file could not be created: %v", err))
 	}
 	return s
 }
 
-func (s *entrySink) fail(err error) {
-	s.obs.Complete = false
-	if s.obs.Error == "" {
-		s.obs.Error = err.Error()
+func (s *entrySink) stop(gap string) {
+	s.obs.Gaps = append(s.obs.Gaps, gap)
+	s.stopped = true
+	if s.file != nil {
+		// Keep only whole lines: a failed write may have left part of one.
+		_ = s.file.Truncate(s.written)
+		_ = s.file.Close()
+		s.file = nil
 	}
 }
 
 func (s *entrySink) Entries(batch runtime.EntryBatch) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if batch.TailUncertain {
-		s.obs.TailUncertain = true
+	if batch.Err != nil {
+		s.obs.Gaps = append(s.obs.Gaps, batch.Err.Error())
 	}
 	for _, raw := range batch.Entries {
+		if s.stopped {
+			return
+		}
 		var e struct {
 			ID      string `json:"id"`
 			Type    string `json:"type"`
@@ -100,33 +106,37 @@ func (s *entrySink) Entries(batch runtime.EntryBatch) {
 			continue
 		}
 		if s.obs.Entries >= observationEntries {
-			s.fail(fmt.Errorf("more than %d observed entries", observationEntries))
+			s.stop(fmt.Sprintf("more than %d entries; later entries were not recorded", observationEntries))
 			return
-		}
-		if e.ID != "" {
-			s.seen[e.ID] = true
 		}
 		line, err := json.Marshal(struct {
 			Source runtime.EntrySource `json:"source"`
 			Entry  json.RawMessage     `json:"entry"`
 		}{batch.Source, raw})
 		if err != nil {
-			s.fail(fmt.Errorf("encode observed entry %q: %w", e.ID, err))
-			continue
+			s.stop(fmt.Sprintf("entry %q could not be encoded: %v", e.ID, err))
+			return
 		}
 		line = append(line, '\n')
-		if s.file == nil || s.written+int64(len(line)) > observationBytes {
-			s.fail(fmt.Errorf("observation file limit of %d bytes reached", observationBytes))
-			continue
+		size := int64(len(line))
+		if s.written+size > observationBytes {
+			s.stop(fmt.Sprintf("the %d-byte observation file limit was reached; later entries were not recorded", observationBytes))
+			return
+		}
+		if s.budget.Add(size) > runObservationBytes {
+			s.budget.Add(-size)
+			s.stop(fmt.Sprintf("the run's %d-byte observation budget was used up; later entries were not recorded", runObservationBytes))
+			return
 		}
 		if _, err := s.file.Write(line); err != nil {
-			s.fail(fmt.Errorf("write observation file: %w", err))
-			continue
+			s.budget.Add(-size)
+			s.stop(fmt.Sprintf("observation file write failed: %v", err))
+			return
 		}
-		s.written += int64(len(line))
+		s.written += size
 		s.obs.Entries++
-		if batch.Source != runtime.EntriesVerified {
-			s.obs.Unverified = true
+		if e.ID != "" {
+			s.seen[e.ID] = true
 		}
 		if e.Type != "message" || e.Message.Role != "assistant" {
 			continue
@@ -136,10 +146,10 @@ func (s *entrySink) Entries(batch runtime.EntryBatch) {
 				continue
 			}
 			if len(s.obs.Calls) >= observationCalls {
-				s.fail(fmt.Errorf("more than %d tool calls", observationCalls))
-				break
+				s.stop(fmt.Sprintf("more than %d tool calls; later entries were not recorded", observationCalls))
+				return
 			}
-			args, truncated := string(block.Arguments), false
+			args, truncated := block.Arguments, false
 			if len(args) > argumentBytes {
 				cut := argumentBytes
 				for cut > 0 && !utf8.RuneStart(args[cut]) {
@@ -147,7 +157,7 @@ func (s *entrySink) Entries(batch runtime.EntryBatch) {
 				}
 				args, truncated = args[:cut], true
 			}
-			s.obs.Calls = append(s.obs.Calls, ToolCall{EntryID: e.ID, Tool: block.Name, Arguments: args, Truncated: truncated})
+			s.obs.Calls = append(s.obs.Calls, ToolCall{EntryID: e.ID, Tool: block.Name, Arguments: string(args), Truncated: truncated})
 		}
 	}
 }
@@ -157,11 +167,12 @@ func (s *entrySink) finish() *Observation {
 	defer s.mu.Unlock()
 	if s.file != nil {
 		if err := s.file.Close(); err != nil {
-			s.fail(fmt.Errorf("close observation file: %w", err))
+			s.obs.Gaps = append(s.obs.Gaps, fmt.Sprintf("observation file could not be closed: %v", err))
 		}
 		s.file = nil
 	}
 	obs := s.obs
 	obs.Calls = append([]ToolCall{}, s.obs.Calls...)
+	obs.Gaps = append([]string{}, s.obs.Gaps...)
 	return &obs
 }

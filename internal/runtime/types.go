@@ -16,13 +16,15 @@ type SessionSpec struct {
 type Dispatch struct {
 	Token, Message string
 	// Entries, when set, receives this dispatch's session entries for audit.
-	// It never affects completion: the runtime does not wait on it, and a
-	// sink that drops entries only loses audit coverage.
+	// It never affects completion or the returned error; a sink that drops
+	// entries only loses audit coverage.
 	Entries EntrySink
 }
 
 // EntrySink receives this dispatch's raw session entries in session order.
-// The same entry can arrive again from a later source; deduplicate by id.
+// It is called synchronously on the Execute or Confirm goroutine, outside
+// the session lock, and must return quickly. The same entry can arrive
+// again from a later source; deduplicate by id.
 type EntrySink interface {
 	Entries(EntryBatch)
 }
@@ -30,9 +32,8 @@ type EntrySink interface {
 type EntryBatch struct {
 	Entries []json.RawMessage
 	Source  EntrySource
-	// TailUncertain reports that later entries may be missing because the
-	// session's process exit was not confirmed or its file was unreadable.
-	TailUncertain bool
+	// Err, when set, says why entries of this source may be missing.
+	Err error
 }
 
 type EntrySource string
@@ -42,7 +43,7 @@ const (
 	// completion.
 	EntriesVerified EntrySource = "rpc"
 	// EntriesUnverified entries came from one best-effort read after a
-	// failure, without lineage checks.
+	// failure that kept the session, without lineage checks.
 	EntriesUnverified EntrySource = "rpc-unverified"
 	// EntriesSessionFile entries were read from the session file after the
 	// process exit was confirmed.

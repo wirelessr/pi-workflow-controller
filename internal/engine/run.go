@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"pi-workflow-controller/internal/contract"
@@ -63,6 +64,7 @@ type Run struct {
 	changed                           chan struct{}
 	handles                           map[string]*SessionHandle
 	totalAttempts                     int
+	observedBytes                     atomic.Int64
 	publications                      map[string]publication
 	invocations                       map[string]string
 	retryAncestors                    map[string][]string

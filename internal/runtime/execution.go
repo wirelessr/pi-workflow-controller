@@ -64,7 +64,11 @@ type dispatchTrace struct {
 	assistantAfterPrompt                              bool
 	tokens                                            int
 	changed                                           chan struct{}
-	sink                                              EntrySink
+	// Audit observation: the sink, whether the prompt was sent, and the
+	// session file size when it was, where this dispatch's entries begin.
+	sink       EntrySink
+	sent       bool
+	fileOffset int64
 }
 
 // Matched hashes are no longer needed: append order and the latest event seq
@@ -316,20 +320,21 @@ func (s *session) readEntries(ctx context.Context, t *dispatchTrace, baseline bo
 		Entries []entry `json:"entries"`
 		LeafID  *string `json:"leafId"`
 	}
-	var raw struct {
-		Entries []json.RawMessage `json:"entries"`
-	}
 	var required map[string]json.RawMessage
-	if json.Unmarshal(r.frame.Data, &data) != nil || json.Unmarshal(r.frame.Data, &raw) != nil || json.Unmarshal(r.frame.Data, &required) != nil || required["entries"] == nil || bytes.Equal(required["entries"], []byte("null")) || required["leafId"] == nil {
+	if json.Unmarshal(r.frame.Data, &data) != nil || json.Unmarshal(r.frame.Data, &required) != nil || required["entries"] == nil || bytes.Equal(required["entries"], []byte("null")) || required["leafId"] == nil {
 		return failure(ProtocolFailed, "invalid get_entries response")
 	}
 	// Entries accepted before a lineage failure are still this dispatch's
 	// audit evidence; hand them over after the session lock is released.
 	accepted := 0
 	if !baseline && t.sink != nil {
+		var raw []json.RawMessage
+		if err := json.Unmarshal(required["entries"], &raw); err != nil || len(raw) != len(data.Entries) {
+			return failure(ProtocolFailed, "invalid get_entries response")
+		}
 		defer func() {
 			if accepted > 0 {
-				t.sink.Entries(EntryBatch{Entries: raw.Entries[:accepted], Source: EntriesVerified})
+				t.sink.Entries(EntryBatch{Entries: raw[:accepted], Source: EntriesVerified})
 			}
 		}()
 	}
@@ -415,7 +420,6 @@ func (s *session) Execute(ctx context.Context, d Dispatch) (receipt Execution, e
 		if err == nil {
 			return
 		}
-		s.drainEntries(t)
 		var f *Failure
 		if errors.As(err, &f) {
 			copy := *f
@@ -430,7 +434,11 @@ func (s *session) Execute(ctx context.Context, d Dispatch) (receipt Execution, e
 		if errors.As(err, &f) {
 			keep = f.Code == DispatchRejected || f.Code == ProviderFailed || f.Code == OutputTruncated || (f.Code == InvalidDefinition && accepted == AcceptedNo)
 		}
-		if !keep {
+		if keep {
+			// The session stays alive, so one more read is cheap and delays
+			// no cleanup; nothing else will recover entries after the last poll.
+			s.drainEntries(t)
+		} else {
 			s.invalidate(err)
 			report, _ := s.Close(context.Background())
 			s.readSessionFile(t, report)
@@ -491,6 +499,10 @@ func (s *session) Execute(ctx context.Context, d Dispatch) (receipt Execution, e
 	s.trace = t
 	s.emitLocked("Dispatching")
 	s.mu.Unlock()
+	if t.sink != nil {
+		t.fileOffset = sessionFileSize(s.id.SessionFile)
+	}
+	t.sent = true
 	accepted = AcceptedUnknown
 	ack, e := s.request(ctx, "prompt", map[string]any{"message": d.Message}, s.options.Policy.PromptAckTimeout, false)
 	if e != nil {
@@ -663,7 +675,6 @@ func (s *session) Confirm(ctx context.Context, r Execution) (confirmation Confir
 			s.mu.Lock()
 			t := s.trace
 			s.mu.Unlock()
-			s.drainEntries(t)
 			s.invalidate(err)
 			report, _ := s.Close(context.Background())
 			s.readSessionFile(t, report)

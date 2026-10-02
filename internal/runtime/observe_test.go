@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -30,7 +31,7 @@ func (r *recordingSink) sources(t *testing.T) ([]string, map[string][]EntrySourc
 	from := map[string][]EntrySource{}
 	uncertain := false
 	for _, b := range r.batches {
-		uncertain = uncertain || b.TailUncertain
+		uncertain = uncertain || b.Err != nil
 		for _, raw := range b.Entries {
 			var e struct {
 				ID string `json:"id"`
@@ -87,7 +88,7 @@ func TestEntrySinkReceivesVerifiedEntries(t *testing.T) {
 	// The read after a failure starts at the trace cursor, without lineage checks.
 	drained := &recordingSink{}
 	f.send(control{Type: "entry", Entry: map[string]any{"type": "message", "message": map[string]any{"role": "user", "content": "queued input", "timestamp": 4}}})
-	f.s.drainEntries(&dispatchTrace{cursor: r.receipt.LastEntryID, sink: drained})
+	f.s.drainEntries(&dispatchTrace{cursor: r.receipt.LastEntryID, sink: drained, sent: true})
 	if got, from, _ := drained.sources(t); len(got) != 1 || from[got[0]][0] != EntriesUnverified {
 		t.Fatalf("drained entries = %v %v, want the one entry after the cursor, unverified", got, from)
 	}
@@ -108,6 +109,8 @@ func TestEntrySinkReceivesVerifiedEntries(t *testing.T) {
 }
 
 func TestEntrySinkAfterCancellation(t *testing.T) {
+	// An unacknowledged abort still ends in SIGKILL and a confirmed Wait, so
+	// the session file is read in both modes.
 	for _, mode := range []string{"normal", "no-abort-ack"} {
 		t.Run(mode, func(t *testing.T) {
 			f := mustFixture(t, mode, nil)
@@ -118,8 +121,6 @@ func TestEntrySinkAfterCancellation(t *testing.T) {
 			ch := make(chan executionResult, 1)
 			go func() { r, e := f.s.Execute(ctx, d); ch <- executionResult{r, e} }()
 			f.next("prompt")
-			// An entry with no matching event is not read by the completion
-			// loop; only the read after the failure can find it.
 			f.send(control{Type: "unmatched-entries", Count: 1, Message: toolCallMessage()})
 			// Written after the last read the runtime can make, then found in
 			// the session file once the process exit is confirmed.
@@ -127,59 +128,128 @@ func TestEntrySinkAfterCancellation(t *testing.T) {
 			cancel(&Failure{Code: Cancelled, Origin: ControllerUser, Message: "attempt deadline"})
 			_ = requireCode(t, f.resultAfterCancel(ch), Cancelled)
 			order, from, uncertain := sink.sources(t)
-			if mode == "no-abort-ack" {
-				if !uncertain || from["late"] != nil {
-					t.Fatalf("unconfirmed exit must report an uncertain tail and skip the session file: %v %v", order, from)
-				}
-				return
-			}
 			if uncertain || len(order) != 3 || order[2] != "late" || from["late"][0] != EntriesSessionFile {
 				t.Fatalf("entries = %v sources = %v uncertain=%t, want prompt, tool call, then the late entry from the session file", order, from, uncertain)
-			}
-			if got := from[order[1]][0]; got != EntriesVerified && got != EntriesUnverified {
-				t.Fatalf("tool call entry source = %s", got)
 			}
 		})
 	}
 }
 
-func TestSessionFileEntriesBaseline(t *testing.T) {
+func TestEntrySinkSecondDispatchReadsOnlyItsSessionFileTail(t *testing.T) {
+	f := mustFixture(t, "normal", nil)
+	_, first := f.execute()
+	f.send(control{Type: "message", Message: assistant("stop")})
+	f.send(control{Type: "settle"})
+	if r := f.result(first); r.err != nil {
+		t.Fatal(r.err)
+	}
+	f.send(control{Type: "write-history"})
+	ch := make(chan executionResult, 1)
+	sink := &recordingSink{}
+	ctx, cancel := context.WithCancelCause(f.ctx)
+	d := Dispatch{Token: randomID(), Entries: sink}
+	d.Message = "Controller dispatch " + d.Token
+	go func() { r, e := f.s.Execute(ctx, d); ch <- executionResult{r, e} }()
+	f.next("prompt")
+	f.send(control{Type: "write-history", Entry: map[string]any{"id": "late", "parentId": "e3", "type": "message", "message": assistant("aborted")}})
+	cancel(&Failure{Code: Cancelled, Origin: ControllerUser, Message: "attempt deadline"})
+	_ = requireCode(t, f.resultAfterCancel(ch), Cancelled)
+	order, from, uncertain := sink.sources(t)
+	if uncertain || len(order) != 2 || order[1] != "late" {
+		t.Fatalf("entries = %v sources = %v, want only this dispatch's prompt and the late entry", order, from)
+	}
+	for _, id := range []string{"e1", "e2"} {
+		if from[id] != nil {
+			t.Fatalf("an earlier dispatch's entry %s leaked into this observation: %v", id, from)
+		}
+	}
+}
+
+func TestEntrySinkNothingBeforePrompt(t *testing.T) {
+	f := mustFixture(t, "normal", nil)
+	// A malformed baseline fails the dispatch before any prompt is sent.
+	f.send(control{Type: "entries-response", State: map[string]any{"entries": []any{map[string]any{"id": "x", "parentId": "missing", "type": "message", "message": map[string]any{"role": "user", "content": "foreign"}}}, "leafId": "x"}})
+	f.send(control{Type: "write-history"})
+	sink := &recordingSink{}
+	d := Dispatch{Token: randomID(), Entries: sink}
+	d.Message = "Controller dispatch " + d.Token
+	if _, err := f.s.Execute(f.ctx, d); err == nil {
+		t.Fatal("dispatch with a broken baseline succeeded")
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.batches) != 0 {
+		t.Fatalf("unsent dispatch observed %+v", sink.batches)
+	}
+}
+
+func TestEntrySinkConfirmFailure(t *testing.T) {
+	f := mustFixture(t, "normal", nil)
+	sink := &recordingSink{}
+	d := Dispatch{Token: randomID(), Entries: sink}
+	d.Message = "Controller dispatch " + d.Token
+	ch := make(chan executionResult, 1)
+	go func() { r, e := f.s.Execute(f.ctx, d); ch <- executionResult{r, e} }()
+	f.next("prompt")
+	f.send(control{Type: "message", Message: assistant("stop")})
+	f.send(control{Type: "settle"})
+	r := f.result(ch)
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	// Activity after the receipt fails Confirm, which closes the session.
+	f.send(control{Type: "message", Message: assistant("stop")})
+	f.send(control{Type: "write-history"})
+	if _, err := f.s.Confirm(f.ctx, r.receipt); err == nil {
+		t.Fatal("Confirm accepted activity after the receipt")
+	}
+	order, from, uncertain := sink.sources(t)
+	if uncertain || len(order) != 3 || from[order[2]][len(from[order[2]])-1] != EntriesSessionFile {
+		t.Fatalf("entries = %v sources = %v uncertain=%t", order, from, uncertain)
+	}
+}
+
+func TestSessionFileEntries(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/history.jsonl"
-	write := func(text string) {
-		t.Helper()
-		if err := os.WriteFile(path, []byte(text), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write(`{"type":"session","id":"s"}` + "\n" + `{"id":"a","parentId":null,"type":"message"}` + "\n" + `{"id":"b","parentId":"a","type":"message"}` + "\n" + `{"id":"c","parentId":"b","type":"message"}` + "\n" + `{"id":"partial"`)
+	lines := `{"type":"session","id":"s"}` + "\n" + `{"id":"a","parentId":null,"type":"message"}` + "\n" + `{"id":"b","parentId":"a","type":"message"}` + "\n" + `{"id":"c","parentId":"b","type":"message"}` + "\n"
+	offsetB := int64(len(`{"type":"session","id":"s"}` + "\n" + `{"id":"a","parentId":null,"type":"message"}` + "\n"))
 	for _, tc := range []struct {
+		name     string
+		text     string
 		baseline string
-		want     []string
-		err      bool
+		offset   int64
+		want     string
+		err      string
 	}{
-		{"", []string{"a", "b", "c"}, false},
-		{"a", []string{"b", "c"}, false},
-		{"c", nil, false},
-		{"missing", nil, true},
+		{"from the start", lines, "", 0, "a b c", ""},
+		{"after the baseline", lines, "a", 0, "b c", ""},
+		{"baseline is the last entry", lines, "c", 0, "", ""},
+		{"from the dispatch offset", lines, "a", offsetB, "b c", ""},
+		{"baseline missing", lines, "missing", 0, "", "baseline"},
+		{"file shorter than the offset", lines, "a", 1 << 20, "", "shorter"},
+		{"incomplete last line", lines + `{"id":"d","parentId":"c"`, "", 0, "a b c", "incomplete"},
 	} {
-		entries, err := sessionFileEntries(path, tc.baseline)
-		var ids []string
-		for _, raw := range entries {
-			var e struct{ ID string }
-			_ = json.Unmarshal(raw, &e)
-			ids = append(ids, e.ID)
-		}
-		if (err != nil) != tc.err || len(ids) != len(tc.want) {
-			t.Fatalf("baseline %q: ids %v err %v, want %v", tc.baseline, ids, err, tc.want)
-		}
-		for i := range ids {
-			if ids[i] != tc.want[i] {
-				t.Fatalf("baseline %q: ids %v, want %v", tc.baseline, ids, tc.want)
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.text), 0600); err != nil {
+				t.Fatal(err)
 			}
-		}
+			var ids []string
+			err := sessionFileEntries(path, tc.baseline, tc.offset, func(batch []json.RawMessage) {
+				for _, raw := range batch {
+					var e struct{ ID string }
+					if json.Unmarshal(raw, &e) != nil {
+						t.Fatalf("delivered a non-entry %q", raw)
+					}
+					ids = append(ids, e.ID)
+				}
+			})
+			if got := strings.Join(ids, " "); got != tc.want || (tc.err == "") != (err == nil) || err != nil && !strings.Contains(err.Error(), tc.err) {
+				t.Fatalf("ids %q err %v, want %q %q", got, err, tc.want, tc.err)
+			}
+		})
 	}
-	if _, err := sessionFileEntries(dir+"/absent.jsonl", ""); err == nil {
+	if err := sessionFileEntries(dir+"/absent.jsonl", "", 0, func([]json.RawMessage) {}); err == nil {
 		t.Fatal("missing session file read as empty")
 	}
 }

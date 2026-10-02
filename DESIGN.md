@@ -104,6 +104,7 @@ type SessionSpec struct {
 type Dispatch struct {
     Token   string
     Message string
+    Entries EntrySink // optional audit observation, see 6.3
 }
 
 type Execution struct {
@@ -208,12 +209,14 @@ type StepSpec struct {
     Feedback *Feedback
     Output   contract.Spec
     Timeout  time.Duration
+    Observe  bool // opt-in audit observation, see 6.3
 }
 
 type StepResult struct {
-    Output    contract.Ref
-    AttemptID string
-    Execution runtime.Execution
+    Output      contract.Ref
+    AttemptID   string
+    Execution   runtime.Execution
+    Observation *Observation // set when Observe, on success and failure
 }
 
 type Branch struct {
@@ -438,13 +441,14 @@ Dispatch 流程：
 10. `Confirm` 再查 state 與自 baseline 後的 entries，核對 active branch 包含本次 prompt、沒有額外未歸屬 run 或 model/thinking/session drift。與 Stage 期間觀察到的新活動比較 epoch；不一致即丟棄 staged output，回 `AmbiguousExecution`，不重新等待另一個 turn 自動補成功。
 11. Engine 在本地控制序列上確認 receipt 未失效，發布 contract，再提交 AttemptSucceeded 與 invocation 的 provisional outcome。所有可重跑的祖先 Retry 結束後才定案 invocation，見第 7.1 節。
 
-**稽核觀測（opt-in）。**`StepSpec.Observe=true` 時，engine 給 runtime 一個 entry sink，記錄本次 dispatch 的 session entries，與完成判斷無關：
+**稽核觀測（opt-in）。**`StepSpec.Observe=true` 時，engine 給 runtime 一個 entry sink，記錄本次 dispatch 的 session entries，與完成判斷及回傳錯誤無關：
 
-- 完成判斷每次讀到並通過 lineage 檢查的 entries 以 `rpc` 來源交給 sink（含失敗前已通過的部分）；runtime 不等待 sink，也不因 sink 而失敗。
-- 失敗路徑在 Close 前以獨立短期限（AbortGrace）自 trace cursor best-effort 再讀一次 `get_entries`，不做 lineage 檢查，來源 `rpc-unverified`；讀不到就結束。
-- runtime 自己 Close 的失敗路徑，在 `ConfirmsLocalClose` 成立後讀 session JSONL（regular file、NOFOLLOW、64 MiB 上限），只取本次 dispatch baseline 之後的 entries，來源 `session-file`；未確認退出或檔案讀不到時只標 `TailUncertain`。取快照不改變原錯誤、不算 cleanup failure、不延後 cleanup。
-- Engine sink 以 entry id 去重，逐行寫 `{"source","entry"}` 到 `sessions/<handle>/observations/<attempt>.jsonl`，記憶體只留 tool call 索引（entry id、工具名、參數文字截斷至 2 KiB）。檔案 32 MiB、65536 entries、4096 tool calls 為上限，超限或寫檔錯誤只令 `Complete=false` 並記錄原因。結果放在 `StepResult.Observation`（成功與失敗都有）；要 exact Ref 由 workflow 以 `Attach` 提交。
-- 未設 Observe 的 Step（現有 workflows）行為不變。單一 entry 超過 frame 上限仍是既有 ProtocolFailed。
+- 完成判斷每次讀到並通過 lineage 檢查的 entries 以 `rpc` 來源交給 sink（含 lineage 失敗前已通過的部分）。Sink 在 Execute／Confirm 的 goroutine 上、session lock 之外同步呼叫，必須很快返回。
+- Prompt 尚未送出就失敗時不記錄任何 entry（baseline 之前的 entries 不屬於本次 dispatch）。
+- 保留 session 的失敗（DispatchRejected、ProviderFailed、OutputTruncated）以獨立短期限（AbortGrace）自 trace cursor 再讀一次 `get_entries`，不做 lineage 檢查，來源 `rpc-unverified`；此時沒有 Close，不延後 cleanup。
+- Runtime 自己 Close 的失敗路徑不在 Close 前另讀，避免延後 abort／SIGKILL；Close 回報同一 session 的 `WaitCompleted` 與 `ProcessExited` 後（process 已結束，檔案不再增長）讀 session JSONL：從派送時記下的檔案大小起讀（Pi 只 append），否則跳過 baseline 之前的 entries；逐行串流、分批交給 sink，來源 `session-file`。未確認退出、檔案讀不到、超過 64 MiB 或最後一行不完整時以 `EntryBatch.Err` 說明缺口。取快照不改變原錯誤、不算 cleanup failure。
+- Engine sink 以 entry id 去重（寫入成功才算已見），逐行寫 `{"source","entry"}` 到 `sessions/<handle>/observations/<attempt>.jsonl`，另建 tool call 索引（entry id、工具名、參數文字截斷至 2 KiB；只是結構投影，Go 不解讀）。單檔 32 MiB、65536 entries、4096 tool calls、整個 run 1 GiB 為上限；第一個無法記錄的 entry 讓記錄停止，檔案截到最後完整一行，原因列入 `Observation.Gaps`。結果放在 `StepResult.Observation`（成功與失敗都有）；要 exact Ref 由 workflow 以 `Attach` 提交。
+- 未設 Observe 的 Step（現有 workflows）行為不變，不多做 RPC 或解碼。單一 entry 超過 frame 上限仍是既有 ProtocolFailed。
 
 不是所有 tool error 都直接令 attempt 失敗：agent 可以修正工具失敗。未解決的 terminal error、protocol error 或 contract validation 才阻擋發布。活動期間的 extension error 保守視為 `ExtensionFailed`，不自動忽略可能影響 dispatch 的失敗。
 
@@ -585,6 +589,7 @@ Store 建構時將可信 `BaseDir` 建立後以 `EvalSymlinks` 正規化為 cano
     ├── schemas/                      # registry resources 與 envelope 規格
     ├── sessions/<handle-id>/
     │   ├── owner.json
+    │   ├── observations/             # opt-in Step 稽核觀測（6.3）
     │   ├── pi/                       # --session-dir
     │   └── stderr.log
     └── steps/<invocation-id>/
@@ -603,7 +608,7 @@ Store 建構時將可信 `BaseDir` 建立後以 `EvalSymlinks` 正規化為 cano
                 └── artifacts/
 ```
 
-不複製 Pi 對話成另一套 history；既有 session JSONL 與 hub 負責對話回看。本版選擇持久化 session 模式、保留 Pi 自己的寫檔責任，不新增逐 entry 磁碟落地校驗作為 dispatch／Step 成功條件；get_entries 不作 durability 證據。真實 Pi gate 必須檢查正常結束後 history 保留，仍不保證 Pi 或 OS 異常時沒有歷史遺失。Core journal 不保存 token streaming／thinking delta。`input.json` 保留原始 Prompt，`run.json` 記錄 workflow/controller/Pi 版本、policy、launch cwd 與時間，不保存 auth 或完整環境變數。
+不複製 Pi 對話成另一套 history（opt-in 稽核觀測只為單一 attempt 留下 entries 副本，見 6.3）；既有 session JSONL 與 hub 負責對話回看。本版選擇持久化 session 模式、保留 Pi 自己的寫檔責任，不新增逐 entry 磁碟落地校驗作為 dispatch／Step 成功條件；get_entries 不作 durability 證據。真實 Pi gate 必須檢查正常結束後 history 保留，仍不保證 Pi 或 OS 異常時沒有歷史遺失。Core journal 不保存 token streaming／thinking delta。`input.json` 保留原始 Prompt，`run.json` 記錄 workflow/controller/Pi 版本、policy、launch cwd 與時間，不保存 auth 或完整環境變數。
 
 ### 8.1 JSON envelope
 
