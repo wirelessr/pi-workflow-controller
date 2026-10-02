@@ -8,6 +8,7 @@ import (
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 type HypothesisChange struct {
@@ -335,7 +336,7 @@ func initializeInvestigation(ctx context.Context, r *engine.Run, scope Scope, pl
 		p.capacity = &policy
 	}
 	if recovery != nil {
-		p.recovery = &PlannerRecovery{Policy: *recovery, Deliveries: []RecoveryDelivery{}, PlannerFailures: []RecoveryFailure{}}
+		p.recovery = &PlannerRecovery{Policy: *recovery, Deliveries: []RecoveryDelivery{}, PlannerFailures: []triagev2.RecoveryFailure{}}
 		p.identity, err = r.SessionIdentity(ctx, p.handle)
 		if err != nil {
 			return nil, err
@@ -350,7 +351,7 @@ func initializeInvestigation(ctx context.Context, r *engine.Run, scope Scope, pl
 func (p *plannerCaller) adapt(ctx context.Context, models sliceModels) (result contract.Ref, retErr error) {
 	defer func() {
 		if retErr != nil && p.recovery != nil && len(p.recoveryErrors) > 0 && (p.reporting == nil || p.reporting.result.Final == nil) {
-			retErr = recoveryError(retErr, p.recoveryErrors...)
+			retErr = triagev2.RecoveryError(retErr, p.recoveryErrors...)
 		}
 	}()
 	p.adaptive = true

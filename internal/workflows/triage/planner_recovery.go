@@ -7,47 +7,32 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
-	"time"
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 type RecoveryPolicy struct {
 	PlannerRetries int `json:"planner_retries"`
 }
 
-type RecoveryFailure struct {
-	Stage      string                  `json:"stage"`
-	TaskID     string                  `json:"task_id,omitempty"`
-	Code       engine.Code             `json:"code"`
-	Origin     engine.Origin           `json:"origin"`
-	Dispatch   engine.DispatchAccepted `json:"dispatch"`
-	RunID      string                  `json:"run_id"`
-	StepID     string                  `json:"step_id"`
-	AttemptID  string                  `json:"attempt_id"`
-	Identity   runtime.Identity        `json:"identity"`
-	Execution  *runtime.Execution      `json:"execution,omitempty"`
-	Cleanup    *runtime.CleanupReport  `json:"cleanup,omitempty"`
-	Diagnostic string                  `json:"diagnostic"`
-}
-
 type RecoveryDelivery struct {
-	ID       string               `json:"id"`
-	Kind     string               `json:"kind"`
-	Proposal contract.Ref         `json:"proposal"`
-	Context  contract.Ref         `json:"context"`
-	Results  []contract.Ref       `json:"results"`
-	Failures []RecoveryFailure    `json:"failures"`
-	Support  *supportContinuation `json:"support,omitempty"`
+	ID       string                     `json:"id"`
+	Kind     string                     `json:"kind"`
+	Proposal contract.Ref               `json:"proposal"`
+	Context  contract.Ref               `json:"context"`
+	Results  []contract.Ref             `json:"results"`
+	Failures []triagev2.RecoveryFailure `json:"failures"`
+	Support  *supportContinuation       `json:"support,omitempty"`
 }
 
 type PlannerRecovery struct {
-	DispatchCycle   int                `json:"dispatch_cycle"`
-	Policy          RecoveryPolicy     `json:"policy"`
-	Deliveries      []RecoveryDelivery `json:"deliveries"`
-	PlannerFailures []RecoveryFailure  `json:"planner_failures"`
+	DispatchCycle   int                        `json:"dispatch_cycle"`
+	Policy          RecoveryPolicy             `json:"policy"`
+	Deliveries      []RecoveryDelivery         `json:"deliveries"`
+	PlannerFailures []triagev2.RecoveryFailure `json:"planner_failures"`
 }
 
 // Safety is an evidence-backed Agent declaration, not a Controller verdict
@@ -61,185 +46,8 @@ type RecoveryChoice struct {
 
 const recoveryRequirements = `Copy recovery exactly, including its complete delivery/failure history. dispatch_cycle includes complete verification deliveries when M5 is enabled. One workers delivery is one round, including all-failed batches; consumed_batch still contains only the genuine new worker_results. Explicitly report hypothesis changes or an empty changes array. Timeout/compaction is execution failure, never incident disproof. Recovery metadata and pending phase refs are not a complete supporting context. Retain exact owners. For every unresolved failed delivery (every recovery.deliveries[] entry whose failures[] is nonempty and has no accepted resolution), declare exactly one recovery_choices[] entry: delivery_id (copied byte-exact from that delivery id), action (inspect, resume, redirect), reason and evidence basis. A ledger action of workers does not substitute for these choices: an unresolved failed delivery without its matching recovery_choices entry is rejected. Unknown remote job status forbids blindly resubmitting work, even with another task ID. Inspect means use declared general workers only for authorized read-only status/evidence inspection, never restarting the uncertain operation. Resume requires evidence-backed safety established by the Agent; explain actual remote job status and why continuation is safe. Redirect explains an evidenced alternative which does not repeat uncertain work. A caller flag, local process exit or another task ID is not safety evidence. Support resume uses the original proposal and only unfinished phases, never reacquires accepted intake/wiki or promotes them to a complete context. Planner itself only reads supplied inputs; use workers for any new inspection. Yield/plan may retain pending failures without a safety choice.`
 
-type taskFailure struct {
-	cause    error
-	handle   *engine.SessionHandle
-	identity runtime.Identity
-	stage    string
-	attempt  string
-}
-
-func (f *taskFailure) Error() string { return f.cause.Error() }
-func (f *taskFailure) Unwrap() error { return f.cause }
-
-// Inspect each classified branch. Never let a timeout cause downgrade a
-// storage/contract wrapper, or treat FailFastSibling as a user retry request.
-func recoverable(err error, sibling bool) bool {
-	switch e := err.(type) {
-	case *contract.Error:
-		return false
-	case *engine.Failure:
-		allowed := e.Code == engine.TimedOut && e.Origin == engine.OriginAttemptDeadline || e.Code == engine.CompactionFailed && e.Origin == engine.OriginCompaction
-		allowed = allowed || sibling && e.Code == engine.Cancelled && e.Origin == engine.OriginFailFastSibling
-		if !allowed || e.LimitScope == "run" {
-			return false
-		}
-		return !forbiddenCause(e.Cause)
-	case interface{ Unwrap() []error }:
-		children := e.Unwrap()
-		if len(children) == 0 {
-			return false
-		}
-		for _, child := range children {
-			if !recoverable(child, sibling) {
-				return false
-			}
-		}
-		return true
-	case interface{ Unwrap() error }:
-		return recoverable(e.Unwrap(), sibling)
-	}
-	return false
-}
-
-func forbiddenCause(err error) bool {
-	switch e := err.(type) {
-	case *contract.Error:
-		return true
-	case *engine.Failure:
-		if e.Code == engine.StorageFailed || e.Code == engine.JournalFailed || e.Code == engine.CleanupFailed || e.LimitScope == "run" || e.Origin == engine.OriginRunDeadline || e.Code == engine.Cancelled && e.Origin != engine.OriginFailFastSibling {
-			return true
-		}
-		return forbiddenCause(e.Cause)
-	case interface{ Unwrap() []error }:
-		for _, child := range e.Unwrap() {
-			if forbiddenCause(child) {
-				return true
-			}
-		}
-	case interface{ Unwrap() error }:
-		return forbiddenCause(e.Unwrap())
-	}
-	return false
-}
-
-func sameIdentity(a, b runtime.Identity) bool {
-	at, bt := a.SpawnTime, b.SpawnTime
-	a.SpawnTime, b.SpawnTime = time.Time{}, time.Time{}
-	return a == b && at.Equal(bt)
-}
-
-func confirmedFailureCleanup(r *engine.Run, err error) bool {
-	switch e := err.(type) {
-	case *engine.Failure:
-		if e.Cleanup != nil {
-			owner, ok := r.Snapshot().Sessions[e.HandleID]
-			if !ok || owner.Identity.SessionID == "" || !sameIdentity(e.Cleanup.Identity, owner.Identity) || !e.Cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
-				return false
-			}
-		}
-		return confirmedFailureCleanup(r, e.Cause)
-	case interface{ Unwrap() []error }:
-		for _, child := range e.Unwrap() {
-			if !confirmedFailureCleanup(r, child) {
-				return false
-			}
-		}
-	case interface{ Unwrap() error }:
-		return confirmedFailureCleanup(r, e.Unwrap())
-	}
-	return true
-}
-
-// Keep the current boundary first; a previously recovered timeout must not
-// reclassify a later validation, cancellation, storage or cleanup failure.
-func recoveryError(current error, previous ...error) error {
-	var failure *engine.Failure
-	var contractError *contract.Error
-	if !errors.As(current, &failure) && !errors.As(current, &contractError) {
-		code, origin := engine.WorkflowFailed, engine.OriginDefinition
-		if errors.Is(current, context.Canceled) {
-			code, origin = engine.Cancelled, engine.OriginControllerUser
-		}
-		if errors.Is(current, context.DeadlineExceeded) {
-			code, origin = engine.TimedOut, engine.OriginRunDeadline
-		}
-		current = &engine.Failure{Code: code, Origin: origin, Phase: "triage-recovery", Message: current.Error(), DispatchAccepted: engine.AcceptedNo, Cause: current}
-	}
-	return errors.Join(current, errors.Join(previous...))
-}
-
-func confirmRecovery(ctx context.Context, r *engine.Run, err error, sibling bool) (RecoveryFailure, error) {
-	return confirmTaskRecovery(ctx, r, err, sibling, contract.Ref{})
-}
-
-// A nonzero output is a committed sibling interrupted during close, not a
-// failed attempt. Both paths retain the dispatch owner and strict-close gate.
-func confirmTaskRecovery(ctx context.Context, r *engine.Run, err error, sibling bool, output contract.Ref) (RecoveryFailure, error) {
-	var result RecoveryFailure
-	if context.Cause(ctx) != nil {
-		return result, recoveryError(context.Cause(ctx), err)
-	}
-	if !recoverable(err, sibling) || !confirmedFailureCleanup(r, err) {
-		return result, err
-	}
-	var f *engine.Failure
-	if !errors.As(err, &f) {
-		return result, err
-	}
-	result = RecoveryFailure{Code: f.Code, Origin: f.Origin, Dispatch: f.DispatchAccepted, RunID: f.RunID, StepID: f.StepID, AttemptID: f.AttemptID, Diagnostic: err.Error()}
-	task, owned := err.(*taskFailure)
-	if !owned {
-		return result, err
-	}
-	committed := output != (contract.Ref{})
-	if committed && (!sibling || f.Code != engine.Cancelled || f.Origin != engine.OriginFailFastSibling) {
-		return result, err
-	}
-	undispatched := !committed && f.Code == engine.Cancelled && f.Origin == engine.OriginFailFastSibling && f.AttemptID == "" && task.attempt == ""
-	if task.handle == nil {
-		if !undispatched {
-			return result, err
-		}
-		result.Stage = task.stage
-		return result, nil
-	}
-	identity, e := r.SessionIdentity(ctx, task.handle)
-	if e != nil {
-		return result, recoveryError(e, err)
-	}
-	if !sameIdentity(identity, task.identity) || identity.SessionID == "" {
-		return result, recoveryError(fmt.Errorf("recovery identity mismatch"), err)
-	}
-	var execution *runtime.Execution
-	if committed {
-		attempt, ok := r.Snapshot().Attempts[task.attempt]
-		if !ok || task.attempt != output.AttemptID || output.RunID != r.ID() || attempt.Identity.RunID != output.RunID || attempt.Identity.AttemptID != output.AttemptID || attempt.HandleID != identity.HandleID || attempt.State != engine.Succeeded || attempt.Failure != nil || attempt.Output == nil || *attempt.Output != output || attempt.Execution == nil || attempt.Execution.SessionID != identity.SessionID {
-			return result, recoveryError(fmt.Errorf("recovery requires exact succeeded sibling output and owner"), err)
-		}
-	} else if !undispatched {
-		attempt, ok := r.Snapshot().Attempts[task.attempt]
-		if !ok || attempt.HandleID != identity.HandleID || f.HandleID != identity.HandleID || attempt.Identity.AttemptID != f.AttemptID || attempt.Identity.RunID != f.RunID || attempt.Identity.InvocationID != f.StepID || attempt.Output != nil {
-			return result, recoveryError(fmt.Errorf("recovery requires exact failed attempt identity without committed output"), err)
-		}
-		execution = attempt.Execution
-	}
-	report, e := r.CloseSessionReport(ctx, task.handle)
-	if e != nil {
-		return result, recoveryError(e, err)
-	}
-	if !sameIdentity(report.Identity, identity) || !report.ConfirmsLocalClose(identity.SessionID) {
-		return result, recoveryError(&engine.Failure{Code: engine.CleanupFailed, Origin: engine.OriginProtocol, Phase: "triage-recovery", Message: "recovery cleanup not confirmed", Cleanup: &report}, err)
-	}
-	if committed {
-		return RecoveryFailure{}, nil
-	}
-	result.Stage, result.Identity, result.Execution, result.Cleanup = task.stage, identity, execution, &report
-	return result, nil
-}
-
 func newDelivery(kind string, p *plannerCaller) RecoveryDelivery {
-	return RecoveryDelivery{ID: contract.NewID(), Kind: kind, Proposal: *p.last, Context: p.history.ref, Results: []contract.Ref{}, Failures: []RecoveryFailure{}}
+	return RecoveryDelivery{ID: contract.NewID(), Kind: kind, Proposal: *p.last, Context: p.history.ref, Results: []contract.Ref{}, Failures: []triagev2.RecoveryFailure{}}
 }
 
 func (p *plannerCaller) recoveryTask() *PlannerRecovery {
@@ -267,7 +75,7 @@ func recoverySuffix(v, prior PlannerState) ([]RecoveryDelivery, error) {
 		return nil, fmt.Errorf("explicit nonnegative planner retry budget required")
 	}
 	var retained []RecoveryDelivery
-	var failures []RecoveryFailure
+	var failures []triagev2.RecoveryFailure
 	if prior.Recovery != nil {
 		if v.Recovery.Policy != prior.Recovery.Policy {
 			return nil, fmt.Errorf("recovery policy changed")
@@ -322,7 +130,7 @@ func recoverySuffix(v, prior PlannerState) ([]RecoveryDelivery, error) {
 	return suffix, nil
 }
 
-func (a *acceptance) checkRecoveryFailure(f RecoveryFailure) error {
+func (a *acceptance) checkRecoveryFailure(f triagev2.RecoveryFailure) error {
 	snapshot := a.run.Snapshot()
 	if f.Code == engine.Cancelled && f.Origin == engine.OriginFailFastSibling && f.AttemptID == "" {
 		if f.Execution != nil || !nonblank(f.Stage) {
@@ -335,14 +143,14 @@ func (a *acceptance) checkRecoveryFailure(f RecoveryFailure) error {
 			return nil
 		}
 		owner, ok := snapshot.Sessions[f.Identity.HandleID]
-		if !ok || !sameIdentity(owner.Identity, f.Identity) || f.Identity.SessionID == "" || f.Cleanup == nil || !sameIdentity(f.Cleanup.Identity, f.Identity) || !f.Cleanup.ConfirmsLocalClose(f.Identity.SessionID) {
+		if !ok || !triagev2.SameIdentity(owner.Identity, f.Identity) || f.Identity.SessionID == "" || f.Cleanup == nil || !triagev2.SameIdentity(f.Cleanup.Identity, f.Identity) || !f.Cleanup.ConfirmsLocalClose(f.Identity.SessionID) {
 			return fmt.Errorf("undispatched owned sibling cleanup not confirmed")
 		}
 		return nil
 	}
 	attempt, ok := snapshot.Attempts[f.AttemptID]
 	owner, owned := snapshot.Sessions[f.Identity.HandleID]
-	if !ok || !owned || attempt.Failure == nil || attempt.Output != nil || f.RunID != a.run.ID() || attempt.Identity.InvocationID != f.StepID || attempt.HandleID != f.Identity.HandleID || !sameIdentity(owner.Identity, f.Identity) || f.Identity.SessionID == "" || attempt.Failure.Code != f.Code || attempt.Failure.Origin != f.Origin || attempt.DispatchAccepted != f.Dispatch || !reflect.DeepEqual(attempt.Execution, f.Execution) || f.Cleanup == nil || !sameIdentity(f.Cleanup.Identity, f.Identity) || !f.Cleanup.ConfirmsLocalClose(f.Identity.SessionID) {
+	if !ok || !owned || attempt.Failure == nil || attempt.Output != nil || f.RunID != a.run.ID() || attempt.Identity.InvocationID != f.StepID || attempt.HandleID != f.Identity.HandleID || !triagev2.SameIdentity(owner.Identity, f.Identity) || f.Identity.SessionID == "" || attempt.Failure.Code != f.Code || attempt.Failure.Origin != f.Origin || attempt.DispatchAccepted != f.Dispatch || !reflect.DeepEqual(attempt.Execution, f.Execution) || f.Cleanup == nil || !triagev2.SameIdentity(f.Cleanup.Identity, f.Identity) || !f.Cleanup.ConfirmsLocalClose(f.Identity.SessionID) {
 		return fmt.Errorf("recovery failure differs from owned failed attempt/cleanup")
 	}
 	if (f.Code != engine.TimedOut || f.Origin != engine.OriginAttemptDeadline) && (f.Code != engine.CompactionFailed || f.Origin != engine.OriginCompaction) && (f.Code != engine.Cancelled || f.Origin != engine.OriginFailFastSibling) {
@@ -446,11 +254,11 @@ func (p *plannerCaller) planningStep(ctx context.Context) (contract.Ref, error) 
 	if p.recovery == nil {
 		return p.step(ctx)
 	}
-	ref, _, err := retryPlannerInputs(ctx, p.r, p.r.Root(), "planner-recovery-"+contract.NewID(), "planner", p.recovery.Policy.PlannerRetries, p.stepInScope, p.continuePlannerInputs)
+	ref, _, err := triagev2.RetryInputs(ctx, p.r, p.r.Root(), "planner-recovery-"+contract.NewID(), "planner", p.recovery.Policy.PlannerRetries, p.stepInScope, p.continuePlannerInputs)
 	return ref, err
 }
 
-func (p *plannerCaller) continuePlannerInputs(ctx context.Context, failure RecoveryFailure, cause error, again bool) error {
+func (p *plannerCaller) continuePlannerInputs(ctx context.Context, failure triagev2.RecoveryFailure, cause error, again bool) error {
 	p.recovery.PlannerFailures = append(p.recovery.PlannerFailures, failure)
 	p.nativeFailures = append(p.nativeFailures, nativeRecoveryFailure{failure, cause})
 	if again {
@@ -463,55 +271,13 @@ func (p *plannerCaller) continuePlannerInputs(ctx context.Context, failure Recov
 	return nil
 }
 
-// Only supplied-input work may use this seam. Recovery never authorizes a
-// remote operation, and RetryState feedback is not an input to the next task.
-func retryPlannerInputs(ctx context.Context, r *engine.Run, scope *engine.Scope, key, output string, retries int, run func(context.Context, *engine.Scope) (contract.Ref, error), recovered func(context.Context, RecoveryFailure, error, bool) error) (contract.Ref, []RecoveryFailure, error) {
-	var ref contract.Ref
-	var failures []RecoveryFailure
-	var causes []error
-	_, err := scope.Retry(ctx, key, retries, func(ctx context.Context, s *engine.Scope, state engine.RetryState) (engine.RetryAction, error) {
-		var err error
-		ref, err = run(ctx, s)
-		if err == nil {
-			return engine.RetryAction{Result: engine.Result{Outputs: map[string]contract.Ref{output: ref}}}, nil
-		}
-		causes = append(causes, err)
-		failure, e := confirmRecovery(ctx, r, err, false)
-		if e != nil {
-			causes = append(causes, e)
-			return engine.RetryAction{}, e
-		}
-		failures = append(failures, failure)
-		if recovered != nil {
-			if e := recovered(ctx, failure, err, state.RetryCount < state.MaxRetries); e != nil {
-				causes = append(causes, e)
-				return engine.RetryAction{}, recoveryError(e, err)
-			}
-		}
-		return engine.RetryAction{Again: true, Feedback: &engine.Feedback{Message: failure.Diagnostic, SourceAttemptID: failure.AttemptID, SourceCode: string(failure.Code)}}, nil
-	})
-	if err != nil {
-		return contract.Ref{}, failures, recoveryError(err, causes...)
-	}
-	return ref, failures, nil
-}
-
-func appendUniqueRefs(refs []contract.Ref, more ...contract.Ref) []contract.Ref {
-	for _, ref := range more {
-		if ref != (contract.Ref{}) && !slices.Contains(refs, ref) {
-			refs = append(refs, ref)
-		}
-	}
-	return refs
-}
-
 func (p *plannerCaller) receiveWorkers(ctx context.Context, prepared []preparedWorker, joined []engine.BranchResult, groupErr error) (int, error) {
 	var failures []error
-	if groupErr != nil && !recoverable(groupErr, true) {
+	if groupErr != nil && !triagev2.Recoverable(groupErr, true) {
 		failures = append(failures, groupErr)
 	}
 	for _, branch := range joined {
-		if branch.Err != nil && (!recoverable(branch.Err, true) || !confirmedFailureCleanup(p.r, branch.Err)) {
+		if branch.Err != nil && (!triagev2.Recoverable(branch.Err, true) || !triagev2.ConfirmedFailureCleanup(p.r, branch.Err)) {
 			failures = append(failures, branch.Err)
 		}
 	}
@@ -531,7 +297,7 @@ func (p *plannerCaller) receiveWorkers(ctx context.Context, prepared []preparedW
 		if branch.Err == nil || branch.Result.Outputs["worker"] != (contract.Ref{}) {
 			continue
 		}
-		failure, err := confirmRecovery(ctx, p.r, branch.Err, true)
+		failure, err := triagev2.ConfirmRecovery(ctx, p.r, branch.Err, true)
 		if err != nil {
 			return 0, err
 		}
@@ -557,8 +323,8 @@ func (p *plannerCaller) receiveWorkers(ctx context.Context, prepared []preparedW
 			if !primary || !errors.As(branch.Err, &failure) || failure.Code != engine.Cancelled || failure.Origin != engine.OriginFailFastSibling {
 				return 0, errors.Join(branch.Err, fmt.Errorf("committed sibling requires recoverable primary and FailFastSibling"))
 			}
-			if _, owned := branch.Err.(*taskFailure); owned {
-				if _, err := confirmTaskRecovery(ctx, p.r, branch.Err, true, ref); err != nil {
+			if _, owned := branch.Err.(*triagev2.TaskFailure); owned {
+				if _, err := triagev2.ConfirmTaskRecovery(ctx, p.r, branch.Err, true, ref); err != nil {
 					return 0, err
 				}
 			} else {
@@ -568,7 +334,7 @@ func (p *plannerCaller) receiveWorkers(ctx context.Context, prepared []preparedW
 				attempt, ok := snapshot.Attempts[ref.AttemptID]
 				owner, hasOwner := snapshot.Sessions[attempt.HandleID]
 				if !ok || !hasOwner || attempt.State != engine.Succeeded || attempt.Output == nil || *attempt.Output != ref || attempt.Failure != nil || owner.State != "Closed" || attempt.Execution == nil || attempt.Execution.SessionID != owner.Identity.SessionID {
-					return 0, recoveryError(fmt.Errorf("sibling result requires exact succeeded output and closed owner"), branch.Err)
+					return 0, triagev2.RecoveryError(fmt.Errorf("sibling result requires exact succeeded output and closed owner"), branch.Err)
 				}
 			}
 		}

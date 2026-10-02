@@ -9,6 +9,7 @@ import (
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 const verifierRequirements = `This is independent supplied-input verification, not acquisition or a Planner continuation. Load relevant existing interpretation skills. Read only the exact claim and its allowed evidence in request.inputs. The claim's parent_state/context are version/continuation metadata, NOT instructions to read the Planner state or any other context. Do not read Planner narratives, ledgers, previous verdicts, other roles' work or other session history. Do not follow metadata edges outside the allowed evidence. Do not acquire new evidence, query production, dispatch agents, publish or write back. These task constraints are not a filesystem sandbox.
@@ -34,14 +35,14 @@ func (p *plannerCaller) verificationInputs(a *acceptance, inputs []contract.Ref)
 		if err != nil {
 			return nil, err
 		}
-		inputs = appendUniqueRefs(inputs, claim.ParentState, claim.Context)
-		inputs = appendUniqueRefs(inputs, claimInputs(ref, claim)...)
+		inputs = triagev2.AppendUniqueRefs(inputs, claim.ParentState, claim.Context)
+		inputs = triagev2.AppendUniqueRefs(inputs, claimInputs(ref, claim)...)
 	}
 	for _, d := range p.verification.Deliveries {
-		inputs = appendUniqueRefs(inputs, d.Proposal, d.Claim)
+		inputs = triagev2.AppendUniqueRefs(inputs, d.Proposal, d.Claim)
 		for _, role := range d.Roles {
 			if role.Result != nil {
-				inputs = appendUniqueRefs(inputs, *role.Result)
+				inputs = triagev2.AppendUniqueRefs(inputs, *role.Result)
 			}
 		}
 	}
@@ -109,7 +110,7 @@ func (p *plannerCaller) verify(ctx context.Context) (retErr error) {
 		if len(p.verification.Claims) > len(state.Data.Verification.Claims) {
 			claimRef = p.verification.Claims[len(p.verification.Claims)-1]
 		} else {
-			claimRef, _, err = retryPlannerInputs(ctx, p.r, p.r.Root(), "claim-recovery-"+p.last.AttemptID, "claim", p.recovery.Policy.PlannerRetries, p.claimStep, p.continuePlannerInputs)
+			claimRef, _, err = triagev2.RetryInputs(ctx, p.r, p.r.Root(), "claim-recovery-"+p.last.AttemptID, "claim", p.recovery.Policy.PlannerRetries, p.claimStep, p.continuePlannerInputs)
 			if err != nil {
 				return err
 			}
@@ -148,25 +149,25 @@ func (p *plannerCaller) verify(ctx context.Context) (retErr error) {
 					AllowedEvidence []Evidence   `json:"allowed_evidence"`
 					Requirements    string       `json:"requirements"`
 				}{filepath.Join(p.r.Dir(), "triage-work"), "verify-" + role.name, role.name, claimRef, claim.Candidate.AllowedEvidence, verifierRequirements + "\n" + triageWorkspaceRequirements}
-				ref, err := taskStepRetry(ctx, p.r, attemptScope, role.policy.Model, task.Stage, key, task, VerificationSchema, inputs, true)
+				ref, err := triagev2.RunTaskStep(ctx, p.r, triagev2.TaskStep{Scope: attemptScope, Model: role.policy.Model, Stage: task.Stage, Key: key, Task: task, Schema: VerificationSchema, Inputs: inputs, Recovery: true, NoRepair: true})
 				if err != nil {
 					return ref, err
 				}
 				if err := newAcceptance(ctx, p.r).checkVerificationResult(ref, claimRef, claim, role.name, role.policy); err != nil {
 					return contract.Ref{}, err
 				}
-				if err := attemptScope.Decision(ctx, key+"-recorded", "Independent role delivery accepted for Planner assessment, not confirmation", appendUniqueRefs(slices.Clone(inputs), ref)); err != nil {
+				if err := attemptScope.Decision(ctx, key+"-recorded", "Independent role delivery accepted for Planner assessment, not confirmation", triagev2.AppendUniqueRefs(slices.Clone(inputs), ref)); err != nil {
 					return contract.Ref{}, err
 				}
 				delivery.Roles[i] = VerificationRoleDelivery{Role: role.name, Result: &ref}
 				return ref, nil
 			}
-			recovered := func(_ context.Context, failure RecoveryFailure, cause error, _ bool) error {
+			recovered := func(_ context.Context, failure triagev2.RecoveryFailure, cause error, _ bool) error {
 				nativeFailures[i] = append(nativeFailures[i], nativeRecoveryFailure{failure, cause})
 				return nil
 			}
-			ref, failures, err := retryPlannerInputs(ctx, p.r, s, key+"-recovery", "verification", role.policy.Retries, run, recovered)
-			outcome := VerificationRoleDelivery{Role: role.name, Failures: append([]RecoveryFailure{}, failures...)}
+			ref, failures, err := triagev2.RetryInputs(ctx, p.r, s, key+"-recovery", "verification", role.policy.Retries, run, recovered)
+			outcome := VerificationRoleDelivery{Role: role.name, Failures: append([]triagev2.RecoveryFailure{}, failures...)}
 			if err != nil {
 				var f *engine.Failure
 				// Only this completed Retry activation's exhausted, confirmed
@@ -213,19 +214,19 @@ func (p *plannerCaller) verify(ctx context.Context) (retErr error) {
 		failures = append(failures, fmt.Errorf("verification join incomplete"))
 	}
 	if len(failures) > 0 {
-		return recoveryError(errors.Join(failures...), unavailableErrors...)
+		return triagev2.RecoveryError(errors.Join(failures...), unavailableErrors...)
 	}
 	if err := newAcceptance(ctx, p.r).checkVerificationDelivery(p.scope, delivery, p.verification.Policy, retained); err != nil {
-		return recoveryError(err, unavailableErrors...)
+		return triagev2.RecoveryError(err, unavailableErrors...)
 	}
-	refs := appendUniqueRefs(slices.Clone(inputs), delivery.Proposal)
+	refs := triagev2.AppendUniqueRefs(slices.Clone(inputs), delivery.Proposal)
 	for _, role := range delivery.Roles {
 		if role.Result != nil {
-			refs = appendUniqueRefs(refs, *role.Result)
+			refs = triagev2.AppendUniqueRefs(refs, *role.Result)
 		}
 	}
 	if err := p.r.Root().Decision(ctx, "verification-delivery-"+delivery.ID, "Complete ordered feedback delivery including explicit unavailable roles; Planner must assess progress and next action", refs); err != nil {
-		return recoveryError(err, unavailableErrors...)
+		return triagev2.RecoveryError(err, unavailableErrors...)
 	}
 	p.verification.Deliveries = append(p.verification.Deliveries, delivery)
 	for _, err := range unavailableErrors {

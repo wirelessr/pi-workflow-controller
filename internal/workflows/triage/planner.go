@@ -11,6 +11,7 @@ import (
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 const PlannerSchema = "triage.planner.v1"
@@ -297,9 +298,9 @@ func (p *plannerCaller) stepInScope(ctx context.Context, executionScope *engine.
 	inputs = appendSourceInputs(inputs, sources)
 	if p.recovery != nil {
 		for _, delivery := range p.recovery.Deliveries {
-			inputs = appendUniqueRefs(inputs, delivery.Proposal, delivery.Context)
+			inputs = triagev2.AppendUniqueRefs(inputs, delivery.Proposal, delivery.Context)
 			if delivery.Support != nil {
-				inputs = appendUniqueRefs(inputs, delivery.Support.refs()...)
+				inputs = triagev2.AppendUniqueRefs(inputs, delivery.Support.refs()...)
 			}
 		}
 	}
@@ -392,13 +393,13 @@ func (p *plannerCaller) stepInScope(ctx context.Context, executionScope *engine.
 		return state.Data.Ledger != nil, nil
 	}
 	// Mechanical acceptance repair, one budgeted re-attempt on the same
-	// session, mirrors taskStepValidateRepair: the rejection diagnostic rides
+	// session, mirrors triagev2.RunTaskStep: the rejection diagnostic rides
 	// spec.Feedback so the repairing planner sees the exact violation. Without
 	// it a gate rejection is a blind terminal failure the model cannot fix.
 	out, err := executionScope.Step(ctx, spec)
 	if err != nil && p.recovery != nil {
 		p.stopped = true
-		return contract.Ref{}, &taskFailure{cause: err, handle: p.handle, identity: p.identity, stage: "planner", attempt: out.AttemptID}
+		return contract.Ref{}, &triagev2.TaskFailure{Cause: err, Handle: p.handle, Identity: p.identity, Stage: "planner", Attempt: out.AttemptID}
 	}
 	if err == nil && p.recovery != nil && out.Execution.SessionID != p.identity.SessionID {
 		err = fmt.Errorf("planner execution identity mismatch")
@@ -416,7 +417,7 @@ func (p *plannerCaller) stepInScope(ctx context.Context, executionScope *engine.
 				out, err = child.Step(ctx, repairSpec)
 				if err != nil && p.recovery != nil {
 					p.stopped = true
-					return contract.Ref{}, &taskFailure{cause: err, handle: p.handle, identity: p.identity, stage: "planner", attempt: out.AttemptID}
+					return contract.Ref{}, &triagev2.TaskFailure{Cause: err, Handle: p.handle, Identity: p.identity, Stage: "planner", Attempt: out.AttemptID}
 				}
 				if err == nil {
 					if p.recovery != nil && out.Execution.SessionID != p.identity.SessionID {

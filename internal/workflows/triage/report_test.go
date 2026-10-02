@@ -20,6 +20,7 @@ import (
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/contract/reportresource"
 	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 // This is a pure projection test, not evidence of engine commit authority.
@@ -107,13 +108,13 @@ func TestTriageReportProjection(t *testing.T) {
 	for _, action := range []string{"unresolved", "handled", "redirect", "budget"} {
 		t.Run("M6-"+action, func(t *testing.T) {
 			p := projection
-			failure := RecoveryFailure{Stage: "verify-con", Diagnostic: "preserved original diagnostic", StepID: "RETAINED_FAILURE_STEP", AttemptID: "RETAINED_FAILURE_ATTEMPT"}
+			failure := triagev2.RecoveryFailure{Stage: "verify-con", Diagnostic: "preserved original diagnostic", StepID: "RETAINED_FAILURE_STEP", AttemptID: "RETAINED_FAILURE_ATTEMPT"}
 			failure.Identity.HandleID = "RETAINED_FAILURE_HANDLE"
 			disposition := ReportDisposition{Item: ReportFailure{Owner: assessmentRef, Kind: "verification", DeliveryID: "old-delivery", Claim: &claimRef, Role: "con", Failure: failure}, Action: action, Reason: special, Results: []contract.Ref{}, Basis: basis}
 			if action == "handled" {
 				disposition.Results = []contract.Ref{resultRef}
 			}
-			p.Data.M6 = &ReportMetadata{Dispositions: []ReportDisposition{disposition}, ReportFailures: []RecoveryFailure{{Stage: "report", Diagnostic: "preserved report retry diagnostic"}}}
+			p.Data.M6 = &ReportMetadata{Dispositions: []ReportDisposition{disposition}, ReportFailures: []triagev2.RecoveryFailure{{Stage: "report", Diagnostic: "preserved report retry diagnostic"}}}
 			if action == "budget" {
 				p.Data.M6.Dispositions[0].Action = "unresolved"
 				p.Data.M6.Budget = &ReportBudget{Policy: ReportPolicy{ReportRetries: 2, ReserveSessions: 2, ReserveAttempts: 3}, MaxSessions: 19, MaxAttempts: 29, MaxLive: 4, UsedSessions: 13, UsedAttempts: 23, LiveSessions: 1, Action: "verify", Rejected: investigationCost{Sessions: 6, Attempts: 8, Live: 3}, Reason: "resource-limited projection fixture"}
@@ -426,10 +427,10 @@ func TestTriagePureValidation(t *testing.T) {
 				return
 			}
 			claim := contract.Ref{AttemptID: "claim"}
-			task.M6 = &reportContinuation{Failures: []ReportFailure{}, ReportFailures: []RecoveryFailure{}}
-			v.M6 = &ReportMetadata{Dispositions: []ReportDisposition{}, ReportFailures: []RecoveryFailure{}}
+			task.M6 = &reportContinuation{Failures: []ReportFailure{}, ReportFailures: []triagev2.RecoveryFailure{}}
+			v.M6 = &ReportMetadata{Dispositions: []ReportDisposition{}, ReportFailures: []triagev2.RecoveryFailure{}}
 			for i := 0; i < 2; i++ {
-				item := ReportFailure{Owner: contract.Ref{AttemptID: fmt.Sprintf("owner-%d", i)}, Kind: "verification", DeliveryID: "delivery", Claim: &claim, Role: "con", Index: i, Failure: RecoveryFailure{Stage: "verify-con", AttemptID: fmt.Sprintf("failed-%d", i)}}
+				item := ReportFailure{Owner: contract.Ref{AttemptID: fmt.Sprintf("owner-%d", i)}, Kind: "verification", DeliveryID: "delivery", Claim: &claim, Role: "con", Index: i, Failure: triagev2.RecoveryFailure{Stage: "verify-con", AttemptID: fmt.Sprintf("failed-%d", i)}}
 				task.M6.Failures = append(task.M6.Failures, item)
 				v.M6.Dispositions = append(v.M6.Dispositions, ReportDisposition{Item: item, Action: "redirect", Reason: "Evidence supports redirect", Results: []contract.Ref{}, Basis: []Evidence{{Ref: &contextRef, FileID: "raw"}}})
 			}
@@ -525,7 +526,7 @@ func TestTriagePureValidation(t *testing.T) {
 func TestTriageReportMetadataPredicates(t *testing.T) {
 	for _, name := range []string{"valid", "no-m6", "unexpected-m6", "nil-empty", "retry-echo", "retry-order", "retry-multiplicity", "limited-complete", "header-before-completeness"} {
 		t.Run("header/"+name, func(t *testing.T) {
-			task := reportTask{M6: &reportContinuation{ReportFailures: []RecoveryFailure{{Stage: "report", AttemptID: "first"}, {Stage: "report", AttemptID: "second"}}}}
+			task := reportTask{M6: &reportContinuation{ReportFailures: []triagev2.RecoveryFailure{{Stage: "report", AttemptID: "first"}, {Stage: "report", AttemptID: "second"}}}}
 			v := InvestigationReport{Completeness: "incomplete", M6: &ReportMetadata{ReportFailures: slices.Clone(task.M6.ReportFailures)}}
 			if err := checkReportMetadataHeader(v, task); err != nil {
 				t.Fatal("invalid prerequisite: ", err)
@@ -538,9 +539,9 @@ func TestTriageReportMetadataPredicates(t *testing.T) {
 				task.M6 = nil
 				want = "report continuation metadata requires the M6 caller"
 			case "nil-empty":
-				task.M6.ReportFailures, v.M6.ReportFailures = nil, []RecoveryFailure{}
+				task.M6.ReportFailures, v.M6.ReportFailures = nil, []triagev2.RecoveryFailure{}
 			case "retry-echo":
-				v.M6.ReportFailures = []RecoveryFailure{}
+				v.M6.ReportFailures = []triagev2.RecoveryFailure{}
 			case "retry-order":
 				slices.Reverse(v.M6.ReportFailures)
 			case "retry-multiplicity":

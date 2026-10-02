@@ -2,16 +2,14 @@ package triage
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 type sliceModels struct {
@@ -72,7 +70,7 @@ func sliceStepRecovery(ctx context.Context, r *engine.Run, models sliceModels, k
 		inputs = append(inputs, *task.SupportingProposal)
 		task.Requirements += "\n\nRead the exact supporting_proposal Planner input for the accepted supporting_work reason and basis. Perform this stage of that task within the supplied scope and completion conditions. Other pending text and hypotheses are planning context, not additional dispatch authorization."
 	}
-	return taskStepValidate(ctx, r, r.Root(), model, task.Stage, key, task, schema, inputs, recovery, sliceAcceptance(ctx, r, schema, task.Stage, task.Scope, inputs))
+	return triagev2.RunTaskStep(ctx, r, triagev2.TaskStep{Scope: r.Root(), Model: model, Stage: task.Stage, Key: key, Task: task, Schema: schema, Inputs: inputs, Recovery: recovery, Validate: sliceAcceptance(ctx, r, schema, task.Stage, task.Scope, inputs)})
 }
 
 // sliceAcceptance returns the semantic acceptance gate for one slice stage, or
@@ -147,146 +145,6 @@ func sliceAcceptance(ctx context.Context, r *engine.Run, schema, stage string, s
 	default:
 		return nil
 	}
-}
-
-func taskStepRecovery(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref, recovery bool) (contract.Ref, error) {
-	return taskStepValidate(ctx, r, s, model, stage, key, task, schema, inputs, recovery, nil)
-}
-
-// taskStepRetry wraps a task step that already sits inside an outer retry
-// layer (retryPlannerInputs) with its own feedback loop: adding the contract
-// repair here would double-retry the same session, corrupting the outer
-// layer's failure accounting.
-func taskStepRetry(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref, recovery bool) (contract.Ref, error) {
-	return taskStepValidateNoRepair(ctx, r, s, model, stage, key, task, schema, inputs, recovery)
-}
-
-// taskStepValidate runs one task Step with a single repair retry covering both
-// contract-shape (schema) failures and, when validate is supplied, semantic
-// acceptance failures. A rejected contract returns to the same session with
-// the exact validator diagnostic as feedback; the repaired contract must pass
-// the same gates in full. Execution failures (timeout, cancellation, provider)
-// are never retried here.
-func taskStepValidate(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref, recovery bool, validate func(ctx context.Context, ref contract.Ref) error) (contract.Ref, error) {
-	return taskStepValidateRepair(ctx, r, s, model, stage, key, task, schema, inputs, recovery, validate, true)
-}
-
-func taskStepValidateNoRepair(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref, recovery bool) (contract.Ref, error) {
-	return taskStepValidateRepair(ctx, r, s, model, stage, key, task, schema, inputs, recovery, nil, false)
-}
-
-func taskStepValidateRepair(ctx context.Context, r *engine.Run, s *engine.Scope, model runtime.ModelSpec, stage, key string, task any, schema string, inputs []contract.Ref, recovery bool, validate func(ctx context.Context, ref contract.Ref) error, repairable bool) (contract.Ref, error) {
-	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + stage, Model: model})
-	if err != nil {
-		return contract.Ref{}, err
-	}
-	var identity runtime.Identity
-	if recovery {
-		// A sibling may cancel after OpenSession. Capture this owned handle for
-		// parent-context cleanup without permitting a cancelled Step dispatch.
-		identity, err = r.SessionIdentity(context.WithoutCancel(ctx), h)
-		if err != nil {
-			return contract.Ref{}, err
-		}
-	}
-	prompt, err := json.Marshal(task)
-	if err != nil {
-		return contract.Ref{}, err
-	}
-	spec := engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: inputs, Output: contract.Spec{SchemaID: schema}, Timeout: 30 * time.Minute}
-	var out engine.StepResult
-	var lastFeedback *engine.Feedback
-	// Mechanical contract-shape repair, one budgeted re-attempt on the same
-	// session: the rejection diagnostic rides spec.Feedback so the repairing
-	// agent sees the exact violation. Retried failures keep their typed code.
-	// Execution failures (timeout, cancellation, provider) are never retried.
-	// A manual second Step keeps successful steps from registering a retry
-	// scope: retry accounting must reflect only real repairs.
-	const repairBudget = 1
-	var repairCount int
-	var lastPublished contract.Ref
-	for {
-		attemptSpec := spec
-		if repairCount > 0 && lastFeedback != nil {
-			attemptSpec.Feedback = lastFeedback
-		}
-		// The first attempt dispatches from the owning scope unchanged; only
-		// the repair re-attempt needs a fresh child scope, because a failed
-		// step key is burned on its owning scope.
-		attemptScope := s
-		if repairCount > 0 {
-			child, cerr := s.Child("contract-repair-" + key)
-			if cerr != nil {
-				err = cerr
-				break
-			}
-			attemptScope = child
-		}
-		var e error
-		out, e = attemptScope.Step(ctx, attemptSpec)
-		if e == nil {
-			if out.Output != (contract.Ref{}) {
-				lastPublished = out.Output
-			}
-			if validate == nil {
-				break
-			}
-			if ve := validate(ctx, out.Output); ve == nil {
-				break
-			} else if repairable && repairCount < repairBudget {
-				lastFeedback = &engine.Feedback{Message: "Previous contract was published but rejected by acceptance validation. Fix exactly the reported violation and republish the same contract; do not change substance: " + ve.Error()}
-				repairCount++
-				continue
-			} else {
-				err = ve
-				break
-			}
-		}
-		var failure *engine.Failure
-		if !repairable || !errors.As(e, &failure) || failure.Code != engine.ContractInvalid || repairCount >= repairBudget {
-			err = e
-			break
-		}
-		lastFeedback = &engine.Feedback{Message: "Previous contract rejected by schema validation. Fix exactly the reported violations and republish the same contract; do not change substance: " + failure.Message, SourceAttemptID: failure.AttemptID, SourceCode: string(failure.Code)}
-		repairCount++
-	}
-	if err != nil {
-		if recovery {
-			// A sibling cancel can interrupt a repair after an earlier
-			// attempt already published: that output stays committed, so
-			// the join must see it rather than an empty dispatch failure.
-			cancelled := false
-			var f *engine.Failure
-			if errors.As(err, &f) && f.Code == engine.Cancelled {
-				cancelled = true
-			}
-			attemptID := out.AttemptID
-			if cancelled && lastPublished != (contract.Ref{}) {
-				attemptID = lastPublished.AttemptID
-				return lastPublished, &taskFailure{cause: err, handle: h, identity: identity, stage: stage, attempt: attemptID}
-			}
-			return contract.Ref{}, &taskFailure{cause: err, handle: h, identity: identity, stage: stage, attempt: attemptID}
-		}
-		return contract.Ref{}, err
-	}
-	return closeTaskStep(ctx, r, h, identity, stage, out, recovery)
-}
-
-func closeTaskStep(ctx context.Context, r *engine.Run, h *engine.SessionHandle, identity runtime.Identity, stage string, out engine.StepResult, recovery bool) (contract.Ref, error) {
-	if recovery && out.Execution.SessionID != identity.SessionID {
-		return out.Output, fmt.Errorf("task execution identity mismatch")
-	}
-	closed, err := r.CloseSessionReport(ctx, h)
-	if err != nil {
-		if recovery {
-			return out.Output, &taskFailure{cause: err, handle: h, identity: identity, stage: stage, attempt: out.AttemptID}
-		}
-		return out.Output, err
-	}
-	if !closed.ConfirmsLocalClose(out.Execution.SessionID) || recovery && closed.Identity != identity {
-		return out.Output, fmt.Errorf("%s cleanup not confirmed", stage)
-	}
-	return out.Output, nil
 }
 
 func executeSlice(ctx context.Context, r *engine.Run, scope Scope, models sliceModels) (ContextResult, error) {

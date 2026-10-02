@@ -8,6 +8,7 @@ import (
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 const VerificationSchema = "triage.verification.v1"
@@ -73,11 +74,11 @@ type VerificationResult struct {
 }
 
 type VerificationRoleDelivery struct {
-	Role        string            `json:"role"`
-	Result      *contract.Ref     `json:"result"`
-	Unavailable bool              `json:"unavailable"`
-	Failures    []RecoveryFailure `json:"failures"`
-	Exhausted   string            `json:"exhausted"`
+	Role        string                     `json:"role"`
+	Result      *contract.Ref              `json:"result"`
+	Unavailable bool                       `json:"unavailable"`
+	Failures    []triagev2.RecoveryFailure `json:"failures"`
+	Exhausted   string                     `json:"exhausted"`
 }
 
 type VerificationDelivery struct {

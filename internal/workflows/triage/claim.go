@@ -11,6 +11,7 @@ import (
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 const ClaimSchema = "triage.claim.v1"
@@ -112,7 +113,7 @@ func (a *acceptance) loadClaim(scope Scope, ref contract.Ref) (PureClaim, error)
 func claimInputs(ref contract.Ref, claim PureClaim) []contract.Ref {
 	inputs := []contract.Ref{ref}
 	for _, e := range claim.Candidate.AllowedEvidence {
-		inputs = appendUniqueRefs(inputs, *e.Ref)
+		inputs = triagev2.AppendUniqueRefs(inputs, *e.Ref)
 	}
 	return inputs
 }
@@ -151,12 +152,12 @@ func (p *plannerCaller) claimStep(ctx context.Context, executionScope *engine.Sc
 	if err != nil {
 		return contract.Ref{}, err
 	}
-	inputs := appendUniqueRefs(claimInputs(*p.last, projection), p.history.ref)
+	inputs := triagev2.AppendUniqueRefs(claimInputs(*p.last, projection), p.history.ref)
 	key := "claim-" + p.last.AttemptID
 	out, err := executionScope.Step(ctx, engine.StepSpec{Key: key, Session: p.handle, Prompt: string(prompt), Inputs: inputs, Output: contract.Spec{SchemaID: ClaimSchema}, Timeout: 30 * time.Minute})
 	if err != nil {
 		p.stopped = true
-		return contract.Ref{}, &taskFailure{cause: err, handle: p.handle, identity: p.identity, stage: "planner", attempt: out.AttemptID}
+		return contract.Ref{}, &triagev2.TaskFailure{Cause: err, Handle: p.handle, Identity: p.identity, Stage: "planner", Attempt: out.AttemptID}
 	}
 	if out.Execution.SessionID != p.identity.SessionID {
 		p.stopped = true
@@ -167,7 +168,7 @@ func (p *plannerCaller) claimStep(ctx context.Context, executionScope *engine.Sc
 		err = fmt.Errorf("claim differs from dispatched projection")
 	}
 	if err == nil {
-		err = executionScope.Decision(ctx, key+"-recorded", "Pure candidate projection accepted; no causal verdict", appendUniqueRefs(inputs, out.Output))
+		err = executionScope.Decision(ctx, key+"-recorded", "Pure candidate projection accepted; no causal verdict", triagev2.AppendUniqueRefs(inputs, out.Output))
 	}
 	if err != nil {
 		p.stopped = true

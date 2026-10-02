@@ -8,22 +8,23 @@ import (
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 // Native causes stay in workflow memory, never reconstructed from diagnostics
 // or Snapshot.FailureInfo. Parallel consumers merge these only after joining.
 type nativeRecoveryFailure struct {
-	failure RecoveryFailure
+	failure triagev2.RecoveryFailure
 	cause   error
 }
 
-func sameRecoveryFailure(a, b RecoveryFailure) bool {
-	if !sameIdentity(a.Identity, b.Identity) {
+func sameRecoveryFailure(a, b triagev2.RecoveryFailure) bool {
+	if !triagev2.SameIdentity(a.Identity, b.Identity) {
 		return false
 	}
 	a.Identity = b.Identity
 	if a.Cleanup != nil && b.Cleanup != nil {
-		if !sameIdentity(a.Cleanup.Identity, b.Cleanup.Identity) {
+		if !triagev2.SameIdentity(a.Cleanup.Identity, b.Cleanup.Identity) {
 			return false
 		}
 		cleanup := *a.Cleanup
@@ -37,7 +38,7 @@ type investigationReporting struct {
 	policy   ReportPolicy
 	renderer string
 	budget   *ReportBudget
-	failures []RecoveryFailure
+	failures []triagev2.RecoveryFailure
 	result   engine.Result
 	pending  *PendingReportError
 }
@@ -51,7 +52,7 @@ type PendingReportError struct {
 	Inputs             []contract.Ref
 	Recovery           *PlannerRecovery
 	Verification       *PlannerVerification
-	ReportFailures     []RecoveryFailure
+	ReportFailures     []triagev2.RecoveryFailure
 	ControllerFeedback []PlannerFeedback
 	cause              error
 }
@@ -69,7 +70,7 @@ func (p *plannerCaller) finishReport(ctx context.Context) (retErr error) {
 		}
 		if !closeAttempted {
 			if err := p.close(ctx); err != nil {
-				retErr = recoveryError(err, retErr)
+				retErr = triagev2.RecoveryError(err, retErr)
 			}
 		}
 		pending := reporting.pending
@@ -83,7 +84,7 @@ func (p *plannerCaller) finishReport(ctx context.Context) (retErr error) {
 	run := func(ctx context.Context, scope *engine.Scope) (contract.Ref, error) {
 		return p.reportInScope(ctx, scope, reporting.renderer)
 	}
-	recovered := func(ctx context.Context, failure RecoveryFailure, cause error, again bool) error {
+	recovered := func(ctx context.Context, failure triagev2.RecoveryFailure, cause error, again bool) error {
 		reporting.failures = append(reporting.failures, failure)
 		p.nativeFailures = append(p.nativeFailures, nativeRecoveryFailure{failure, cause})
 		if again {
@@ -95,7 +96,7 @@ func (p *plannerCaller) finishReport(ctx context.Context) (retErr error) {
 		}
 		return nil
 	}
-	ref, _, err := retryPlannerInputs(ctx, p.r, p.r.Root(), "report-recovery-"+p.last.AttemptID, "report", reporting.policy.ReportRetries, run, recovered)
+	ref, _, err := triagev2.RetryInputs(ctx, p.r, p.r.Root(), "report-recovery-"+p.last.AttemptID, "report", reporting.policy.ReportRetries, run, recovered)
 	if err != nil {
 		return err
 	}
@@ -117,15 +118,15 @@ func (p *plannerCaller) finishReport(ctx context.Context) (retErr error) {
 	}
 	closeAttempted = true
 	if err := p.close(ctx); err != nil {
-		return recoveryError(err, unresolved...)
+		return triagev2.RecoveryError(err, unresolved...)
 	}
 	reporting.pending.Boundary = "closed"
 	reporting.result = engine.Result{Outputs: map[string]contract.Ref{"state": *p.last, "report": ref}, Final: &engine.FinalSelection{Output: "report", FileID: ReportFileID}}
 	if reporting.budget != nil {
-		return recoveryError(fmt.Errorf("resource-limited investigation: %s", reporting.budget.Reason), unresolved...)
+		return triagev2.RecoveryError(fmt.Errorf("resource-limited investigation: %s", reporting.budget.Reason), unresolved...)
 	}
 	if len(unresolved) > 0 {
-		return recoveryError(fmt.Errorf("investigation report retains unresolved execution failures"), unresolved...)
+		return triagev2.RecoveryError(fmt.Errorf("investigation report retains unresolved execution failures"), unresolved...)
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"pi-workflow-controller/internal/contract"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 // SupportingWork proposes one existing workflow task, bound to the enclosing
@@ -171,12 +172,12 @@ func (p *plannerCaller) support(ctx context.Context, models sliceModels) (*plann
 		if p.recovery == nil {
 			return nil, err
 		}
-		failure, recoveryErr := confirmRecovery(ctx, p.r, err, false)
+		failure, recoveryErr := triagev2.ConfirmRecovery(ctx, p.r, err, false)
 		if recoveryErr != nil {
 			return nil, recoveryErr
 		}
 		delivery := newDelivery("support", p)
-		delivery.Failures, delivery.Support = []RecoveryFailure{failure}, continuation
+		delivery.Failures, delivery.Support = []triagev2.RecoveryFailure{failure}, continuation
 		p.recovery.Deliveries = append(p.recovery.Deliveries, delivery)
 		p.recoveryErrors = append(p.recoveryErrors, err)
 		p.nativeFailures = append(p.nativeFailures, nativeRecoveryFailure{failure, err})

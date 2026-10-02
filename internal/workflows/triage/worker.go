@@ -11,6 +11,7 @@ import (
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 const WorkerSchema = "triage.worker.v1"
@@ -390,7 +391,7 @@ func runWorker(ctx context.Context, r *engine.Run, s *engine.Scope, models slice
 	request.Workspace = filepath.Join(r.Dir(), "triage-work")
 	if err := s.Decision(ctx, key+"-dispatch", "Dispatch one explicit worker task: "+request.Task.ID, inputs); err != nil {
 		if prepared.recovery {
-			return contract.Ref{}, &taskFailure{cause: err, stage: request.Stage}
+			return contract.Ref{}, &triagev2.TaskFailure{Cause: err, Stage: request.Stage}
 		}
 		return contract.Ref{}, err
 	}
@@ -410,7 +411,7 @@ func runWorker(ctx context.Context, r *engine.Run, s *engine.Scope, models slice
 		}
 	}
 	request.Requirements += "\n" + triageWorkspaceRequirements
-	return taskStepValidate(ctx, r, s, model, request.Stage, key, request, WorkerSchema, inputs, prepared.recovery, func(ctx context.Context, ref contract.Ref) error {
+	return triagev2.RunTaskStep(ctx, r, triagev2.TaskStep{Scope: s, Model: model, Stage: request.Stage, Key: key, Task: request, Schema: WorkerSchema, Inputs: inputs, Recovery: prepared.recovery, Validate: func(ctx context.Context, ref contract.Ref) error {
 		// Full acceptance on every (re)published worker result; a rejected
 		// contract returns to the session as repair feedback, and the repaired
 		// one must pass these same gates again.
@@ -420,7 +421,7 @@ func runWorker(ctx context.Context, r *engine.Run, s *engine.Scope, models slice
 			return err
 		}
 		return checkWorkerResult(result, prepared.request, prepared.inputs, prepared.sources)
-	})
+	}})
 }
 
 func acceptWorker(ctx context.Context, r *engine.Run, scope Scope, proposal contract.Ref, accepted []contract.Ref, prepared preparedWorker, ref contract.Ref) error {

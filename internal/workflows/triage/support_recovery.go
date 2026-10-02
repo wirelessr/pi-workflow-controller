@@ -8,6 +8,7 @@ import (
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 // These refs have passed their phase's existing acceptance, not the final
@@ -25,13 +26,13 @@ type supportContinuation struct {
 func (c *supportContinuation) refs() []contract.Ref {
 	refs := []contract.Ref{c.Proposal, c.Context}
 	if c.Intake != nil {
-		refs = appendUniqueRefs(refs, *c.Intake)
+		refs = triagev2.AppendUniqueRefs(refs, *c.Intake)
 	}
 	if c.Wiki != nil {
-		refs = appendUniqueRefs(refs, *c.Wiki)
+		refs = triagev2.AppendUniqueRefs(refs, *c.Wiki)
 	}
 	if c.Authorization != nil {
-		refs = appendUniqueRefs(refs, *c.Authorization)
+		refs = triagev2.AppendUniqueRefs(refs, *c.Authorization)
 	}
 	return refs
 }
@@ -48,7 +49,7 @@ func (c *supportContinuation) step(ctx context.Context, r *engine.Run, models sl
 	}
 	c.FailedPhase = task.Stage
 	if c.Authorization != nil {
-		inputs = appendUniqueRefs(inputs, *c.Authorization)
+		inputs = triagev2.AppendUniqueRefs(inputs, *c.Authorization)
 		task.Requirements += "\nRead the exact continuation authorization input and its evidence-backed recovery choice. Continue only this unfinished phase of the original supporting proposal; do not repeat completed acquisition or resubmit remote work whose status remains unknown. Preserve all original owners and diagnostics."
 	}
 	return sliceStepRecovery(ctx, r, models, key, task, schema, inputs, true)

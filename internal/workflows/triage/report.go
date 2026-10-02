@@ -16,6 +16,7 @@ import (
 	"pi-workflow-controller/internal/contract/reportresource"
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 const ReportSchema = "triage.report.v1"
@@ -88,10 +89,10 @@ func (p *plannerCaller) reportInputs(a *acceptance) (reportTask, []contract.Ref,
 		if err := a.checkPlannerWithWorkers(*ref, h, state.Data.Previous, records); err != nil {
 			return task, nil, err
 		}
-		inputs = appendUniqueRefs(inputs, *ref, h.ref)
+		inputs = triagev2.AppendUniqueRefs(inputs, *ref, h.ref)
 		inputs = appendSourceInputs(inputs, h.sources)
-		inputs = appendUniqueRefs(inputs, state.Data.WorkerResults...)
-		inputs = appendUniqueRefs(inputs, state.Data.WikiResults...)
+		inputs = triagev2.AppendUniqueRefs(inputs, state.Data.WorkerResults...)
+		inputs = triagev2.AppendUniqueRefs(inputs, state.Data.WikiResults...)
 		if p.reporting != nil {
 			sources, err := a.recoverySources(p.scope, h.sources, state.Data.Recovery)
 			if err != nil {
@@ -100,9 +101,9 @@ func (p *plannerCaller) reportInputs(a *acceptance) (reportTask, []contract.Ref,
 			inputs = appendSourceInputs(inputs, sources)
 			if state.Data.Recovery != nil {
 				for _, delivery := range state.Data.Recovery.Deliveries {
-					inputs = appendUniqueRefs(inputs, delivery.Proposal, delivery.Context)
+					inputs = triagev2.AppendUniqueRefs(inputs, delivery.Proposal, delivery.Context)
 					if delivery.Support != nil {
-						inputs = appendUniqueRefs(inputs, delivery.Support.refs()...)
+						inputs = triagev2.AppendUniqueRefs(inputs, delivery.Support.refs()...)
 					}
 				}
 			}
@@ -116,14 +117,14 @@ func (p *plannerCaller) reportInputs(a *acceptance) (reportTask, []contract.Ref,
 				if err != nil {
 					return task, nil, err
 				}
-				inputs = appendUniqueRefs(inputs, claimInputs(claimRef, claim)...)
-				inputs = appendUniqueRefs(inputs, claim.ParentState, claim.Context)
+				inputs = triagev2.AppendUniqueRefs(inputs, claimInputs(claimRef, claim)...)
+				inputs = triagev2.AppendUniqueRefs(inputs, claim.ParentState, claim.Context)
 			}
 			for _, delivery := range state.Data.Verification.Deliveries {
-				inputs = appendUniqueRefs(inputs, delivery.Proposal)
+				inputs = triagev2.AppendUniqueRefs(inputs, delivery.Proposal)
 				for _, role := range delivery.Roles {
 					if role.Result != nil {
-						inputs = appendUniqueRefs(inputs, *role.Result)
+						inputs = triagev2.AppendUniqueRefs(inputs, *role.Result)
 					}
 				}
 			}
@@ -191,7 +192,7 @@ func (p *plannerCaller) reportInScope(ctx context.Context, executionScope *engin
 			p.reporting.pending.Boundary = "step-committed"
 		} else if err != nil {
 			p.stopped = true
-			return contract.Ref{}, &taskFailure{cause: err, handle: p.handle, identity: identity, stage: "report", attempt: out.AttemptID}
+			return contract.Ref{}, &triagev2.TaskFailure{Cause: err, Handle: p.handle, Identity: identity, Stage: "report", Attempt: out.AttemptID}
 		}
 	}
 	if err == nil && out.Execution.SessionID != identity.SessionID {
@@ -204,7 +205,7 @@ func (p *plannerCaller) reportInScope(ctx context.Context, executionScope *engin
 		if p.reporting != nil {
 			p.reporting.pending.Boundary = "validated"
 		}
-		err = executionScope.Decision(ctx, key+"-recorded", "Report projection and exact bindings accepted; support and closure remain Planner judgments", appendUniqueRefs(inputs, out.Output))
+		err = executionScope.Decision(ctx, key+"-recorded", "Report projection and exact bindings accepted; support and closure remain Planner judgments", triagev2.AppendUniqueRefs(inputs, out.Output))
 	}
 	if err != nil {
 		p.stopped = true

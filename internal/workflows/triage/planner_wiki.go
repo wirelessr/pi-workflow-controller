@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	"pi-workflow-controller/internal/contract"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 type InvestigationWikiTask struct {
@@ -191,18 +192,18 @@ func (p *plannerCaller) searchWiki(ctx context.Context, models sliceModels) (con
 		request.Requirements += "\nRead the exact proposal recovery metadata and choices. Do not repeat a failed search or submit remote work unless the Agent has supplied an evidence-backed safe resume or nonoverlapping redirect. Preserve the original failed proposal/task and diagnostic binding in recovery metadata; this attempt has its own binding."
 	}
 	request.Requirements += "\n" + triageWorkspaceRequirements
-	ref, err := taskStepRecovery(ctx, p.r, p.r.Root(), models.Analysis, request.Stage, key, request, WikiSchema, inputs, p.recovery != nil)
+	ref, err := triagev2.RunTaskStep(ctx, p.r, triagev2.TaskStep{Scope: p.r.Root(), Model: models.Analysis, Stage: request.Stage, Key: key, Task: request, Schema: WikiSchema, Inputs: inputs, Recovery: p.recovery != nil})
 	if err != nil {
 		if p.recovery == nil {
 			return contract.Ref{}, err
 		}
-		failure, recoveryErr := confirmRecovery(ctx, p.r, err, false)
+		failure, recoveryErr := triagev2.ConfirmRecovery(ctx, p.r, err, false)
 		if recoveryErr != nil {
 			return contract.Ref{}, recoveryErr
 		}
 		delivery := newDelivery("wiki", p)
 		failure.TaskID = state.Data.WikiTask.ID
-		delivery.Failures = []RecoveryFailure{failure}
+		delivery.Failures = []triagev2.RecoveryFailure{failure}
 		p.recovery.Deliveries = append(p.recovery.Deliveries, delivery)
 		p.recoveryErrors = append(p.recoveryErrors, err)
 		p.nativeFailures = append(p.nativeFailures, nativeRecoveryFailure{failure, err})

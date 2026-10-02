@@ -8,19 +8,20 @@ import (
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 // Owner is the first committed Planner snapshot receiving this delivery/item,
 // not the latest snapshot that repeats it. Index also identifies undispatched
 // siblings, which must not acquire a fabricated attempt or result Ref.
 type ReportFailure struct {
-	Owner      contract.Ref    `json:"owner"`
-	Kind       string          `json:"kind"`
-	DeliveryID string          `json:"delivery_id"`
-	Claim      *contract.Ref   `json:"claim"`
-	Role       string          `json:"role"`
-	Index      int             `json:"index"`
-	Failure    RecoveryFailure `json:"failure"`
+	Owner      contract.Ref             `json:"owner"`
+	Kind       string                   `json:"kind"`
+	DeliveryID string                   `json:"delivery_id"`
+	Claim      *contract.Ref            `json:"claim"`
+	Role       string                   `json:"role"`
+	Index      int                      `json:"index"`
+	Failure    triagev2.RecoveryFailure `json:"failure"`
 }
 
 type ReportDisposition struct {
@@ -32,26 +33,26 @@ type ReportDisposition struct {
 }
 
 type ReportMetadata struct {
-	Dispositions   []ReportDisposition `json:"dispositions"`
-	ReportFailures []RecoveryFailure   `json:"report_failures"`
-	Budget         *ReportBudget       `json:"budget"`
+	Dispositions   []ReportDisposition        `json:"dispositions"`
+	ReportFailures []triagev2.RecoveryFailure `json:"report_failures"`
+	Budget         *ReportBudget              `json:"budget"`
 }
 
 type reportContinuation struct {
-	Failures           []ReportFailure      `json:"failures"`
-	ReportFailures     []RecoveryFailure    `json:"report_failures"`
-	Policy             ReportPolicy         `json:"policy"`
-	Budget             *ReportBudget        `json:"budget"`
-	Recovery           *PlannerRecovery     `json:"recovery"`
-	Verification       *PlannerVerification `json:"verification"`
-	ControllerFeedback []PlannerFeedback    `json:"controller_feedback"`
+	Failures           []ReportFailure            `json:"failures"`
+	ReportFailures     []triagev2.RecoveryFailure `json:"report_failures"`
+	Policy             ReportPolicy               `json:"policy"`
+	Budget             *ReportBudget              `json:"budget"`
+	Recovery           *PlannerRecovery           `json:"recovery"`
+	Verification       *PlannerVerification       `json:"verification"`
+	ControllerFeedback []PlannerFeedback          `json:"controller_feedback"`
 }
 
 func (p *plannerCaller) reportContinuation(a *acceptance) (*reportContinuation, error) {
 	if p.reporting == nil {
 		return nil, nil
 	}
-	request := &reportContinuation{Failures: []ReportFailure{}, ReportFailures: append([]RecoveryFailure{}, p.reporting.failures...), Policy: p.reporting.policy, Budget: p.reporting.budget, Recovery: p.recoveryTask(), Verification: p.verificationTask(), ControllerFeedback: append([]PlannerFeedback{}, p.pendingFeedback...)}
+	request := &reportContinuation{Failures: []ReportFailure{}, ReportFailures: append([]triagev2.RecoveryFailure{}, p.reporting.failures...), Policy: p.reporting.policy, Budget: p.reporting.budget, Recovery: p.recoveryTask(), Verification: p.verificationTask(), ControllerFeedback: append([]PlannerFeedback{}, p.pendingFeedback...)}
 	var chain []contract.Ref
 	for ref := p.last; ref != nil; {
 		state, err := readAccepted[PlannerState](a, *ref, PlannerSchema)

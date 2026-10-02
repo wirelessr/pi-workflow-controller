@@ -28,6 +28,7 @@ import (
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
 	"pi-workflow-controller/internal/testutil/protocol"
+	"pi-workflow-controller/internal/workflows/triagev2"
 )
 
 func TestRawFileReaderBoundaries(t *testing.T) {
@@ -3084,7 +3085,7 @@ func r5Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, input 
 	}
 	if name != "r5-incomplete" {
 		p.adaptive = true
-		p.recovery = &PlannerRecovery{Policy: RecoveryPolicy{PlannerRetries: 0}, Deliveries: []RecoveryDelivery{}, PlannerFailures: []RecoveryFailure{}}
+		p.recovery = &PlannerRecovery{Policy: RecoveryPolicy{PlannerRetries: 0}, Deliveries: []RecoveryDelivery{}, PlannerFailures: []triagev2.RecoveryFailure{}}
 		p.verification = &PlannerVerification{Policy: VerificationPolicy{
 			Pro:   VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "pro", Thinking: "high"}},
 			Con:   VerifierPolicy{Model: runtime.ModelSpec{Provider: "fixture", ID: "con", Thinking: "medium"}},
@@ -3456,7 +3457,7 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 				return contract.Ref{}, err
 			}
 			p.adaptive = true
-			p.recovery = &PlannerRecovery{Policy: *recovery, Deliveries: []RecoveryDelivery{}, PlannerFailures: []RecoveryFailure{}}
+			p.recovery = &PlannerRecovery{Policy: *recovery, Deliveries: []RecoveryDelivery{}, PlannerFailures: []triagev2.RecoveryFailure{}}
 			p.verification = &PlannerVerification{Policy: *verification, Claims: []contract.Ref{}, Deliveries: []VerificationDelivery{}}
 			p.identity, err = r.SessionIdentity(ctx, p.handle)
 			if err != nil {
@@ -3480,7 +3481,7 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 					model, role, key = verification.Pro.Model, "triage-verify-pro", "verify-"+validClaim.AttemptID+"-pro"
 					inputs = claimInputs(validClaim, claim)
 					task := map[string]any{"stage": "verify-pro", "role": "pro", "claim": validClaim, "allowed_evidence": claim.Candidate.AllowedEvidence, "requirements": verifierRequirements + "\n" + triageWorkspaceRequirements, "workspace": filepath.Join(r.Dir(), "triage-work")}
-					valid, err := taskStepRecovery(ctx, r, r.Root(), model, "verify-pro", key, task, VerificationSchema, inputs, true)
+					valid, err := triagev2.RunTaskStep(ctx, r, triagev2.TaskStep{Scope: r.Root(), Model: model, Stage: "verify-pro", Key: key, Task: task, Schema: VerificationSchema, Inputs: inputs, Recovery: true})
 					if err != nil {
 						return contract.Ref{}, err
 					}
@@ -3624,7 +3625,7 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 			return contract.Ref{}, err
 		}
 		p.adaptive = true
-		p.recovery = &PlannerRecovery{Policy: RecoveryPolicy{PlannerRetries: 1}, Deliveries: []RecoveryDelivery{}, PlannerFailures: []RecoveryFailure{}}
+		p.recovery = &PlannerRecovery{Policy: RecoveryPolicy{PlannerRetries: 1}, Deliveries: []RecoveryDelivery{}, PlannerFailures: []triagev2.RecoveryFailure{}}
 		p.identity, err = r.SessionIdentity(ctx, p.handle)
 		if err != nil {
 			return contract.Ref{}, err
@@ -3648,7 +3649,7 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 				}
 				// Exercise the real commit -> cancelled close boundary without a
 				// production hook. This is primitive/consumer integration, not a
-				// deterministic reproduction inside taskStepRecovery itself.
+				// deterministic reproduction inside triagev2.RunTaskStep itself.
 				model := runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: models.FetchThinking}
 				work.request.Workspace = filepath.Join(r.Dir(), "triage-work")
 				work.request.Requirements += "\n" + triageWorkspaceRequirements
@@ -3669,7 +3670,7 @@ func m2Run(t *testing.T, ctx context.Context, r *engine.Run, scope Scope, models
 				if !errors.As(context.Cause(ctx), &cause) || cause.Origin != engine.OriginFailFastSibling || r.Snapshot().Sessions[identity.HandleID].State != "Idle" {
 					return engine.Result{}, fmt.Errorf("fixture missed committed-before-close sibling cancellation")
 				}
-				ref, err := closeTaskStep(ctx, r, h, identity, work.request.Stage, out, true)
+				ref, err := triagev2.CloseTaskStep(ctx, r, h, identity, work.request.Stage, out, true)
 				if err == nil || ref != out.Output || r.Snapshot().Sessions[identity.HandleID].State != "Idle" {
 					return engine.Result{}, fmt.Errorf("cancelled close changed committed output or ran cleanup")
 				}
@@ -4183,7 +4184,7 @@ func assertValidationBoundary(t *testing.T, r *engine.Run, tc triageCase, report
 		}
 		matches := 0
 		for _, cleanup := range report.Cleanup {
-			if sameIdentity(cleanup.Identity, s.Identity) && cleanup.ConfirmsLocalClose(s.Identity.SessionID) {
+			if triagev2.SameIdentity(cleanup.Identity, s.Identity) && cleanup.ConfirmsLocalClose(s.Identity.SessionID) {
 				matches++
 			}
 		}
@@ -4525,7 +4526,7 @@ func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref cont
 				for _, failed := range got.Failures {
 					attempt := report.Snapshot.Attempts[failed.AttemptID]
 					owner := report.Snapshot.Sessions[attempt.HandleID]
-					if failed.Stage != "verify-"+role || failed.RunID != attempt.Identity.RunID || failed.AttemptID != attempt.Identity.AttemptID || attempt.Failure == nil || failed.Code != attempt.Failure.Code || failed.Cleanup == nil || !failed.Cleanup.ConfirmsLocalClose(owner.Identity.SessionID) || !sameIdentity(failed.Identity, owner.Identity) || owner.Role.Name != "triage-verify-"+role || attempt.Output != nil || failed.Diagnostic == "" {
+					if failed.Stage != "verify-"+role || failed.RunID != attempt.Identity.RunID || failed.AttemptID != attempt.Identity.AttemptID || attempt.Failure == nil || failed.Code != attempt.Failure.Code || failed.Cleanup == nil || !failed.Cleanup.ConfirmsLocalClose(owner.Identity.SessionID) || !triagev2.SameIdentity(failed.Identity, owner.Identity) || owner.Role.Name != "triage-verify-"+role || attempt.Output != nil || failed.Diagnostic == "" {
 						t.Fatal("verifier retry lost actual typed failure/owner/strict cleanup accounting")
 					}
 				}
@@ -4623,7 +4624,7 @@ func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref cont
 			diedOnAbort := c.WaitCompleted && c.ProcessExited && c.WaitError == "" && c.KillError == "" && c.DiscoveryError == "" &&
 				(len(c.Unconfirmed) == 1 && c.Unconfirmed[0] == "abort not acknowledged" ||
 					len(c.Unconfirmed) == 2 && c.Unconfirmed[0] == "abort not acknowledged" && c.Unconfirmed[1] == "abort_bash not acknowledged")
-			if !ok || !sameIdentity(c.Identity, owner.Identity) || !c.WaitCompleted || !c.ProcessExited || (!c.ConfirmsLocalClose(owner.Identity.SessionID) && !diedOnAbort) && tc.name != "m4-mixed-cleanup-fatal" && tc.name != "m4-mixed-wait-fatal" && tc.name != "m4-mixed-committed-close-cleanup-fatal" {
+			if !ok || !triagev2.SameIdentity(c.Identity, owner.Identity) || !c.WaitCompleted || !c.ProcessExited || (!c.ConfirmsLocalClose(owner.Identity.SessionID) && !diedOnAbort) && tc.name != "m4-mixed-cleanup-fatal" && tc.name != "m4-mixed-wait-fatal" && tc.name != "m4-mixed-committed-close-cleanup-fatal" {
 				t.Fatalf("M4 cleanup differs from independently recorded owner: %+v", c)
 			}
 		}
@@ -4977,7 +4978,7 @@ func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref cont
 			f := failed.Failures[0]
 			a := report.Snapshot.Attempts[f.AttemptID]
 			owner := report.Snapshot.Sessions[a.HandleID]
-			if failed.Support.FailedPhase != phase || f.Stage != phase || f.Code != engine.TimedOut || f.Origin != engine.OriginAttemptDeadline || a.Output != nil || a.Failure == nil || !sameIdentity(f.Identity, owner.Identity) || f.Cleanup == nil || !f.Cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
+			if failed.Support.FailedPhase != phase || f.Stage != phase || f.Code != engine.TimedOut || f.Origin != engine.OriginAttemptDeadline || a.Output != nil || a.Failure == nil || !triagev2.SameIdentity(f.Identity, owner.Identity) || f.Cleanup == nil || !f.Cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
 				t.Fatal("support phase failure differs from actual timeout/cleanup")
 			}
 			if (failed.Support.Wiki != nil) != (strings.HasPrefix(phase, "context-")) {
@@ -5065,7 +5066,7 @@ func m2AssertOutcome(t *testing.T, tc triageCase, report engine.Report, ref cont
 			if strings.HasPrefix(tc.name, "m4-mixed-") && (f.TaskID == "w1" || tc.name == "m4-mixed-three-failed" && f.TaskID == "w3") {
 				wantCode, wantOrigin = engine.Cancelled, engine.OriginFailFastSibling
 			}
-			if !ok || a.Failure == nil || a.Output != nil || f.Code != wantCode || f.Origin != wantOrigin || f.RunID != report.Snapshot.RunID || f.StepID != a.Identity.InvocationID || a.HandleID != f.Identity.HandleID || !sameIdentity(f.Identity, owner.Identity) || f.Cleanup == nil || !sameIdentity(f.Cleanup.Identity, owner.Identity) || !f.Cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
+			if !ok || a.Failure == nil || a.Output != nil || f.Code != wantCode || f.Origin != wantOrigin || f.RunID != report.Snapshot.RunID || f.StepID != a.Identity.InvocationID || a.HandleID != f.Identity.HandleID || !triagev2.SameIdentity(f.Identity, owner.Identity) || f.Cleanup == nil || !triagev2.SameIdentity(f.Cleanup.Identity, owner.Identity) || !f.Cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
 				t.Fatalf("M4 recovery identity/failure differs from actual failed attempt: %+v", f)
 			}
 		}
@@ -5977,7 +5978,7 @@ func testCheckpointValidation(t *testing.T, store *contract.Store, base validati
 		// Worker evidence keeps its original proposal owner at the third snapshot.
 		if len(workerResults) > 0 {
 			worker := storedPublication[WorkerResult](t, store, workerResults[0])
-			inputs = appendUniqueRefs(inputs, worker.Data.Proposal)
+			inputs = triagev2.AppendUniqueRefs(inputs, worker.Data.Proposal)
 		}
 		task := stageTask{Stage: "planner", Previous: previous, Gaps: contextData.Gaps, Requirements: plannerRequirements + "\n\n" + adaptiveRequirements + "\n\nCopy the supplied checkpoint object exactly"}
 		req := contract.Request{Inputs: inputs, Prompt: string(testJSON(map[string]any{"worker_results": workerResults, "wiki_results": []contract.Ref{}, "checkpoint": checkpoint}))}
@@ -7345,7 +7346,7 @@ func TestIntakeToContext(t *testing.T) {
 						p.reporting.pending.State = *p.last
 						m6SeamPlanner = p.identity.HandleID
 						if m6Spec.fault == "seam-retry-finished" {
-							_, _, m6Err = retryPlannerInputs(ctx, run, run.Root(), "report-seam", "report", 1, func(ctx context.Context, s *engine.Scope) (contract.Ref, error) {
+							_, _, m6Err = triagev2.RetryInputs(ctx, run, run.Root(), "report-seam", "report", 1, func(ctx context.Context, s *engine.Scope) (contract.Ref, error) {
 								ref, err := p.reportInScope(ctx, s, renderer)
 								if err != nil {
 									return ref, err
@@ -7932,7 +7933,7 @@ func TestIntakeToContext(t *testing.T) {
 					return false
 				}
 				for _, c := range report.Cleanup {
-					if !sameIdentity(c.Identity, owner.Identity) {
+					if !triagev2.SameIdentity(c.Identity, owner.Identity) {
 						continue
 					}
 					// The owned child exits on the abort itself, so each cleanup
@@ -8368,7 +8369,7 @@ func TestIntakeToContext(t *testing.T) {
 											seen[claim.Claim] = true
 										}
 									}
-									v.M6 = &ReportMetadata{Dispositions: []ReportDisposition{}, ReportFailures: append([]RecoveryFailure{}, reportTask.M6.ReportFailures...), Budget: reportTask.M6.Budget}
+									v.M6 = &ReportMetadata{Dispositions: []ReportDisposition{}, ReportFailures: append([]triagev2.RecoveryFailure{}, reportTask.M6.ReportFailures...), Budget: reportTask.M6.Budget}
 									for _, item := range reportTask.M6.Failures {
 										action := m6Spec.disposition
 										if action == "" {
@@ -8476,7 +8477,7 @@ func TestIntakeToContext(t *testing.T) {
 										b.UsedAttempts++
 										v.M6.Budget = &b
 									case "retry-echo":
-										v.M6.ReportFailures = []RecoveryFailure{}
+										v.M6.ReportFailures = []triagev2.RecoveryFailure{}
 									}
 									data = v
 								}
@@ -9318,7 +9319,7 @@ func TestIntakeToContext(t *testing.T) {
 					seen[owner.Identity.SessionID] = true
 					matches := 0
 					for _, cleanup := range report.Cleanup {
-						if sameIdentity(cleanup.Identity, owner.Identity) {
+						if triagev2.SameIdentity(cleanup.Identity, owner.Identity) {
 							matches++
 							if !cleanup.ConfirmsLocalClose(owner.Identity.SessionID) {
 								t.Fatalf("Sync dependency session lacks strict-close/Wait confirmation: %+v", cleanup)
@@ -9826,7 +9827,7 @@ func TestIntakeToContext(t *testing.T) {
 					for _, cleanup := range report.Cleanup {
 						owner := report.Snapshot.Sessions[cleanup.Identity.HandleID]
 						hello := hellos[owner.Identity.SessionID]
-						if owner.State != "Closed" || !sameIdentity(cleanup.Identity, owner.Identity) || hello.PID != owner.Identity.PID || hello.History != owner.Identity.SessionFile || !cleanup.WaitCompleted || !cleanup.ProcessExited || cleanup.WaitError != "" || cleanup.KillError != "" || len(cleanup.Unconfirmed) != 0 {
+						if owner.State != "Closed" || !triagev2.SameIdentity(cleanup.Identity, owner.Identity) || hello.PID != owner.Identity.PID || hello.History != owner.Identity.SessionFile || !cleanup.WaitCompleted || !cleanup.ProcessExited || cleanup.WaitError != "" || cleanup.KillError != "" || len(cleanup.Unconfirmed) != 0 {
 							t.Fatalf("cleanup priority lost independently observed owner/Wait: %+v", cleanup)
 						}
 						if owner.Identity.HandleID == success.HandleID {
