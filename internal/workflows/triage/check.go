@@ -51,7 +51,7 @@ func fileDiagnostic(files []file, id string) string {
 			return fmt.Sprintf("unknown worker evidence file %s (the file exists but is declared kind=%s; evidence citations require kind=evidence)", id, f.Kind)
 		}
 	}
-	return fmt.Sprintf("unknown worker evidence file %s (no files[] entry declares this id)", id)
+	return fmt.Sprintf("unknown worker evidence file %s (no files[] entry declares this id under the cited ref: a null-ref citation may only name a file this contract declares in its own files[]; to cite another worker's committed evidence you must pair that worker's exact result ref with its file_id, never a null ref)", id)
 }
 func checkSource(s Source, files []file) (bool, error) {
 	if s.Ref != nil {
