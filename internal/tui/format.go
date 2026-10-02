@@ -216,6 +216,8 @@ func FormatReport(report engine.Report, dir string) string {
 			} else {
 				w.line("  Session state: %v (process exit unconfirmed; do not resume until cleanup is verified)", session.State)
 			}
+		} else if report.Snapshot.Attempts[final.Ref.AttemptID].Controller {
+			w.line("  Producer: controller (no session to resume)")
 		} else {
 			w.line("  Session metadata unavailable")
 		}

@@ -263,7 +263,7 @@ func TestFormatReportAllCleanupAndFinalizationDiagnostics(t *testing.T) {
 }
 
 func TestFormatReportFinalDelivery(t *testing.T) {
-	for _, name := range []string{"success", "failed-incomplete", "no-final", "missing-session", "exit-unconfirmed", "wait-unconfirmed", "wrong-cleanup-handle"} {
+	for _, name := range []string{"success", "failed-incomplete", "no-final", "missing-session", "controller-artifact", "exit-unconfirmed", "wait-unconfirmed", "wrong-cleanup-handle"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			ref := contract.Ref{Path: filepath.Join(dir, "published", "contract.json")}
@@ -289,6 +289,9 @@ func TestFormatReportFinalDelivery(t *testing.T) {
 				r.Final = nil
 			case "missing-session":
 				delete(r.Snapshot.Sessions, "producer")
+			case "controller-artifact":
+				r.Final.HandleID, r.Final.Ref.AttemptID = "", "attached"
+				r.Snapshot.Attempts = map[string]engine.AttemptState{"attached": {Controller: true, State: engine.Succeeded}}
 			case "exit-unconfirmed":
 				r.Cleanup[0].ProcessExited = false
 			case "wait-unconfirmed":
@@ -318,12 +321,18 @@ func TestFormatReportFinalDelivery(t *testing.T) {
 				return
 			}
 			requireText(t, got, "Final output (verified before cleanup): report", "Contract: "+ref.Path, "Readable artifact: "+r.Final.ArtifactPath, "Final node: root/review/validate")
-			if name == "missing-session" {
+			switch name {
+			case "controller-artifact":
+				requireText(t, got, "Producer: controller (no session to resume)")
+				if strings.Contains(got, "  Session ID:") || strings.Contains(got, "Session metadata unavailable") {
+					t.Fatal("controller artifact shown with session metadata")
+				}
+			case "missing-session":
 				requireText(t, got, "Session metadata unavailable")
 				if strings.Contains(got, "  Session ID:") || strings.Contains(got, "Session state: Closed") {
 					t.Fatal("missing producer inferred another session")
 				}
-			} else {
+			default:
 				requireText(t, got, "Role: validator", "Session ID: snapshot-session-id", "Session file: "+filepath.Join(dir, "history.jsonl"))
 				closed := name == "success" || name == "failed-incomplete"
 				if strings.Contains(got, "Session state: Closed (process exit confirmed;") != closed {

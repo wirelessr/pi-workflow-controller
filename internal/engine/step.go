@@ -29,46 +29,29 @@ func (s *Scope) Step(ctx context.Context, spec StepSpec) (result StepResult, err
 		r.mu.Unlock()
 		return result, newFailure(SessionBusy, "Step", "session already leased")
 	}
-	if r.totalAttempts >= r.definition.Policy.MaxTotalAttempts {
-		f := newFailure(LimitExceeded, "Step", "run attempt limit exceeded")
-		f.LimitScope = "run"
-		r.stopLocked(f)
+	astate, inv, err := r.startAttemptLocked(s, spec.Key, "Step")
+	if err != nil {
 		r.mu.Unlock()
-		return result, f
+		return result, err
 	}
 	h.busy = true
-	s.steps[spec.Key] = true
-	r.totalAttempts++
-	key := s.path + "/" + spec.Key
-	invocation := r.invocations[key]
-	if invocation == "" {
-		invocation = contract.NewID()
-		r.invocations[key] = invocation
-	}
-	inv := r.state.Invocations[invocation]
-	id := contract.Identity{RunID: r.ID(), InvocationID: invocation, AttemptID: contract.NewID(), DispatchToken: contract.NewID()}
-	started := time.Now()
+	id := astate.Identity
+	started := astate.StartedAt
 	timeout := spec.Timeout
 	if timeout == 0 {
 		timeout = r.definition.Policy.AttemptTimeout
 	}
-	astate := AttemptState{Identity: id, Scope: s.path, Key: spec.Key, Epoch: s.epoch, HandleID: h.id, Number: inv.Attempts + 1, State: Preparing, StartedAt: started, DispatchAccepted: AcceptedNo}
+	astate.HandleID = h.id
 	if spec.Feedback != nil {
 		copy := *spec.Feedback
 		copy.Refs = append([]contract.Ref(nil), copy.Refs...)
 		astate.Feedback = &copy
 	}
-	inv = InvocationState{ID: invocation, Scope: s.path, Key: spec.Key, Epoch: s.epoch, State: Running, LastAttemptID: id.AttemptID, Attempts: astate.Number, RetryActivationIDs: append([]string(nil), s.ancestors...)}
-	r.retryAncestors[invocation] = append([]string(nil), s.ancestors...)
-	err = r.commitLocked("AttemptStarted", astate, func(seq uint64) {
-		astate.LastSeq = seq
-		inv.LastSeq = seq
-		r.state.Attempts[id.AttemptID] = astate
-		r.state.Invocations[invocation] = inv
+	err = r.commitStartedLocked(&astate, &inv, func() {
 		v := r.state.Sessions[h.id]
 		v.State = "Busy"
 		r.state.Sessions[h.id] = v
-	}, id)
+	})
 	r.mu.Unlock()
 	result.AttemptID = id.AttemptID
 	op, done := r.operationContext(ctx)
@@ -135,7 +118,7 @@ func (s *Scope) Step(ctx context.Context, spec StepSpec) (result StepResult, err
 		return
 	}
 	r.mu.Lock()
-	err = r.storageLocked(filepath.Join("steps", invocation, "step.json"), "step", inv, id)
+	err = r.storageLocked(attemptStepPath(id), "step", inv, id)
 	r.mu.Unlock()
 	if err != nil {
 		return
@@ -271,6 +254,43 @@ func (r *Run) keepHandle(ctx context.Context, h *SessionHandle, f *Failure, disp
 	}
 }
 
+// startAttemptLocked consumes one run attempt for key in s and builds its
+// Preparing state. The caller has already checked the scope, key and schema.
+// At the run attempt limit it stops the run and consumes nothing.
+func (r *Run) startAttemptLocked(s *Scope, key, phase string) (AttemptState, InvocationState, error) {
+	if r.totalAttempts >= r.definition.Policy.MaxTotalAttempts {
+		f := newFailure(LimitExceeded, phase, "run attempt limit exceeded")
+		f.LimitScope = "run"
+		r.stopLocked(f)
+		return AttemptState{}, InvocationState{}, f
+	}
+	s.steps[key] = true
+	r.totalAttempts++
+	path := s.path + "/" + key
+	invocation := r.invocations[path]
+	if invocation == "" {
+		invocation = contract.NewID()
+		r.invocations[path] = invocation
+	}
+	inv := r.state.Invocations[invocation]
+	id := contract.Identity{RunID: r.ID(), InvocationID: invocation, AttemptID: contract.NewID(), DispatchToken: contract.NewID()}
+	astate := AttemptState{Identity: id, Scope: s.path, Key: key, Epoch: s.epoch, Number: inv.Attempts + 1, State: Preparing, StartedAt: time.Now(), DispatchAccepted: AcceptedNo}
+	inv = InvocationState{ID: invocation, Scope: s.path, Key: key, Epoch: s.epoch, State: Running, LastAttemptID: id.AttemptID, Attempts: astate.Number, RetryActivationIDs: append([]string(nil), s.ancestors...)}
+	r.retryAncestors[invocation] = append([]string(nil), s.ancestors...)
+	return astate, inv, nil
+}
+
+func (r *Run) commitStartedLocked(astate *AttemptState, inv *InvocationState, apply func()) error {
+	id := astate.Identity
+	return r.commitLocked("AttemptStarted", *astate, func(seq uint64) {
+		astate.LastSeq = seq
+		inv.LastSeq = seq
+		r.state.Attempts[id.AttemptID] = *astate
+		r.state.Invocations[id.InvocationID] = *inv
+		apply()
+	}, id)
+}
+
 // finishAttemptLocked records a terminal failure exactly once. A Succeeded
 // attempt was already committed with its Ref, so a later error (for example a
 // failed attempt snapshot) never submits a second terminal event.
@@ -285,6 +305,8 @@ func (r *Run) finishAttemptLocked(s *Scope, attempt *contract.Attempt, astate At
 	}
 	terminal, _ := outcome(err)
 	astate.State = terminal
+	// A Ref set before a failed success commit was never committed.
+	astate.Output = nil
 	astate.Failure = failureInfo(err)
 	astate.FinishedAt = time.Now()
 	astate.DispatchAccepted = normalize(err, "").DispatchAccepted

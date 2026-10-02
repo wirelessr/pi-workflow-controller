@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
-	"time"
 
 	"pi-workflow-controller/internal/contract"
 )
@@ -17,7 +16,6 @@ type AttachSpec struct {
 	Output contract.Spec
 	Data   any
 	Files  []contract.ControllerFile
-	Inputs []contract.Ref
 }
 
 // Attach commits Controller-produced data through the same Stage, Publish and
@@ -42,40 +40,25 @@ func (s *Scope) Attach(ctx context.Context, spec AttachSpec) (ref contract.Ref, 
 		r.mu.Unlock()
 		return ref, newFailure(InvalidDefinition, "Attach", "invalid key or schema")
 	}
-	if r.totalAttempts >= r.definition.Policy.MaxTotalAttempts {
-		f := newFailure(LimitExceeded, "Attach", "run attempt limit exceeded")
-		f.LimitScope = "run"
-		r.stopLocked(f)
+	// Reject what Stage would refuse before an attempt is consumed.
+	if err = r.store.CheckControllerFiles(data, spec.Files); err != nil {
 		r.mu.Unlock()
-		return ref, f
+		return ref, normalize(err, "Attach")
 	}
-	s.steps[spec.Key] = true
-	r.totalAttempts++
-	key := s.path + "/" + spec.Key
-	invocation := r.invocations[key]
-	if invocation == "" {
-		invocation = contract.NewID()
-		r.invocations[key] = invocation
+	astate, inv, err := r.startAttemptLocked(s, spec.Key, "Attach")
+	if err != nil {
+		r.mu.Unlock()
+		return ref, err
 	}
-	inv := r.state.Invocations[invocation]
-	// A token keeps the Store identity invariants; it is never dispatched.
-	id := contract.Identity{RunID: r.ID(), InvocationID: invocation, AttemptID: contract.NewID(), DispatchToken: contract.NewID()}
-	started := time.Now()
-	astate := AttemptState{Identity: id, Scope: s.path, Key: spec.Key, Epoch: s.epoch, Controller: true, Number: inv.Attempts + 1, State: Preparing, StartedAt: started, DispatchAccepted: AcceptedNo}
-	inv = InvocationState{ID: invocation, Scope: s.path, Key: spec.Key, Epoch: s.epoch, State: Running, LastAttemptID: id.AttemptID, Attempts: astate.Number, RetryActivationIDs: append([]string(nil), s.ancestors...)}
-	r.retryAncestors[invocation] = append([]string(nil), s.ancestors...)
-	err = r.commitLocked("AttemptStarted", astate, func(seq uint64) {
-		astate.LastSeq = seq
-		inv.LastSeq = seq
-		r.state.Attempts[id.AttemptID] = astate
-		r.state.Invocations[invocation] = inv
-	}, id)
+	id := astate.Identity
+	astate.Controller = true
+	err = r.commitStartedLocked(&astate, &inv, func() {})
 	r.mu.Unlock()
 	op, done := r.operationContext(ctx)
 	defer done()
 	timeoutCause := newFailure(TimedOut, "attempt", "attempt deadline exceeded")
 	timeoutCause.Origin = OriginAttemptDeadline
-	timed, cancel := context.WithDeadlineCause(op, started.Add(r.definition.Policy.AttemptTimeout), timeoutCause)
+	timed, cancel := context.WithDeadlineCause(op, astate.StartedAt.Add(r.definition.Policy.AttemptTimeout), timeoutCause)
 	defer cancel()
 	attemptCtx := context.WithValue(timed, attemptContextKey{}, attemptOwner{Run: r, Identity: id})
 	var attempt *contract.Attempt
@@ -93,7 +76,7 @@ func (s *Scope) Attach(ctx context.Context, spec AttachSpec) (ref contract.Ref, 
 	if err != nil {
 		return
 	}
-	request := contract.Request{Identity: id, Prompt: "Controller artifact: produced by the Controller, never dispatched to an agent", Inputs: spec.Inputs, Output: contract.OutputSpec{SchemaID: spec.Output.SchemaID}}
+	request := contract.Request{Identity: id, Prompt: "Controller artifact: produced by the Controller, never dispatched to an agent", Output: contract.OutputSpec{SchemaID: spec.Output.SchemaID}}
 	attempt, err = r.store.BeginAttempt(id, request)
 	if err != nil {
 		return
@@ -103,12 +86,6 @@ func (s *Scope) Attach(ctx context.Context, spec AttachSpec) (ref contract.Ref, 
 	r.mu.Unlock()
 	if err != nil {
 		return
-	}
-	for _, input := range spec.Inputs {
-		if _, err = r.resolve(attemptCtx, input); err != nil {
-			err = attemptError(attemptCtx, err)
-			return
-		}
 	}
 	if err = attemptError(attemptCtx, context.Cause(attemptCtx)); err != nil {
 		return
@@ -158,11 +135,7 @@ func (r *Run) ControllerAttached(ref contract.Ref) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, ok := r.publications[ref.AttemptID]
-	if !ok || p.Ref != ref {
-		return false
-	}
-	a, ok := r.state.Attempts[ref.AttemptID]
-	return ok && a.Controller && a.HandleID == "" && a.State == Succeeded && a.Output != nil && *a.Output == ref
+	return ok && p.Ref == ref && r.state.Attempts[ref.AttemptID].Controller
 }
 
 func attemptStepPath(id contract.Identity) string {

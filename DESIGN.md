@@ -61,7 +61,7 @@ TaskID（自動產生；本版一次 CLI 呼叫一個 task）
 - TaskID：`pw-<UTC YYYYMMDDTHHMMSSZ>-<12 hex random>`；以 exclusive mkdir 防碰撞，不以 Prompt 生成名稱。
 - RunID、handle、invocation、attempt、dispatch token 使用至少 128-bit 隨機識別。
 - Step key、scope name、branch name 是 workflow 程式碼中的穩定標籤，不接受 Prompt 當目錄名稱。
-- Attempt number 從 1 開始，在 Step 通過結構 preflight、取得 handle lease 並進入 Preparing 時配置；同時消耗 run 的總 attempt 額度，之後即使未派送、遭拒絕或準備失敗也不退還。Retry count 從 0 開始，與 attempt counter 分開。
+- Attempt number 從 1 開始，在 Step 通過結構 preflight、取得 handle lease 並進入 Preparing 時配置（`Attach` 沒有 handle，通過自己的 preflight 即配置）；同時消耗 run 的總 attempt 額度，之後即使未派送、遭拒絕或準備失敗也不退還。Retry count 從 0 開始，與 attempt counter 分開。
 - 結構 preflight 包含 scope/key 唯一性、schema 已註冊、handle 屬於本 run 且可用、timeout 合法及總額度未耗盡。此階段拒絕不建立 attempt；開始 Preparing 後的 Ref 讀取、request 落地、WaitingSession 等失敗都有自己的 attempt ID／終態。
 - ID 不作為認證憑證；nonce 防止意外拿錯產物，不抵抗有本機檔案權限的惡意 agent。
 
@@ -262,7 +262,7 @@ func (r *Run) ControllerAttached(ref contract.Ref) bool
 - 建構入口：`engine.New(ctx, Definition, Input, Options)`，先完成 definition/schema/prompt preflight，再建立 run；`Run.Execute()` 單次執行，回傳 outcome、exit code、result、cleanup、finalization errors 與 snapshot。`engine.NewRegistry` 提供穩定排序與查詢，沒有外部 workflow config。
 - `Run`、`Scope`、`SessionHandle` 是 concrete type。Workflow 不持有底層 Session 或 `exec.Cmd`。
 - `Step` 自動建 attempt，落 request，派送，檢查 execution，驗證並發布 output。任何階段失敗都留下結構化原因。
-- `Attach` 把 Controller 自己產生的 data 與檔案（例如 caller 原始 Prompt、Controller 記錄的缺口）走同一條 BeginAttempt → Stage → Publish → journal commit 取得 exact Ref；沒有 session、派送與 execution，`AttemptState.Controller=true`、`HandleID` 為空、`DispatchAccepted=no`。它與 Step 共用 scope key 命名空間、`MaxTotalAttempts` 額度（不退還）、AttemptTimeout、輸入 Ref resolver、終態與成功提交（同一段 commit 程式碼），journal 只有 AttemptStarted 與終態事件。Controller 的 data 不合 schema 時 attempt 為 Failed 並回傳 ContractInvalid；Storage／Journal 失敗照常 sticky fatal。`ControllerAttached(ref)` 只在 ref 是已 commit 且由 Attach 產生時為真；Agent Step 即使發布同 schema、同 file ID 也不是。
+- `Attach` 把 Controller 自己產生的 data 與檔案（例如 caller 原始 Prompt、Controller 記錄的缺口）走同一條 BeginAttempt → Stage → Publish → journal commit 取得 exact Ref；沒有 session、派送與 execution，`AttemptState.Controller=true`、`HandleID` 為空、`DispatchAccepted=no`。它與 Step 共用 scope key 命名空間、attempt 配置與 `MaxTotalAttempts` 額度（不退還）、AttemptTimeout、AttemptStarted 與終態／成功提交（同一段程式碼），journal 只有 AttemptStarted 與終態事件。檔案路徑形狀、重複 ID／路徑（含只差大小寫）、檔案數與大小在結構 preflight 拒絕，不建立 attempt；檔案種類由 `evidence/`／`artifacts/` 目錄決定。Controller 的 data 不合 schema 時 attempt 為 Failed 並回傳 ContractInvalid；Storage／Journal 失敗照常 sticky fatal，寫到一半失敗會移除本次建立的檔案。`ControllerAttached(ref)` 只在 ref 是已 commit 且由 Attach 產生時為真；Agent Step 即使發布同 schema、同 file ID 與路徑也不是。被選為 final 的 attached Ref 沒有 session 可 resume，formatter 顯示 producer 為 controller。
 - `Result.Outputs` 只持有已 committed Ref，不用 memory-only JSON 傳給下一個 Pi；`Result.Final` 明確選 output key 與可選 artifact file ID，不是任意檔案路徑。
 - Workflow 透過 `engine.Decode[T](ctx, run, ref)` 讀取業務資料，供 B verdict 等 Go 分支判斷；內部走本 run 的統一 Ref resolver（第 8.3 節）。這是 package function，不是 generic method，也不把 Store 的寫入權限暴露給 workflow。
 - Workflow 回傳成功後、outcome 鎖定前，engine 重新檢核 Result 裡所有 Ref，從 producer attempt 建立 `FinalDelivery`，並寫入 `result.json` 的 `run_id`、`outputs` 與可選 `final`。`final` 含 output、ref、artifact_path（若有）、handle_id、scope、step；Session ID/file/role 由 handle 查 `run.json.sessions`。結果檔不是成功證明，權威 outcome 在 RunFinalizing／RunFinished 事件及 run snapshot，持久化失敗另須看 EmergencyStatus。
@@ -313,7 +313,7 @@ func (a *Attempt) WriteControllerCandidate(data json.RawMessage, files []Control
 
 - `Child("round-003")` 建立新的邏輯 scope；同一 parent execution 內名稱不可重複。輪次用新 child 表達，不重用 round key。
 - Logical scope ID 由穩定 path 識別；execution epoch 表示該 scope 的一次執行。Invocation key = logical scope path + StepSpec.Key，平行分支增加 branch name。
-- 同一 scope execution 內同一 step key 不可呼叫兩次；重跑必須來自 `Retry`，不由同名呼叫隱含重試。
+- 同一 scope execution 內同一 step key 不可呼叫兩次（`Attach` 與 Step 共用此命名空間）；重跑必須來自 `Retry`，不由同名呼叫隱含重試。
 - 每次進入 Retry 呼叫建立新的 activation ID 與 budget；同一 activation 的各次 callback 使用同一邏輯 scope path、不同 execution epoch。被重跑的 step invocation 增加 attempt number。
 - 外層重跑而再次進入同名內層 Retry，建立新內層 activation，budget 從 0 起算；其 logical path 不變。Child/Retry 名稱重複檢查限定同一 parent execution，不跨 epoch 拒絕合法重跑。
 - Step attempt number 按進入 Preparing 的次數累加，不以實際 prompt 數量或某個 retry count 代替；是否送出及是否接受由獨立 dispatch 狀態記錄。RetryState 帶 activation ID、RetryCount、MaxRetries、前次 Feedback；總 attempt 上限防止巢狀 budget 乘積失控。
@@ -632,14 +632,14 @@ Store 建構時將可信 `BaseDir` 建立後以 `EvalSymlinks` 正規化為 cano
 5. Manifest ID 唯一；路徑必須相對於 attempt，限定 evidence/artifacts，拒絕 `..`、absolute path、symlink、非一般檔案與重複目標。以 rooted filesystem operation 防止檢查後改路徑逃逸；不只做字串 prefix 比對。
 6. 在同 filesystem 建私有 staging directory，複製當前 bytes，驗證拷貝與來源讀取的穩定性，為 staged files 計算 digest。發現讀取期間改變即失敗；不宣稱可對抗同 UID 惡意改寫。
 7. 寫 validation report；經 runtime Confirm 後（`Attach` 沒有 execution，candidate 由 Controller 以 exclusive create＋Sync 寫入，略過此步），將 staging 目錄原子 rename 成 published。不得覆蓋既有 published；新 attempt 永遠用新位置。在 macOS 使用 rooted parent descriptors 與 `renameatx_np(RENAME_EXCL)`，連空目錄也不覆蓋。Manifest 讀取上限使用 Controller 保存的實際生成長度，避免 JSON escaping 膨脹與 policy 算式溢位。
-8. Journal append+Sync AttemptSucceeded（含完整 Ref）與 provisional invocation 狀態，完成 run snapshot 及 attempt terminal snapshot 等必要持久化後，才在 engine 序列內登記 committed publication registry 並回傳 Ref；invocation 定案遵循第 7.1 節。Publish rename 不等於 commit。若 publish 後 journal／必要 snapshot 失敗，不登記 membership，產物只留診斷，run 失敗且不得向下游派送。
+8. Journal append+Sync AttemptSucceeded（含完整 Ref）與 provisional invocation 狀態，完成 run snapshot 及 attempt terminal snapshot 等必要持久化後，才在 engine 序列內登記 committed publication registry 並回傳 Ref；invocation 定案遵循第 7.1 節。Publish rename 不等於 commit。若 publish 後 journal／必要 snapshot 失敗，不登記 membership，產物只留診斷，run 失敗且不得向下游派送；以失敗終態記錄的 attempt 不保留未提交的 Output。
 9. 所有消費路徑使用第 8.3 節的統一 resolver；只有 digest 正確仍不夠，必須是本 run 已提交的發布紀錄。
 
 此流程保證 Controller 消費的是具體版本，不保證 Pi 已完成外部業務副作用、候選內容語意正確或 host filesystem 對 agent 唯讀。mtime 不是新舊產物判定依據。
 
 ### 8.3 Ref resolver 與發布來源
 
-Engine 為每個 run 維護 committed publication registry，key 為 AttemptID；value 保存完整 Ref、producer InvocationID、dispatch identity 與 journal seq。只由第 8.2 節提交成功的路徑登記，不掃描目錄推導 membership；不提供從檔案重建 registry 的 crash resume。
+Engine 為每個 run 維護 committed publication registry，key 為 AttemptID；value 保存完整 Ref、producer InvocationID、dispatch identity（`Attach` 的 token 從未派送）與 journal seq。只由第 8.2 節提交成功的路徑登記，不掃描目錄推導 membership；不提供從檔案重建 registry 的 crash resume。
 
 統一 resolver 依序：
 
