@@ -5,8 +5,12 @@ The term list is private and never stored in this repository. Format:
 with word boundaries, `#` starts a comment line. Hard matches fail the gate,
 soft matches are listed for human review. A missing list is SKIP, not PASS.
 
+Both the index (staged) and working-tree versions of tracked files, the
+contents of untracked files that are not ignored, symlink targets and path
+names are scanned.
+
 Exit codes: 0 pass (soft matches may be listed), 1 hard match or invalid
-list, 2 skipped because no list was found.
+list, 3 skipped because no list was found at the default location.
 """
 import argparse
 import os
@@ -15,7 +19,7 @@ import re
 import subprocess
 import sys
 
-PASS, FAIL, SKIP = 0, 1, 2
+PASS, FAIL, SKIP = 0, 1, 3
 
 
 def parse(text):
@@ -27,6 +31,8 @@ def parse(text):
         if line in ("[hard]", "[soft]"):
             section = line[1:-1]
             continue
+        if line.startswith("[") and line.endswith("]"):
+            raise ValueError(f"line {number}: unknown section header")
         if section is None:
             raise ValueError(f"line {number}: pattern outside [hard]/[soft] section")
         try:
@@ -34,29 +40,50 @@ def parse(text):
         except re.error as err:
             raise ValueError(f"line {number}: invalid regex: {err}") from err
         sections[section].append((number, pattern))
+    if not sections["hard"]:
+        raise ValueError("no [hard] patterns")
     return sections
 
 
-def candidates(root):
-    out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-                         check=True, capture_output=True).stdout
-    return sorted({name for name in out.decode("utf-8", "surrogateescape").split("\0") if name})
+def git(root, *args, data=None):
+    return subprocess.run(["git", "-C", str(root), *args], input=data, check=True, capture_output=True).stdout
+
+
+def texts(root):
+    """Yield (name, is_path, text) for every version of every candidate file."""
+    names = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").decode("utf-8", "surrogateescape").split("\0")
+    staged = {}
+    for entry in git(root, "ls-files", "-z", "--stage").decode("utf-8", "surrogateescape").split("\0"):
+        if entry:
+            meta, name = entry.split("\t", 1)
+            if meta.split()[0] != "160000":
+                staged.setdefault(name, meta.split()[1])
+    blobs = list(staged.items())
+    out = git(root, "cat-file", "--batch", data="".join(f"{oid}\n" for _, oid in blobs).encode())
+    for name, _ in blobs:
+        header, out = out.split(b"\n", 1)
+        size = int(header.split()[2])
+        yield name, False, out[:size].decode("utf-8", "replace")
+        out = out[size + 1:]
+    for name in sorted({n for n in names if n}):
+        path = root / name
+        yield name, True, name
+        if path.is_symlink():
+            yield name, False, os.readlink(path)
+        elif path.is_file():
+            yield name, False, path.read_bytes().decode("utf-8", "replace")
 
 
 def scan(root, sections):
-    hits = {"hard": [], "soft": []}
-    for name in candidates(root):
-        path = root / name
-        lines = [(0, name)]
-        if path.is_file() and not path.is_symlink():
-            text = path.read_bytes().decode("utf-8", "replace")
-            lines += list(enumerate(text.splitlines(), 1))
+    hits = {"hard": set(), "soft": set()}
+    for name, is_path, text in texts(root):
+        lines = [(0, text)] if is_path else list(enumerate(text.splitlines(), 1))
         for kind, patterns in sections.items():
             for number, line in lines:
                 for list_line, pattern in patterns:
                     if pattern.search(line):
-                        hits[kind].append((name, number, list_line))
-    return hits
+                        hits[kind].add((name, number, list_line))
+    return {kind: sorted(found) for kind, found in hits.items()}
 
 
 def main(argv=None):
@@ -65,11 +92,12 @@ def main(argv=None):
     parser.add_argument("--root", default=".", help="repository root")
     args = parser.parse_args(argv)
     source = args.list
-    if source is None and os.environ.get("PWC_TRIAGE_SKILLS_DIR"):
-        source = os.path.join(os.environ["PWC_TRIAGE_SKILLS_DIR"], "denylist.txt")
-    if source is None or not os.path.isfile(source):
-        print(f"SKIP: term list not found ({source or 'PWC_TRIAGE_SKILLS_DIR unset'}); this is not a pass")
-        return SKIP
+    if source is None:
+        if os.environ.get("PWC_TRIAGE_SKILLS_DIR"):
+            source = os.path.join(os.environ["PWC_TRIAGE_SKILLS_DIR"], "denylist.txt")
+        if source is None or not os.path.isfile(source):
+            print(f"SKIP: term list not found ({source or 'PWC_TRIAGE_SKILLS_DIR unset'}); this is not a pass")
+            return SKIP
     try:
         sections = parse(Path(source).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, ValueError) as err:

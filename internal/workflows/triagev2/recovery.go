@@ -214,6 +214,8 @@ func ConfirmTaskRecovery(ctx context.Context, r *engine.Run, err error, sibling 
 
 // RetryInputs is only for supplied-input work. Recovery never authorizes a
 // remote operation, and RetryState feedback is not an input to the next task.
+// A RunTaskStep inside run must set NoRepair, or the same session is
+// repaired twice per retry.
 func RetryInputs(ctx context.Context, r *engine.Run, scope *engine.Scope, key, output string, retries int, run func(context.Context, *engine.Scope) (contract.Ref, error), recovered func(context.Context, RecoveryFailure, error, bool) error) (contract.Ref, []RecoveryFailure, error) {
 	var ref contract.Ref
 	var failures []RecoveryFailure

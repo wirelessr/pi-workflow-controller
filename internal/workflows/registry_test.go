@@ -38,7 +38,7 @@ func TestRegistryContainsSmokeAndCodeReview(t *testing.T) {
 	}
 	schemas, err := contract.NewRegistry(workflows.Resources(), workflows.Schemas())
 	if err != nil || !schemas.Has("smoke.echo.v1") || schemas.Has("triage.report.v1") {
-		t.Fatalf("smoke schemas unavailable: %v", err)
+		t.Fatalf("smoke schemas unavailable or unregistered triage schemas present: %v", err)
 	}
 }
 
