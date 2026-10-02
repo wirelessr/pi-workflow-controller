@@ -137,6 +137,11 @@ func TestEngineEntrySinkLimits(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r.observedBytes.Store(tc.budget)
 			t.Cleanup(func() { r.observedBytes.Store(0) })
+			defer func() {
+				if tc.budget > 0 && r.observedBytes.Load() != tc.budget {
+					t.Errorf("refused entries were charged to the run budget: %d", r.observedBytes.Load()-tc.budget)
+				}
+			}()
 			sink := r.newEntrySink("handle", "attempt-"+strings.ReplaceAll(tc.name, " ", "-"))
 			sink.Entries(runtime.EntryBatch{Entries: tc.batch, Source: runtime.EntriesVerified})
 			sink.Entries(runtime.EntryBatch{Entries: []json.RawMessage{engObserveEntry("after-stop")}, Source: runtime.EntriesSessionFile})
@@ -156,6 +161,17 @@ func TestEngineEntrySinkLimits(t *testing.T) {
 				t.Fatalf("file lines = %d, want only whole recorded entries", len(lines))
 			}
 		})
+	}
+	// A write failure stops recording, keeps whole lines and refunds the budget.
+	failing := r.newEntrySink("handle", "attempt-write-failure")
+	failing.Entries(runtime.EntryBatch{Entries: entries(2, 0), Source: runtime.EntriesVerified})
+	before := r.observedBytes.Load()
+	if err := failing.file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	failing.Entries(runtime.EntryBatch{Entries: []json.RawMessage{engObserveEntry("fresh")}, Source: runtime.EntriesVerified})
+	if obs := failing.finish(); obs.Entries != 2 || len(obs.Gaps) == 0 || !strings.Contains(obs.Gaps[0], "write failed") || len(engObserveLines(t, obs.Path)) != 2 || r.observedBytes.Load() != before {
+		t.Fatalf("write failure observation = %+v budget %d -> %d", obs, before, r.observedBytes.Load())
 	}
 	// A sink whose file cannot be created records nothing and says why.
 	if err := os.WriteFile(r.Dir()+"/sessions/blocked", nil, 0600); err != nil {

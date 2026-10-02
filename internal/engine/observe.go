@@ -73,7 +73,9 @@ func (s *entrySink) stop(gap string) {
 	s.stopped = true
 	if s.file != nil {
 		// Keep only whole lines: a failed write may have left part of one.
-		_ = s.file.Truncate(s.written)
+		if err := s.file.Truncate(s.written); err != nil {
+			s.obs.Gaps = append(s.obs.Gaps, fmt.Sprintf("observation file may end with a partial line: %v", err))
+		}
 		_ = s.file.Close()
 		s.file = nil
 	}
@@ -171,6 +173,7 @@ func (s *entrySink) finish() *Observation {
 		}
 		s.file = nil
 	}
+	s.stopped = true
 	obs := s.obs
 	obs.Calls = append([]ToolCall{}, s.obs.Calls...)
 	obs.Gaps = append([]string{}, s.obs.Gaps...)

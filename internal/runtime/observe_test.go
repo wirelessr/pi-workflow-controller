@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -229,13 +230,18 @@ func TestSessionFileEntries(t *testing.T) {
 		{"baseline missing", lines, "missing", 0, "", "baseline"},
 		{"file shorter than the offset", lines, "a", 1 << 20, "", "shorter"},
 		{"incomplete last line", lines + `{"id":"d","parentId":"c"`, "", 0, "a b c", "incomplete"},
+		{"unparseable line after the baseline", lines + "{broken\n" + `{"id":"d","parentId":"c","type":"message"}` + "\n", "a", 0, "b c d", "could not be parsed"},
+		{"offset entries not continuing from the baseline", lines, "b", offsetB, "", "do not continue"},
+		{"many entries in batches", manyEntries(300), "", 0, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.text), 0600); err != nil {
 				t.Fatal(err)
 			}
 			var ids []string
+			var sizes []int
 			err := sessionFileEntries(path, tc.baseline, tc.offset, func(batch []json.RawMessage) {
+				sizes = append(sizes, len(batch))
 				for _, raw := range batch {
 					var e struct{ ID string }
 					if json.Unmarshal(raw, &e) != nil {
@@ -244,6 +250,12 @@ func TestSessionFileEntries(t *testing.T) {
 					ids = append(ids, e.ID)
 				}
 			})
+			if tc.name == "many entries in batches" {
+				if err != nil || fmt.Sprint(sizes) != "[256 44]" {
+					t.Fatalf("batches %v err %v, want [256 44]", sizes, err)
+				}
+				return
+			}
 			if got := strings.Join(ids, " "); got != tc.want || (tc.err == "") != (err == nil) || err != nil && !strings.Contains(err.Error(), tc.err) {
 				t.Fatalf("ids %q err %v, want %q %q", got, err, tc.want, tc.err)
 			}
@@ -251,5 +263,50 @@ func TestSessionFileEntries(t *testing.T) {
 	}
 	if err := sessionFileEntries(dir+"/absent.jsonl", "", 0, func([]json.RawMessage) {}); err == nil {
 		t.Fatal("missing session file read as empty")
+	}
+	if err := os.Symlink(path, dir+"/link.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessionFileEntries(dir+"/link.jsonl", "", 0, func([]json.RawMessage) {}); err == nil {
+		t.Fatal("symlinked session file was followed")
+	}
+}
+
+func manyEntries(n int) string {
+	var b strings.Builder
+	parent := "null"
+	for i := range n {
+		fmt.Fprintf(&b, `{"id":"m%d","parentId":%s,"type":"message"}`+"\n", i, parent)
+		parent = fmt.Sprintf(`"m%d"`, i)
+	}
+	return b.String()
+}
+
+// A provider failure keeps the session: entries are drained, not read from
+// the file, and nothing is closed.
+func TestEntrySinkKeptSessionFailure(t *testing.T) {
+	f := mustFixture(t, "normal", nil)
+	sink := &recordingSink{}
+	d := Dispatch{Token: randomID(), Entries: sink}
+	d.Message = "Controller dispatch " + d.Token
+	ch := make(chan executionResult, 1)
+	go func() { r, e := f.s.Execute(f.ctx, d); ch <- executionResult{r, e} }()
+	f.next("prompt")
+	f.send(control{Type: "message", Message: assistant("error")})
+	f.send(control{Type: "settle"})
+	_ = requireCode(t, f.result(ch).err, ProviderFailed)
+	if _, err := f.s.Snapshot(f.ctx); err != nil {
+		t.Fatalf("kept session is unusable: %v", err)
+	}
+	order, from, uncertain := sink.sources(t)
+	if uncertain || len(order) != 2 {
+		t.Fatalf("entries = %v sources = %v uncertain=%t", order, from, uncertain)
+	}
+	for _, sources := range from {
+		for _, source := range sources {
+			if source == EntriesSessionFile {
+				t.Fatalf("kept session read its file: %v", from)
+			}
+		}
 	}
 }

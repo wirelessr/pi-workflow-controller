@@ -446,7 +446,7 @@ Dispatch 流程：
 - 完成判斷每次讀到並通過 lineage 檢查的 entries 以 `rpc` 來源交給 sink（含 lineage 失敗前已通過的部分）。Sink 在 Execute／Confirm 的 goroutine 上、session lock 之外同步呼叫，必須很快返回。
 - Prompt 尚未送出就失敗時不記錄任何 entry（baseline 之前的 entries 不屬於本次 dispatch）。
 - 保留 session 的失敗（DispatchRejected、ProviderFailed、OutputTruncated）以獨立短期限（AbortGrace）自 trace cursor 再讀一次 `get_entries`，不做 lineage 檢查，來源 `rpc-unverified`；此時沒有 Close，不延後 cleanup。
-- Runtime 自己 Close 的失敗路徑不在 Close 前另讀，避免延後 abort／SIGKILL；Close 回報同一 session 的 `WaitCompleted` 與 `ProcessExited` 後（process 已結束，檔案不再增長）讀 session JSONL：從派送時記下的檔案大小起讀（Pi 只 append），否則跳過 baseline 之前的 entries；逐行串流、分批交給 sink，來源 `session-file`。未確認退出、檔案讀不到、超過 64 MiB 或最後一行不完整時以 `EntryBatch.Err` 說明缺口。取快照不改變原錯誤、不算 cleanup failure。
+- Runtime 自己 Close 的失敗路徑不在 Close 前另讀，避免延後 abort／SIGKILL；Close 回報同一 session 的 `WaitCompleted` 與 `ProcessExited` 後（process 已結束，檔案不再增長）讀 session JSONL：從派送時記下的檔案大小起讀（Pi 只 append，第一個新 entry 必須接續 baseline，否則視為檔案被替換），否則跳過 baseline 之前的 entries；逐行串流、分批交給 sink，來源 `session-file`。未確認退出、檔案讀不到、超過 64 MiB、最後一行不完整或有無法解析的行時以 `EntryBatch.Err` 說明缺口。取快照不改變原錯誤、不算 cleanup failure。
 - Engine sink 以 entry id 去重（寫入成功才算已見），逐行寫 `{"source","entry"}` 到 `sessions/<handle>/observations/<attempt>.jsonl`，另建 tool call 索引（entry id、工具名、參數文字截斷至 2 KiB；只是結構投影，Go 不解讀）。單檔 32 MiB、65536 entries、4096 tool calls、整個 run 1 GiB 為上限；第一個無法記錄的 entry 讓記錄停止，檔案截到最後完整一行，原因列入 `Observation.Gaps`。結果放在 `StepResult.Observation`（成功與失敗都有）；要 exact Ref 由 workflow 以 `Attach` 提交。
 - 未設 Observe 的 Step（現有 workflows）行為不變，不多做 RPC 或解碼。單一 entry 超過 frame 上限仍是既有 ProtocolFailed。
 

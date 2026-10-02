@@ -13,7 +13,8 @@ import (
 
 const (
 	// sessionFileLimit bounds how much of Pi's session file is read after
-	// Close, counted from where this dispatch's entries begin.
+	// Close: from the dispatch offset, or the whole file when the offset
+	// is 0.
 	sessionFileLimit = 64 << 20
 	// sessionFileBatch entries are handed to the sink at a time, so the
 	// read never holds the whole file in memory.
@@ -84,7 +85,9 @@ func sessionFileSize(path string) int64 {
 
 // sessionFileEntries streams the entries after baseline, starting at offset:
 // Pi only appends, so bytes past the size seen at dispatch are this
-// dispatch's. A file that has not reached offset was replaced.
+// dispatch's, and the first of them must continue from baseline. From
+// offset 0 it skips through the baseline entry, which Pi writes with the
+// history before it.
 func sessionFileEntries(path, baseline string, offset int64, deliver func([]json.RawMessage)) error {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
@@ -102,53 +105,74 @@ func sessionFileEntries(path, baseline string, offset int64, deliver func([]json
 		return errors.New("shorter than when the dispatch started")
 	}
 	if info.Size()-offset > sessionFileLimit {
-		return fmt.Errorf("more than %d bytes were written during the dispatch", sessionFileLimit)
+		return fmt.Errorf("more than %d bytes to read", sessionFileLimit)
 	}
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
-	// Past a nonzero offset every entry is new; from the start, skip through
-	// the baseline entry, which Pi writes with the history before it.
-	found := baseline == "" || offset > 0
-	reader := bufio.NewReaderSize(io.LimitReader(f, sessionFileLimit), 64<<10)
+	found, first := baseline == "" || offset > 0, offset > 0 && baseline != ""
+	reader := bufio.NewReaderSize(io.LimitReader(f, info.Size()-offset), 64<<10)
 	var batch []json.RawMessage
+	unparsed := 0
+	flush := func() {
+		if len(batch) > 0 {
+			deliver(batch)
+			batch = nil
+		}
+	}
 	for {
 		line, err := reader.ReadBytes('\n')
-		if len(line) > 0 && line[len(line)-1] != '\n' && err == io.EOF {
-			if len(batch) > 0 {
-				deliver(batch)
+		if len(line) > 0 && line[len(line)-1] != '\n' {
+			flush()
+			if err == nil || err == io.EOF {
+				// SIGKILL can cut the last write short.
+				err = errors.New("the last line is incomplete, so the last entry may be missing")
 			}
-			// SIGKILL can cut the last write short.
-			return errors.New("the last line is incomplete, so the last entry may be missing")
+			return err
 		}
-		if len(line) > 0 {
+		if len(line) > 1 {
 			var e struct {
 				ID       string          `json:"id"`
 				Type     string          `json:"type"`
 				ParentID json.RawMessage `json:"parentId"`
 			}
-			// The session header is not an entry.
-			if json.Unmarshal(line, &e) == nil && e.ID != "" && e.Type != "" && e.ParentID != nil {
+			switch {
+			case json.Unmarshal(line, &e) != nil || e.ID == "" || e.Type == "":
 				if found {
-					batch = append(batch, json.RawMessage(line[:len(line)-1]))
-				} else {
-					found = e.ID == baseline
+					unparsed++
 				}
+			case e.ParentID == nil:
+				// The session header is not an entry.
+			case first:
+				var parent string
+				if json.Unmarshal(e.ParentID, &parent) != nil || parent != baseline {
+					return errors.New("the entries written during the dispatch do not continue from its baseline")
+				}
+				first = false
+				batch = append(batch, json.RawMessage(line[:len(line)-1]))
+			case found:
+				batch = append(batch, json.RawMessage(line[:len(line)-1]))
+			default:
+				found = e.ID == baseline
 			}
 		}
-		if len(batch) == sessionFileBatch || err != nil && len(batch) > 0 {
-			deliver(batch)
-			batch = nil
+		if len(batch) == sessionFileBatch {
+			flush()
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			flush()
 			return err
 		}
 	}
-	if !found {
+	flush()
+	switch {
+	case !found:
 		return errors.New("the dispatch baseline entry is not in the file")
+	case unparsed > 0:
+		return fmt.Errorf("%d lines after the dispatch baseline could not be parsed", unparsed)
 	}
 	return nil
 }
