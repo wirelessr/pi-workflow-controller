@@ -35,12 +35,14 @@ func TestCheckEvidenceDiagnostics(t *testing.T) {
 	}
 	ticket, history := ref("ticket"), ref("history")
 	inputs := Inputs{
-		Citable:    map[contract.Ref]Input{ticket: {Label: "intake", Files: []contract.FileEntry{{ID: "issue", Kind: "evidence"}, {ID: "summary", Kind: "artifact"}}}},
-		Background: map[contract.Ref]Input{history: {Label: "earlier round analysis", Files: []contract.FileEntry{{ID: "notes", Kind: "evidence"}}}},
+		Citable:    map[contract.Ref][]contract.FileEntry{ticket: {{ID: "issue", Kind: "evidence", Path: "evidence/issue.json"}, {ID: "summary", Kind: "artifact", Path: "artifacts/summary.md"}}},
+		Background: map[contract.Ref][]contract.FileEntry{history: {{ID: "notes", Kind: "evidence", Path: "evidence/notes.md"}}},
 	}
-	own := []contract.FileEntry{{ID: "identity-receipt", Kind: "evidence"}, {ID: "report", Kind: "artifact"}}
+	own := []contract.FileEntry{{ID: "identity-receipt", Kind: "evidence", Path: "evidence/receipt.json"}, {ID: "report", Kind: "artifact", Path: "artifacts/report.md"}}
 	tampered := ticket
 	tampered.SHA256 = strings.Repeat("c", 64)
+	moved := ticket
+	moved.RunID, moved.Path = "other-run", "/elsewhere"
 	unknown := ref("other")
 	for _, tc := range []struct {
 		name string
@@ -50,19 +52,25 @@ func TestCheckEvidenceDiagnostics(t *testing.T) {
 		{"own file", Evidence{FileID: "identity-receipt"}, ""},
 		{"citable input file", Evidence{Ref: &ticket, FileID: "issue"}, ""},
 		{"own file with extension", Evidence{FileID: "identity-receipt.json"},
-			`facts[0].evidence[1].file_id: got "identity-receipt.json", which this contract does not declare in files[]; want a kind=evidence id from this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id) (files[] declares "identity-receipt": cite the bare id, without a path or extension)`},
+			`facts[0].evidence[1].file_id: got "identity-receipt.json", which this contract does not declare in files[]; want a kind=evidence id from this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id) (files[] declares "identity-receipt" at evidence/receipt.json: cite that bare id, never a path or an added extension)`},
+		{"own file by its path", Evidence{FileID: "evidence/receipt.json"},
+			`facts[0].evidence[1].file_id: got "evidence/receipt.json", which this contract does not declare in files[]; want a kind=evidence id from this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id) (files[] declares "identity-receipt" at evidence/receipt.json: cite that bare id, never a path or an added extension)`},
+		{"no hint toward a non-evidence file", Evidence{FileID: "report.md"},
+			`facts[0].evidence[1].file_id: got "report.md", which this contract does not declare in files[]; want a kind=evidence id from this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id)`},
 		{"own file of wrong kind", Evidence{FileID: "report"},
 			`facts[0].evidence[1].file_id: got "report", which this contract declares as kind=artifact; want a kind=evidence file`},
 		{"null ref naming an input's file", Evidence{FileID: "issue"},
 			`facts[0].evidence[1].file_id: got "issue", which this contract does not declare in files[]; want a kind=evidence id from this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id)`},
 		{"input file missing", Evidence{Ref: &ticket, FileID: "comments"},
-			`facts[0].evidence[1].file_id: got "comments", which input attempt ticket (triage.example.v1) (intake) does not declare in files[]; want a kind=evidence id from that input's files[]`},
+			`facts[0].evidence[1].file_id: got "comments", which input attempt ticket (triage.example.v1) does not declare in files[]; want a kind=evidence id from that input's files[]`},
 		{"input file of wrong kind", Evidence{Ref: &ticket, FileID: "summary"},
-			`facts[0].evidence[1].file_id: got "summary", which input attempt ticket (triage.example.v1) (intake) declares as kind=artifact; want a kind=evidence file`},
+			`facts[0].evidence[1].file_id: got "summary", which input attempt ticket (triage.example.v1) declares as kind=artifact; want a kind=evidence file`},
 		{"background input", Evidence{Ref: &history, FileID: "notes"},
-			`facts[0].evidence[1].ref: got attempt history (triage.example.v1) (earlier round analysis), a background input; want an evidence owner from this Step's citable inputs: background inputs may be read but not cited`},
+			`facts[0].evidence[1].ref: got attempt history (triage.example.v1), a background input; want an evidence owner from this Step's citable inputs: background inputs may be read but not cited`},
 		{"mistyped citable ref", Evidence{Ref: &tampered, FileID: "issue"},
-			`facts[0].evidence[1].ref: got attempt ticket with fields sha256 differing from the committed input (intake); want the ref copied byte-exact from the request`},
+			"facts[0].evidence[1].ref: got attempt ticket with sha256 \"" + strings.Repeat("c", 64) + "\" (committed \"" + strings.Repeat("a", 64) + "\"); want the ref copied byte-exact from the request"},
+		{"ref with several mistyped fields", Evidence{Ref: &moved, FileID: "issue"},
+			`facts[0].evidence[1].ref: got attempt ticket with run_id "other-run" (committed "run"), path "/elsewhere" (committed "/runs/ticket/contract.json"); want the ref copied byte-exact from the request`},
 		{"unknown ref", Evidence{Ref: &unknown, FileID: "issue"},
 			`facts[0].evidence[1].ref: got attempt other (triage.example.v1), which is not an input of this Step; want one of this Step's citable inputs copied byte-exact from the request`},
 	} {
@@ -82,10 +90,9 @@ func TestCommonSchemaDefinitions(t *testing.T) {
 	fixture := contract.Resource{URI: "https://fixture.local/common-fixture.json", JSON: json.RawMessage(`{
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"type": "object", "additionalProperties": false,
-		"required": ["gaps", "dispositions", "evidence"],
+		"required": ["gaps", "evidence"],
 		"properties": {
 			"gaps": {"type": "array", "items": {"$ref": "` + schemaURI + `common.v1.json#/$defs/gap"}},
-			"dispositions": {"type": "array", "items": {"$ref": "` + schemaURI + `common.v1.json#/$defs/gap_disposition"}},
 			"evidence": {"type": "array", "items": {"$ref": "` + schemaURI + `common.v1.json#/$defs/evidence"}}
 		}}`)}
 	registry, err := contract.NewRegistry(append(Resources(), fixture), []contract.SchemaDefinition{{ID: schemaID, URI: fixture.URI}})
@@ -104,9 +111,8 @@ func TestCommonSchemaDefinitions(t *testing.T) {
 	ref := map[string]any{"run_id": "r", "attempt_id": "a", "path": "/p", "schema_id": "s", "sha256": strings.Repeat("a", 64), "manifest_sha256": strings.Repeat("b", 64)}
 	valid := func() map[string]any {
 		return map[string]any{
-			"gaps":         []any{map[string]any{"id": "attachment-1.download", "text": "attachment download failed"}},
-			"dispositions": []any{map[string]any{"gap": map[string]any{"ref": ref, "gap_id": "G1"}, "disposition": "resolved", "reason": "fetched later", "basis": []any{map[string]any{"ref": nil, "file_id": "f"}}}},
-			"evidence":     []any{map[string]any{"ref": ref, "file_id": "f"}},
+			"gaps":     []any{map[string]any{"id": "attachment-1.download_v2", "text": "attachment download failed"}},
+			"evidence": []any{map[string]any{"ref": ref, "file_id": "f"}, map[string]any{"ref": nil, "file_id": "g"}},
 		}
 	}
 	for _, tc := range []struct {
@@ -115,19 +121,17 @@ func TestCommonSchemaDefinitions(t *testing.T) {
 		ok     bool
 	}{
 		{"valid", func(map[string]any) {}, true},
+		{"gap id at length limit", func(v map[string]any) { v["gaps"].([]any)[0].(map[string]any)["id"] = strings.Repeat("a", 128) }, true},
+		{"gap id over length limit", func(v map[string]any) { v["gaps"].([]any)[0].(map[string]any)["id"] = strings.Repeat("a", 129) }, false},
+		{"gap id with leading hyphen", func(v map[string]any) { v["gaps"].([]any)[0].(map[string]any)["id"] = "-a" }, false},
 		{"gap id with space", func(v map[string]any) { v["gaps"].([]any)[0].(map[string]any)["id"] = "a b" }, false},
+		{"gap without text", func(v map[string]any) { delete(v["gaps"].([]any)[0].(map[string]any), "text") }, false},
+		{"gap with extra field", func(v map[string]any) { v["gaps"].([]any)[0].(map[string]any)["status"] = "open" }, false},
+		{"evidence with extra field", func(v map[string]any) { v["evidence"].([]any)[0].(map[string]any)["path"] = "evidence/f" }, false},
+		{"evidence without ref", func(v map[string]any) { delete(v["evidence"].([]any)[0].(map[string]any), "ref") }, false},
 		{"gap id empty", func(v map[string]any) { v["gaps"].([]any)[0].(map[string]any)["id"] = "" }, false},
 		{"gap text blank", func(v map[string]any) { v["gaps"].([]any)[0].(map[string]any)["text"] = " \n" }, false},
 		{"gap without id", func(v map[string]any) { delete(v["gaps"].([]any)[0].(map[string]any), "id") }, false},
-		{"unknown disposition", func(v map[string]any) {
-			v["dispositions"].([]any)[0].(map[string]any)["disposition"] = "closed"
-		}, false},
-		{"disposition without basis", func(v map[string]any) {
-			v["dispositions"].([]any)[0].(map[string]any)["basis"] = []any{}
-		}, false},
-		{"disposition of a gap without its ref", func(v map[string]any) {
-			v["dispositions"].([]any)[0].(map[string]any)["gap"] = map[string]any{"ref": nil, "gap_id": "G1"}
-		}, false},
 		{"evidence with empty file id", func(v map[string]any) { v["evidence"].([]any)[0].(map[string]any)["file_id"] = "" }, false},
 		{"truncated ref digest", func(v map[string]any) {
 			short := map[string]any{}
@@ -141,7 +145,7 @@ func TestCommonSchemaDefinitions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			data := valid()
 			tc.change(data)
-			_, err := publishFixture(t, store, schemaID, data)
+			err := publishFixture(t, store, schemaID, data)
 			var rejected *contract.Error
 			if tc.ok && err != nil || !tc.ok && (!errors.As(err, &rejected) || rejected.Code != contract.ContractInvalid || rejected.Phase != "schema") {
 				t.Fatalf("publish error = %v, want ok=%t or a data schema rejection", err, tc.ok)
@@ -150,7 +154,7 @@ func TestCommonSchemaDefinitions(t *testing.T) {
 	}
 }
 
-func publishFixture(t *testing.T, store *contract.Store, schema string, data any) (contract.Ref, error) {
+func publishFixture(t *testing.T, store *contract.Store, schema string, data any) error {
 	t.Helper()
 	id := contract.Identity{RunID: store.RunID(), InvocationID: contract.NewID(), AttemptID: contract.NewID(), DispatchToken: contract.NewID()}
 	req := contract.Request{Identity: id, Prompt: "anonymous contract validation", Output: contract.OutputSpec{SchemaID: schema}}
@@ -163,14 +167,15 @@ func publishFixture(t *testing.T, store *contract.Store, schema string, data any
 	}
 	staged, err := attempt.Stage(t.Context(), contract.Spec{SchemaID: schema})
 	if err != nil {
-		return contract.Ref{}, err
+		return err
 	}
 	defer func() {
 		if err := staged.Discard(); err != nil {
 			t.Error(err)
 		}
 	}()
-	return attempt.Publish(t.Context(), staged)
+	_, err = attempt.Publish(t.Context(), staged)
+	return err
 }
 
 func errText(err error) string {

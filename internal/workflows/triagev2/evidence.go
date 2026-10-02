@@ -20,20 +20,6 @@ type Gap struct {
 	Text string `json:"text"`
 }
 
-type GapRef struct {
-	Ref   contract.Ref `json:"ref"`
-	GapID string       `json:"gap_id"`
-}
-
-// GapDisposition is the declaring role's judgment, not a Controller verdict;
-// Go only checks that the named gap exists and that a basis is cited.
-type GapDisposition struct {
-	Gap         GapRef     `json:"gap"`
-	Disposition string     `json:"disposition"`
-	Reason      string     `json:"reason"`
-	Basis       []Evidence `json:"basis"`
-}
-
 // CheckGapIDs enforces id uniqueness within one contract. JSON Schema
 // uniqueItems compares whole items, so two gaps with the same id and
 // different text would pass the schema.
@@ -48,18 +34,12 @@ func CheckGapIDs(field string, gaps []Gap) error {
 	return nil
 }
 
-// Inputs classifies a Step's exact committed inputs. Citable inputs are
-// evidence owners whose kind=evidence files may be cited; background inputs
-// may be read but never cited. The label says what each input is, for
-// diagnostics only.
+// Inputs classifies a Step's exact committed inputs by their files. Citable
+// inputs are evidence owners whose kind=evidence files may be cited;
+// background inputs may be read but never cited.
 type Inputs struct {
-	Citable    map[contract.Ref]Input
-	Background map[contract.Ref]Input
-}
-
-type Input struct {
-	Label string
-	Files []contract.FileEntry
+	Citable    map[contract.Ref][]contract.FileEntry
+	Background map[contract.Ref][]contract.FileEntry
 }
 
 // CheckEvidence reports exactly which part of a citation is wrong, what was
@@ -69,20 +49,15 @@ func (in Inputs) CheckEvidence(field string, e Evidence, own []contract.FileEntr
 		return checkFile(field, e.FileID, own, "this contract", "this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id)")
 	}
 	ref := *e.Ref
-	if input, ok := in.Citable[ref]; ok {
-		return checkFile(field, e.FileID, input.Files, fmt.Sprintf("input %s (%s)", describeRef(ref), input.Label), "that input's files[]")
+	if files, ok := in.Citable[ref]; ok {
+		return checkFile(field, e.FileID, files, "input "+describeRef(ref), "that input's files[]")
 	}
-	if input, ok := in.Background[ref]; ok {
-		return fmt.Errorf("%s.ref: got %s (%s), a background input; want an evidence owner from this Step's citable inputs: background inputs may be read but not cited", field, describeRef(ref), input.Label)
+	if _, ok := in.Background[ref]; ok {
+		return fmt.Errorf("%s.ref: got %s, a background input; want an evidence owner from this Step's citable inputs: background inputs may be read but not cited", field, describeRef(ref))
 	}
-	for known, input := range in.Citable {
+	for known := range in.Citable {
 		if known.AttemptID == ref.AttemptID {
-			return fmt.Errorf("%s.ref: got attempt %s with %s differing from the committed input (%s); want the ref copied byte-exact from the request", field, ref.AttemptID, differingFields(ref, known), input.Label)
-		}
-	}
-	for known, input := range in.Background {
-		if known.AttemptID == ref.AttemptID {
-			return fmt.Errorf("%s.ref: got attempt %s, a background input (%s), with %s also differing from the committed input; want an evidence owner from this Step's citable inputs", field, ref.AttemptID, input.Label, differingFields(ref, known))
+			return fmt.Errorf("%s.ref: got attempt %s with %s; want the ref copied byte-exact from the request", field, ref.AttemptID, differingFields(ref, known))
 		}
 	}
 	return fmt.Errorf("%s.ref: got %s, which is not an input of this Step; want one of this Step's citable inputs copied byte-exact from the request", field, describeRef(ref))
@@ -98,10 +73,10 @@ func checkFile(field, id string, files []contract.FileEntry, owner, want string)
 		}
 	}
 	hint := ""
-	bare := strings.TrimSuffix(path.Base(id), path.Ext(id))
+	base := path.Base(id)
 	for _, f := range files {
-		if f.ID == bare && bare != id {
-			hint = fmt.Sprintf(" (files[] declares %q: cite the bare id, without a path or extension)", bare)
+		if f.Kind == "evidence" && (f.Path == id || f.ID == base || f.ID == strings.TrimSuffix(base, path.Ext(base))) {
+			hint = fmt.Sprintf(" (files[] declares %q at %s: cite that bare id, never a path or an added extension)", f.ID, f.Path)
 		}
 	}
 	return fmt.Errorf("%s.file_id: got %q, which %s does not declare in files[]; want a kind=evidence id from %s%s", field, id, owner, want, hint)
@@ -124,8 +99,8 @@ func differingFields(got, want contract.Ref) string {
 		{"manifest_sha256", got.ManifestSHA256, want.ManifestSHA256},
 	} {
 		if f.got != f.want {
-			fields = append(fields, f.name)
+			fields = append(fields, fmt.Sprintf("%s %q (committed %q)", f.name, f.got, f.want))
 		}
 	}
-	return "fields " + strings.Join(fields, ", ")
+	return strings.Join(fields, ", ")
 }
