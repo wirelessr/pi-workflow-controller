@@ -331,6 +331,24 @@ func TestPiSubprocess(t *testing.T) {
 				appendMessage(c.Message)
 			case "entry":
 				appendEntry(c.Entry)
+			case "write-history":
+				// Pi's session file: a header line, then entries; Entry, when set,
+				// is written only to the file, as an entry recorded after the last read.
+				lines := []any{map[string]any{"type": "session", "id": sid}}
+				for _, e := range entries {
+					lines = append(lines, e)
+				}
+				if c.Entry != nil {
+					lines = append(lines, c.Entry)
+				}
+				var buf strings.Builder
+				for _, l := range lines {
+					raw, _ := json.Marshal(l)
+					buf.Write(raw)
+					buf.WriteByte('\n')
+				}
+				_ = os.MkdirAll(filepath.Dir(file), 0700)
+				_ = os.WriteFile(file, []byte(buf.String()), 0600)
 			case "entries-response":
 				entriesResponse = c.State
 			case "state":

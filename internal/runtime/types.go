@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -12,7 +13,42 @@ type SessionSpec struct {
 	Model                         ModelSpec
 	CWD, SessionDir, AppendPrompt string
 }
-type Dispatch struct{ Token, Message string }
+type Dispatch struct {
+	Token, Message string
+	// Entries, when set, receives this dispatch's session entries for audit.
+	// It never affects completion: the runtime does not wait on it, and a
+	// sink that drops entries only loses audit coverage.
+	Entries EntrySink
+}
+
+// EntrySink receives this dispatch's raw session entries in session order.
+// The same entry can arrive again from a later source; deduplicate by id.
+type EntrySink interface {
+	Entries(EntryBatch)
+}
+
+type EntryBatch struct {
+	Entries []json.RawMessage
+	Source  EntrySource
+	// TailUncertain reports that later entries may be missing because the
+	// session's process exit was not confirmed or its file was unreadable.
+	TailUncertain bool
+}
+
+type EntrySource string
+
+const (
+	// EntriesVerified entries passed the append-lineage checks used for
+	// completion.
+	EntriesVerified EntrySource = "rpc"
+	// EntriesUnverified entries came from one best-effort read after a
+	// failure, without lineage checks.
+	EntriesUnverified EntrySource = "rpc-unverified"
+	// EntriesSessionFile entries were read from the session file after the
+	// process exit was confirmed.
+	EntriesSessionFile EntrySource = "session-file"
+)
+
 type Execution struct {
 	SessionID, Token                                        string
 	StartSeq, SettledSeq, ActivityEpoch                     uint64

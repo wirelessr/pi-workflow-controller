@@ -42,6 +42,9 @@ type engTestReply struct {
 	Raw     []byte
 	Missing bool
 	Err     error
+	// Entries are delivered to the dispatch's entry sink, if it has one,
+	// before the reply, as the runtime delivers session entries.
+	Entries []runtime.EntryBatch
 }
 
 // Only the process/RPC boundary is replaced. Every dispatch reads the engine's
@@ -145,6 +148,11 @@ func (s *engTestSession) Execute(ctx context.Context, dispatch runtime.Dispatch)
 	reply := engTestReply{Data: engTestData{Value: request.Prompt}}
 	if s.owner.execute != nil {
 		reply = s.owner.execute(ctx, call)
+	}
+	if dispatch.Entries != nil {
+		for _, batch := range reply.Entries {
+			dispatch.Entries.Entries(batch)
+		}
 	}
 	if reply.Err != nil {
 		return runtime.Execution{}, reply.Err

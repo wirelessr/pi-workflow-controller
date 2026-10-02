@@ -438,6 +438,14 @@ Dispatch 流程：
 10. `Confirm` 再查 state 與自 baseline 後的 entries，核對 active branch 包含本次 prompt、沒有額外未歸屬 run 或 model/thinking/session drift。與 Stage 期間觀察到的新活動比較 epoch；不一致即丟棄 staged output，回 `AmbiguousExecution`，不重新等待另一個 turn 自動補成功。
 11. Engine 在本地控制序列上確認 receipt 未失效，發布 contract，再提交 AttemptSucceeded 與 invocation 的 provisional outcome。所有可重跑的祖先 Retry 結束後才定案 invocation，見第 7.1 節。
 
+**稽核觀測（opt-in）。**`StepSpec.Observe=true` 時，engine 給 runtime 一個 entry sink，記錄本次 dispatch 的 session entries，與完成判斷無關：
+
+- 完成判斷每次讀到並通過 lineage 檢查的 entries 以 `rpc` 來源交給 sink（含失敗前已通過的部分）；runtime 不等待 sink，也不因 sink 而失敗。
+- 失敗路徑在 Close 前以獨立短期限（AbortGrace）自 trace cursor best-effort 再讀一次 `get_entries`，不做 lineage 檢查，來源 `rpc-unverified`；讀不到就結束。
+- runtime 自己 Close 的失敗路徑，在 `ConfirmsLocalClose` 成立後讀 session JSONL（regular file、NOFOLLOW、64 MiB 上限），只取本次 dispatch baseline 之後的 entries，來源 `session-file`；未確認退出或檔案讀不到時只標 `TailUncertain`。取快照不改變原錯誤、不算 cleanup failure、不延後 cleanup。
+- Engine sink 以 entry id 去重，逐行寫 `{"source","entry"}` 到 `sessions/<handle>/observations/<attempt>.jsonl`，記憶體只留 tool call 索引（entry id、工具名、參數文字截斷至 2 KiB）。檔案 32 MiB、65536 entries、4096 tool calls 為上限，超限或寫檔錯誤只令 `Complete=false` 並記錄原因。結果放在 `StepResult.Observation`（成功與失敗都有）；要 exact Ref 由 workflow 以 `Attach` 提交。
+- 未設 Observe 的 Step（現有 workflows）行為不變。單一 entry 超過 frame 上限仍是既有 ProtocolFailed。
+
 不是所有 tool error 都直接令 attempt 失敗：agent 可以修正工具失敗。未解決的 terminal error、protocol error 或 contract validation 才阻擋發布。活動期間的 extension error 保守視為 `ExtensionFailed`，不自動忽略可能影響 dispatch 的失敗。
 
 ### 6.4 單一派工來源與觀測邊界

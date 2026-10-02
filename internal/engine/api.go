@@ -61,12 +61,16 @@ type StepSpec struct {
 	Feedback *Feedback
 	Output   contract.Spec
 	Timeout  time.Duration
+	// Observe records this attempt's session entries and tool calls for
+	// audit, returned as StepResult.Observation on success and failure.
+	Observe bool
 }
 
 type StepResult struct {
-	Output    contract.Ref
-	AttemptID string
-	Execution runtime.Execution
+	Output      contract.Ref
+	AttemptID   string
+	Execution   runtime.Execution
+	Observation *Observation
 }
 
 type Branch struct {

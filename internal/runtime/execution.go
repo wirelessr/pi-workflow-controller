@@ -64,6 +64,7 @@ type dispatchTrace struct {
 	assistantAfterPrompt                              bool
 	tokens                                            int
 	changed                                           chan struct{}
+	sink                                              EntrySink
 }
 
 // Matched hashes are no longer needed: append order and the latest event seq
@@ -315,9 +316,22 @@ func (s *session) readEntries(ctx context.Context, t *dispatchTrace, baseline bo
 		Entries []entry `json:"entries"`
 		LeafID  *string `json:"leafId"`
 	}
+	var raw struct {
+		Entries []json.RawMessage `json:"entries"`
+	}
 	var required map[string]json.RawMessage
-	if json.Unmarshal(r.frame.Data, &data) != nil || json.Unmarshal(r.frame.Data, &required) != nil || required["entries"] == nil || bytes.Equal(required["entries"], []byte("null")) || required["leafId"] == nil {
+	if json.Unmarshal(r.frame.Data, &data) != nil || json.Unmarshal(r.frame.Data, &raw) != nil || json.Unmarshal(r.frame.Data, &required) != nil || required["entries"] == nil || bytes.Equal(required["entries"], []byte("null")) || required["leafId"] == nil {
 		return failure(ProtocolFailed, "invalid get_entries response")
+	}
+	// Entries accepted before a lineage failure are still this dispatch's
+	// audit evidence; hand them over after the session lock is released.
+	accepted := 0
+	if !baseline && t.sink != nil {
+		defer func() {
+			if accepted > 0 {
+				t.sink.Entries(EntryBatch{Entries: raw.Entries[:accepted], Source: EntriesVerified})
+			}
+		}()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -371,6 +385,7 @@ func (s *session) readEntries(ctx context.Context, t *dispatchTrace, baseline bo
 			}
 		}
 		t.cursor = e.ID
+		accepted++
 	}
 	t.leaf = ""
 	if data.LeafID != nil {
@@ -395,10 +410,12 @@ func (s *session) Execute(ctx context.Context, d Dispatch) (receipt Execution, e
 	}
 	defer func() { s.executeLease <- struct{}{} }()
 	accepted := AcceptedNo
+	var t *dispatchTrace
 	defer func() {
 		if err == nil {
 			return
 		}
+		s.drainEntries(t)
 		var f *Failure
 		if errors.As(err, &f) {
 			copy := *f
@@ -416,6 +433,7 @@ func (s *session) Execute(ctx context.Context, d Dispatch) (receipt Execution, e
 		if !keep {
 			s.invalidate(err)
 			report, _ := s.Close(context.Background())
+			s.readSessionFile(t, report)
 			if errors.As(err, &f) {
 				f.StderrTail = report.StderrTail
 				f.Cleanup = &report
@@ -454,7 +472,7 @@ func (s *session) Execute(ctx context.Context, d Dispatch) (receipt Execution, e
 		}
 	}
 	s.mu.Lock()
-	t := &dispatchTrace{token: d.Token, cursor: s.entryCursor, baselineLeaf: s.entryCursor, changed: make(chan struct{}, 1)}
+	t = &dispatchTrace{token: d.Token, cursor: s.entryCursor, baselineLeaf: s.entryCursor, changed: make(chan struct{}, 1), sink: d.Entries}
 	s.mu.Unlock()
 	if err = s.readEntries(ctx, t, true); err != nil {
 		return receipt, err
@@ -642,8 +660,13 @@ func (s *session) Confirm(ctx context.Context, r Execution) (confirmation Confir
 	defer func() { s.executeLease <- struct{}{} }()
 	defer func() {
 		if err != nil {
+			s.mu.Lock()
+			t := s.trace
+			s.mu.Unlock()
+			s.drainEntries(t)
 			s.invalidate(err)
 			report, _ := s.Close(context.Background())
+			s.readSessionFile(t, report)
 			var f *Failure
 			if errors.As(err, &f) {
 				copy := *f
