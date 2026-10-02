@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/facts.v1.json",
+  "description": "Candidate facts from text sources (the committed intake and the caller prompt), each citing where it was read; no runtime queries",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "intake",
+    "prompt",
+    "facts",
+    "time_anchors",
+    "vision_requests",
+    "gaps"
+  ],
+  "properties": {
+    "intake": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref",
+      "description": "The intake input, copied byte-exact from the request"
+    },
+    "prompt": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref",
+      "description": "The caller prompt input, copied byte-exact from the request"
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "value",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+          },
+          "kind": {
+            "enum": [
+              "tenant_id",
+              "orgkey",
+              "ui_hostname",
+              "home_pop",
+              "customer_name",
+              "user",
+              "other"
+            ],
+            "description": "home_pop is a candidate only; never derive it from a hostname or tenant name"
+          },
+          "value": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            }
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "time_anchors": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/anchor"
+      }
+    },
+    "vision_requests": {
+      "type": "array",
+      "description": "Image attachments whose content is needed, each with the question to answer from it",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "attachment",
+          "question"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+          },
+          "attachment": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+          },
+          "question": {
+            "type": "string",
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"
+      }
+    }
+  }
+}

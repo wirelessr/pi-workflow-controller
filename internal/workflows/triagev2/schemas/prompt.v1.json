@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/prompt.v1.json",
+  "description": "Controller record of the caller's one-line prompt: the ticket it names and the rest as free-text hints; the original bytes are the evidence file prompt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ticket",
+    "hints"
+  ],
+  "properties": {
+    "ticket": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]*-[1-9][0-9]*$"
+    },
+    "hints": {
+      "type": "string"
+    }
+  }
+}

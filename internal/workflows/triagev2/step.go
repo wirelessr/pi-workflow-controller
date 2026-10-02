@@ -28,6 +28,9 @@ type TaskStep struct {
 	// Validate is the semantic acceptance gate run on every published
 	// contract; nil means schema validation only.
 	Validate func(context.Context, contract.Ref) error
+	// Feedback is given to the first attempt, for example a business retry's
+	// reason; a contract repair re-attempt replaces it with the rejection.
+	Feedback *engine.Feedback
 	// NoRepair is for a Step that already sits inside an outer retry layer
 	// (RetryInputs) with its own feedback loop: adding the contract repair
 	// there would double-retry the same session, corrupting the outer
@@ -60,7 +63,7 @@ func RunTaskStep(ctx context.Context, r *engine.Run, t TaskStep) (contract.Ref, 
 	if err != nil {
 		return contract.Ref{}, err
 	}
-	spec := engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: t.Inputs, Output: contract.Spec{SchemaID: t.Schema}, Timeout: 30 * time.Minute}
+	spec := engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: t.Inputs, Feedback: t.Feedback, Output: contract.Spec{SchemaID: t.Schema}, Timeout: 30 * time.Minute}
 	var out engine.StepResult
 	var lastFeedback *engine.Feedback
 	// Mechanical contract-shape repair, one budgeted re-attempt on the same

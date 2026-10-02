@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/intake.v1.json",
+  "description": "Mechanical retrieval of one ticket: raw issue, field metadata, every comment page, linked issue snapshots and attachments, each saved as an evidence file of this contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ticket",
+    "url",
+    "fetched_at",
+    "issue",
+    "fields",
+    "comments",
+    "linked",
+    "attachments",
+    "complete",
+    "gaps"
+  ],
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "file_id",
+        "reason"
+      ],
+      "description": "One retrieved source. available requires file_id naming this contract's kind=evidence file; any other status requires a reason, and file_id may name partial data or be empty",
+      "properties": {
+        "status": {
+          "enum": [
+            "available",
+            "missing",
+            "partial",
+            "too-large",
+            "unsafe",
+            "unsupported"
+          ]
+        },
+        "file_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "properties": {
+    "ticket": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]*-[1-9][0-9]*$"
+    },
+    "url": {
+      "type": "string",
+      "pattern": "^https://[^/?#]+/browse/[A-Z][A-Z0-9_]*-[1-9][0-9]*$",
+      "description": "Canonical browse URL https://<host>/browse/<ticket>, never a REST API endpoint"
+    },
+    "fetched_at": {
+      "type": "string",
+      "pattern": "Z$",
+      "description": "UTC RFC 3339 timestamp ending in Z"
+    },
+    "issue": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/intake.v1.json#/$defs/source",
+      "description": "Complete raw issue JSON with all fields, unabridged"
+    },
+    "fields": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/intake.v1.json#/$defs/source",
+      "description": "Field metadata saved as a bare top-level JSON array of objects with id and name"
+    },
+    "comments": {
+      "type": "array",
+      "description": "Every raw comment page from start 0 to the total; with zero comments, exactly one page with start 0",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "start",
+          "source"
+        ],
+        "properties": {
+          "start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "source": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/intake.v1.json#/$defs/source"
+          }
+        }
+      }
+    },
+    "linked": {
+      "type": "array",
+      "description": "One snapshot per formal issue link of the ticket, no others",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "source"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/intake.v1.json#/$defs/source"
+          }
+        }
+      }
+    },
+    "attachments": {
+      "type": "array",
+      "description": "One entry per attachment in the raw issue: content is the downloaded bytes, analysis is mechanical extraction such as an unpacked bundle",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "content",
+          "analysis"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "content": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/intake.v1.json#/$defs/source"
+          },
+          "analysis": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/intake.v1.json#/$defs/source"
+          }
+        }
+      }
+    },
+    "complete": {
+      "type": "boolean",
+      "description": "true only when every source is available and gaps is empty"
+    },
+    "gaps": {
+      "type": "array",
+      "description": "Retrieval work that remains undone or failed; a genuine absence (no comments, no links, no attachments) is not a gap",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"
+      }
+    }
+  }
+}

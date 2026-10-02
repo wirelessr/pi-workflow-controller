@@ -1,0 +1,397 @@
+package triagev2
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"pi-workflow-controller/internal/contract"
+	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/runtime"
+	"pi-workflow-controller/internal/testutil/protocol"
+)
+
+// TestTriageV2Subprocess is the fake Pi process: the real RPC protocol with
+// candidates written by the test host, not by a model.
+func TestTriageV2Subprocess(t *testing.T) {
+	if os.Getenv("PWC_TRIAGEV2_PROTOCOL") != "1" {
+		return
+	}
+	for _, arg := range os.Args {
+		if arg == "--version" {
+			fmt.Println("0.84.3")
+			os.Exit(0)
+		}
+	}
+	if err := protocol.Serve(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+// agentCall is one dispatch the fake agent answers.
+type agentCall struct {
+	Role      string
+	Request   contract.Request
+	Task      task
+	Candidate string
+}
+
+// writeFiles writes evidence files into the attempt and returns their entries.
+func (c agentCall) writeFiles(t *testing.T, files map[string][]byte) []contract.FileEntry {
+	t.Helper()
+	entries := []contract.FileEntry{}
+	for id, data := range files {
+		path := filepath.Join("evidence", id+".txt")
+		if err := os.WriteFile(filepath.Join(filepath.Dir(c.Candidate), path), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, contract.FileEntry{ID: id, Kind: "evidence", Path: path})
+	}
+	return entries
+}
+
+func (c agentCall) reply(t *testing.T, data any, files map[string][]byte) {
+	t.Helper()
+	if err := protocol.WriteEnvelope(c.Candidate, c.Request, data, c.writeFiles(t, files)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (c agentCall) citable(label string) contract.Ref {
+	for _, in := range c.Task.Citable {
+		if in.Label == label {
+			return in.Ref
+		}
+	}
+	panic("no citable input " + label)
+}
+
+type harnessResult struct {
+	Report engine.Report
+	Run    *engine.Run
+	Roles  []string
+}
+
+// runHarness executes a workflow over the real engine, runtime and RPC
+// protocol. agent writes each candidate; the fake Pi then settles.
+func runHarness(t *testing.T, prompt string, execute engine.Workflow, agent func(*testing.T, agentCall)) harnessResult {
+	t.Helper()
+	dir := t.TempDir()
+	bridge := filepath.Join(dir, "bridge")
+	if err := os.Mkdir(bridge, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	host, err := protocol.NewHost(ctx, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r *engine.Run
+	done := make(chan struct{})
+	protocol.RegisterCleanup(t, host, func() <-chan struct{} {
+		cancel()
+		if r != nil {
+			r.Cancel(engine.OriginControllerUser)
+			return done
+		}
+		return nil
+	}, 8*time.Second, "fixture host close: ", "fixture run did not join")
+	policy := engine.DefaultRunPolicy()
+	policy.Runtime.StartupTimeout = 5 * time.Second
+	policy.Runtime.CleanupTimeout = 3 * time.Second
+	policy.Runtime.AbortGrace = 50 * time.Millisecond
+	policy.Runtime.HealthInterval = time.Hour
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pi, err := runtime.New(runtime.Options{Executable: exe, Args: []string{"-test.run=^TestTriageV2Subprocess$", "--"},
+		Env:       []string{"PWC_TRIAGEV2_PROTOCOL=1", "PWC_ENGINE_MANUAL_CANDIDATE=1", "PWC_ENGINE_CONTROL=" + host.Addr().String(), "GORACE=atexit_sleep_ms=0"},
+		BridgeDir: bridge, Policy: policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return r.Observe(ctx, o) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := contract.NewRegistry(Resources(), Schemas())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err = engine.New(ctx, engine.Definition{Name: "triagev2-fixture", Version: "1", Policy: policy, Execute: execute},
+		engine.Input{Prompt: prompt, LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: registry, Runtime: pi, PiVersion: "0.84.3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report engine.Report
+	go func() { report = r.Execute(); close(done) }()
+	var mu sync.Mutex
+	var roles []string
+	for {
+		select {
+		case <-done:
+			return harnessResult{Report: report, Run: r, Roles: roles}
+		case <-ctx.Done():
+			t.Fatal("workflow exceeded the fixture deadline")
+		case e, ok := <-host.Events():
+			if !ok {
+				t.Fatal("fixture host events closed")
+			}
+			if e.Err != nil {
+				t.Fatalf("fixture host event: %v", e.Err)
+			}
+			if e.Message.Type != "prompt" {
+				continue
+			}
+			var req contract.Request
+			if err := protocol.ReadJSON(e.Message.RequestPath, &req); err != nil {
+				t.Fatal(err)
+			}
+			var tk task
+			if err := json.Unmarshal([]byte(req.Prompt), &tk); err != nil {
+				t.Fatalf("request prompt is not a task: %v", err)
+			}
+			mu.Lock()
+			roles = append(roles, tk.Role)
+			mu.Unlock()
+			agent(t, agentCall{Role: tk.Role, Request: req, Task: tk, Candidate: e.Message.CandidatePath})
+			if err := e.Reply(protocol.Control{Type: "settle"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// intakeFiles is an anonymous complete ticket: two comment pages, one linked
+// issue and one attachment with an extraction.
+func intakeFiles() (Intake, map[string][]byte) {
+	files := map[string][]byte{
+		"fields": []byte(`[{"id":"customfield_1","name":"Ambiguous"},{"id":"description","name":"Description"}]`),
+		"page-0": []byte(`{"startAt":0,"total":2,"comments":[{"id":"c1","body":"Tenant 17 (orgkey org-17) reports failures at 2025-01-02T00:30:00+02:00"}]}`),
+		"page-1": []byte(`{"startAt":1,"total":2,"comments":[{"id":"c2","body":"Host acme.example.invalid, possibly on pop-a"}]}`),
+		"linked": []byte(`{"key":"CASE-18","fields":{"summary":"Same incident"}}`),
+		"bundle": []byte("event=sample at 2025-01-02T00:30:00+02:00\n"),
+		"unpack": []byte("extracted bundle listing\n"),
+	}
+	issue, _ := json.Marshal(map[string]any{"key": "CASE-17", "fields": map[string]any{
+		"description": "Anonymous incident", "customfield_1": 17,
+		"comment":    map[string]any{"total": 2, "comments": []any{}},
+		"issuelinks": []any{map[string]any{"outwardIssue": map[string]any{"key": "CASE-18"}}},
+		"attachment": []any{map[string]any{"id": "a1", "size": len(files["bundle"])}},
+	}})
+	files["issue"] = issue
+	available := func(id string) Source { return Source{Status: "available", FileID: id} }
+	return Intake{Ticket: "CASE-17", URL: "https://jira.example.invalid/browse/CASE-17", FetchedAt: "2025-01-03T00:00:00Z",
+		Issue: available("issue"), Fields: available("fields"),
+		Comments:    []CommentPage{{0, available("page-0")}, {1, available("page-1")}},
+		Linked:      []LinkedIssue{{"CASE-18", available("linked")}},
+		Attachments: []Attachment{{"a1", available("bundle"), available("unpack")}},
+		Complete:    true, Gaps: []Gap{}}, files
+}
+
+func cite(ref contract.Ref, id string) Evidence { return Evidence{Ref: &ref, FileID: id} }
+
+func factsFor(call agentCall) Facts {
+	intake, prompt := call.citable("intake"), call.citable("caller prompt")
+	return Facts{Intake: intake, Prompt: prompt,
+		Facts: []Fact{
+			{ID: "tenant", Kind: "tenant_id", Value: "17", Evidence: []Evidence{cite(intake, "page-0")}},
+			{ID: "orgkey", Kind: "orgkey", Value: "org-17", Evidence: []Evidence{cite(intake, "page-0")}},
+			{ID: "pop", Kind: "home_pop", Value: "pop-a", Evidence: []Evidence{cite(intake, "page-1")}},
+		},
+		TimeAnchors:    []TimeAnchor{{ID: "event", Event: "reported failure", Original: "2025-01-02T00:30:00+02:00", Format: "rfc3339", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: cite(intake, "page-0")}},
+		VisionRequests: []VisionRequest{},
+		Gaps:           []Gap{}}
+}
+
+func checkFor(call agentCall, verdict func(id string) string) FactCheck {
+	var subject Facts
+	raw, err := os.ReadFile(call.Task.Subject.Path)
+	if err != nil {
+		panic(err)
+	}
+	var env struct {
+		Data Facts `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		panic(err)
+	}
+	subject = env.Data
+	intake := call.citable("intake")
+	out := FactCheck{Subject: *call.Task.Subject, Items: []FactVerdict{}, Gaps: []Gap{}}
+	for _, id := range append(factIDs(subject), anchorIDs(subject)...) {
+		out.Items = append(out.Items, FactVerdict{ID: id, Verdict: verdict(id), Reason: "checked against the cited comment", Basis: []Evidence{cite(intake, "page-0")}})
+	}
+	return out
+}
+
+func factIDs(f Facts) []string {
+	var ids []string
+	for _, x := range f.Facts {
+		ids = append(ids, x.ID)
+	}
+	return ids
+}
+
+func anchorIDs(f Facts) []string {
+	var ids []string
+	for _, a := range f.TimeAnchors {
+		ids = append(ids, a.ID)
+	}
+	return ids
+}
+
+func s0Workflow(t *testing.T, source string, out *S0, retries int) engine.Workflow {
+	return func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
+		skills, err := PrepareSkills(ctx, r, r.Root(), source)
+		if err != nil {
+			return engine.Result{}, err
+		}
+		model := runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}
+		*out, err = runS0(ctx, r, skills, S0Models{Intake: model, Facts: model, Validator: model}, retries)
+		if err != nil {
+			return engine.Result{}, err
+		}
+		return engine.Result{Outputs: map[string]contract.Ref{"status": out.Status}, Final: &engine.FinalSelection{Output: "status"}}, nil
+	}
+}
+
+func decodeRef[T any](t *testing.T, r *engine.Run, ref contract.Ref) T {
+	t.Helper()
+	raw, err := os.ReadFile(ref.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env struct {
+		Data T `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	return env.Data
+}
+
+func TestS0(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		retries  int
+		agent    func(t *testing.T, call agentCall, round int)
+		roles    string
+		accepted string
+		degraded string
+		failure  string
+	}{
+		{name: "all facts accepted", retries: 1, roles: "intake facts fact-check", accepted: "tenant orgkey pop event"},
+		{name: "a rejected fact is corrected on retry", retries: 1, roles: "intake facts fact-check facts fact-check", accepted: "tenant orgkey event",
+			agent: func(t *testing.T, call agentCall, round int) {
+				if call.Role == "facts" && round == 2 {
+					f := factsFor(call)
+					f.Facts = f.Facts[:2]
+					call.reply(t, f, nil)
+				}
+			}},
+		{name: "a fact still rejected after the retries is absent with a gap", retries: 1, roles: "intake facts fact-check facts fact-check", accepted: "tenant orgkey event", degraded: "pop:inferred"},
+		{name: "missing identity and time are gaps, not failures", retries: 0, roles: "intake facts fact-check", accepted: "",
+			agent: func(t *testing.T, call agentCall, round int) {
+				if call.Role == "facts" {
+					f := factsFor(call)
+					f.Facts, f.TimeAnchors = []Fact{}, []TimeAnchor{}
+					f.Gaps = []Gap{{ID: "no-pop", Text: "No PoP candidate in any text source"}, {ID: "no-time", Text: "No incident timestamp with a zone"}}
+					call.reply(t, f, nil)
+				}
+			}},
+		{name: "a bad citation is repaired in the same session", retries: 0, roles: "intake facts facts fact-check", accepted: "tenant orgkey pop event",
+			agent: func(t *testing.T, call agentCall, round int) {
+				if call.Role == "facts" && round == 1 && call.Request.Feedback == nil {
+					f := factsFor(call)
+					f.Facts[0].Evidence = []Evidence{{FileID: "page-0"}}
+					call.reply(t, f, nil)
+				}
+			}},
+		{name: "an intake whose completeness the raw sources contradict fails after repair", retries: 0, roles: "intake intake", failure: "complete/gaps",
+			agent: func(t *testing.T, call agentCall, round int) {
+				if call.Role == "intake" {
+					v, files := intakeFiles()
+					delete(files, "page-1")
+					v.Comments = v.Comments[:1]
+					call.reply(t, v, files)
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			skills := newSkillFixture(t)
+			var out S0
+			rounds := map[string]int{}
+			res := runHarness(t, "CASE-17 pop=pop-a please check", s0Workflow(t, skills.source, &out, tc.retries), func(t *testing.T, call agentCall) {
+				if call.Request.Feedback == nil || !strings.HasPrefix(call.Request.Feedback.Message, "Previous contract") {
+					rounds[call.Role]++
+				}
+				before, _ := os.Stat(call.Candidate)
+				if tc.agent != nil {
+					tc.agent(t, call, rounds[call.Role])
+				}
+				if after, _ := os.Stat(call.Candidate); before != nil || after != nil {
+					return
+				}
+				switch call.Role {
+				case "intake":
+					v, files := intakeFiles()
+					call.reply(t, v, files)
+				case "facts":
+					call.reply(t, factsFor(call), nil)
+				case "fact-check":
+					call.reply(t, checkFor(call, func(id string) string {
+						if id == "pop" && tc.name != "all facts accepted" && tc.name != "a bad citation is repaired in the same session" {
+							return "inferred"
+						}
+						return "supported"
+					}), nil)
+				}
+			})
+			if got := strings.Join(res.Roles, " "); got != tc.roles {
+				t.Fatalf("dispatched roles = %q, want %q", got, tc.roles)
+			}
+			if tc.failure != "" {
+				if res.Report.Outcome != engine.Failed || !strings.Contains(fmt.Sprint(res.Report.Failure), tc.failure) {
+					t.Fatalf("outcome = %s failure = %v, want failure mentioning %q", res.Report.Outcome, res.Report.Failure, tc.failure)
+				}
+				return
+			}
+			if res.Report.Outcome != engine.Succeeded {
+				t.Fatalf("outcome = %s: %v", res.Report.Outcome, res.Report.Failure)
+			}
+			status := decodeRef[FactStatus](t, res.Run, out.Status)
+			var degraded []string
+			for _, d := range status.Degraded {
+				degraded = append(degraded, d.ID+":"+d.Verdict)
+			}
+			if strings.Join(status.Accepted, " ") != tc.accepted || strings.Join(degraded, " ") != tc.degraded || len(status.Gaps) != len(status.Degraded) {
+				t.Fatalf("status accepted %v degraded %v gaps %+v", status.Accepted, degraded, status.Gaps)
+			}
+			if status.Facts != out.Facts || status.Check != out.Check || !res.Run.ControllerAttached(out.Status) || !res.Run.ControllerAttached(out.Prompt) {
+				t.Fatalf("status record does not bind the final facts and check: %+v", status)
+			}
+			prompt := decodeRef[CallerPrompt](t, res.Run, out.Prompt)
+			if prompt.Ticket != "CASE-17" || prompt.Hints != "pop=pop-a please check" {
+				t.Fatalf("caller prompt record = %+v", prompt)
+			}
+		})
+	}
+}
+
+func TestS0RejectsAPromptWithoutTicket(t *testing.T) {
+	skills := newSkillFixture(t)
+	var out S0
+	res := runHarness(t, "please check the incident", s0Workflow(t, skills.source, &out, 0), func(t *testing.T, call agentCall) {
+		t.Errorf("dispatched %s for a prompt without a ticket", call.Role)
+	})
+	if res.Report.Outcome != engine.Failed || !strings.Contains(fmt.Sprint(res.Report.Failure), "must start with a ticket key") || len(res.Report.Snapshot.Sessions) != 0 {
+		t.Fatalf("outcome = %s failure = %v sessions = %d", res.Report.Outcome, res.Report.Failure, len(res.Report.Snapshot.Sessions))
+	}
+}

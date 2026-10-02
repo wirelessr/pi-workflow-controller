@@ -5,42 +5,256 @@
     "ref": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["run_id", "attempt_id", "path", "schema_id", "sha256", "manifest_sha256"],
+      "required": [
+        "run_id",
+        "attempt_id",
+        "path",
+        "schema_id",
+        "sha256",
+        "manifest_sha256"
+      ],
       "description": "Exact committed Ref; copy every field byte-exact from the request, never retype or shorten it",
       "properties": {
-        "run_id": {"type": "string"},
-        "attempt_id": {"type": "string"},
-        "path": {"type": "string"},
-        "schema_id": {"type": "string"},
-        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Full lowercase 64-hex-character sha256 of the referenced contract"},
-        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Full lowercase 64-hex-character sha256 of the referenced manifest"}
+        "run_id": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "schema_id": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Full lowercase 64-hex-character sha256 of the referenced contract"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Full lowercase 64-hex-character sha256 of the referenced manifest"
+        }
       }
     },
     "evidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ref", "file_id"],
+      "required": [
+        "ref",
+        "file_id"
+      ],
       "description": "A cited kind=evidence file. ref null cites this contract's own files[]; otherwise ref is one of the Step's citable inputs and file_id is that input's files[] id",
       "properties": {
-        "ref": {"anyOf": [{"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"}, {"type": "null"}]},
-        "file_id": {"type": "string", "minLength": 1, "description": "Bare files[] id, never a path or a name with an added extension"}
+        "ref": {
+          "anyOf": [
+            {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "file_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Bare files[] id, never a path or a name with an added extension"
+        }
       }
     },
-    "gap_id": {
+    "id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
       "maxLength": 128,
-      "description": "Gap id: letters, digits, dot, underscore or hyphen, unique within the contract that declares the gap"
+      "description": "Item id: letters, digits, dot, underscore or hyphen, unique within its contract"
     },
     "gap": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "text"],
+      "required": [
+        "id",
+        "text"
+      ],
       "description": "Work that remains undone or failed; a genuine absence confirmed from evidence is not a gap",
       "properties": {
-        "id": {"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap_id"},
-        "text": {"type": "string", "pattern": "\\S"}
+        "id": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+        },
+        "text": {
+          "type": "string",
+          "pattern": "\\S"
+        }
       }
+    },
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "event",
+        "original",
+        "format",
+        "source_tz",
+        "utc",
+        "offset_seconds",
+        "evidence",
+        "paired_epoch_millis",
+        "paired_evidence"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id",
+          "description": "Anchor id, unique within the contract"
+        },
+        "event": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "The observed event this timestamp belongs to; Jira activity timestamps are not incident anchors"
+        },
+        "original": {
+          "type": "string",
+          "description": "The raw timestamp exactly as observed in its source; shape depends on format (see allOf branches)"
+        },
+        "format": {
+          "enum": [
+            "rfc3339",
+            "epoch-seconds",
+            "epoch-millis",
+            "local-paired"
+          ]
+        },
+        "source_tz": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Bare zone name of the source timestamp, such as UTC or Asia/Taipei"
+        },
+        "utc": {
+          "type": "string",
+          "pattern": "Z$",
+          "description": "The anchor converted to UTC, an RFC 3339 string ending in Z; from/to must be byte-identical to the min/max of these"
+        },
+        "offset_seconds": {
+          "type": "integer",
+          "minimum": -86400,
+          "maximum": 86400
+        },
+        "evidence": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+        },
+        "paired_epoch_millis": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "paired_evidence": {
+          "anyOf": [
+            {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "format": {
+                "const": "rfc3339"
+              }
+            },
+            "required": [
+              "format"
+            ]
+          },
+          "then": {
+            "properties": {
+              "original": {
+                "pattern": "(Z|[+-]\\d\\d:\\d\\d)$",
+                "description": "Complete RFC 3339 timestamp with an explicit zone or numeric offset suffix (e.g. 2026-10-01T05:21:20.298Z), never a time-only fragment or a zone-less date-time. An absolute timestamp in another syntax (e.g. '2026-10-01 05:21:58 UTC') is still rfc3339: normalize original to RFC 3339 syntax (2026-10-01T05:21:58Z) instead of switching format to local-paired; local-paired is only for zone-less local timestamps"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "format": {
+                "const": "epoch-seconds"
+              }
+            },
+            "required": [
+              "format"
+            ]
+          },
+          "then": {
+            "properties": {
+              "original": {
+                "pattern": "^\\d+$",
+                "description": "Bare integer epoch-seconds value, digits only, never the full surrounding string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "format": {
+                "const": "epoch-millis"
+              }
+            },
+            "required": [
+              "format"
+            ]
+          },
+          "then": {
+            "properties": {
+              "original": {
+                "pattern": "^\\d+$",
+                "description": "Bare integer epoch-millis value, digits only, never the full surrounding string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "format": {
+                "const": "local-paired"
+              }
+            },
+            "required": [
+              "format"
+            ]
+          },
+          "then": {
+            "properties": {
+              "original": {
+                "description": "Zone-less local timestamp (e.g. 2025-01-02T00:30:00). local-paired requires a same-event absolute pair: paired_epoch_millis must be a nonnull integer and paired_evidence a nonnull evidence entry. Without a same-event absolute epoch value in committed evidence, local-paired can never validate: instead combine the time-of-day with the date established by same-day evidence and record format rfc3339 with the normalized RFC 3339 original"
+              },
+              "paired_epoch_millis": {
+                "type": "integer",
+                "description": "Same-event absolute epoch millis; never null when format is local-paired"
+              },
+              "paired_evidence": {
+                "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
+                "description": "Evidence of the paired absolute timestamp; never null when format is local-paired"
+              }
+            }
+          }
+        }
+      ],
+      "description": "One observed incident timestamp with its UTC conversion; the Controller recomputes utc and offset_seconds from original"
     }
   }
 }

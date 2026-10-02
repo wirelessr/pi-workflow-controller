@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/factcheck.v1.json",
+  "description": "Independent judgment of each fact and time anchor of the subject facts contract against the evidence it cites",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "subject",
+    "items",
+    "gaps"
+  ],
+  "properties": {
+    "subject": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref",
+      "description": "The facts contract under review, copied byte-exact from the request"
+    },
+    "items": {
+      "type": "array",
+      "description": "Exactly one verdict per fact id and time anchor id of the subject",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "verdict",
+          "reason",
+          "basis"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+          },
+          "verdict": {
+            "enum": [
+              "supported",
+              "unsupported",
+              "inferred"
+            ],
+            "description": "supported: the cited evidence states it; unsupported: the cited evidence does not; inferred: derived from a name, hostname, geography or guess rather than stated"
+          },
+          "reason": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "basis": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            }
+          }
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"
+      }
+    }
+  }
+}
