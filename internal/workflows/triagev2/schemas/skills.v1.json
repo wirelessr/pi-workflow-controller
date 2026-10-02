@@ -13,7 +13,7 @@
     "digest": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
-      "description": "sha256 of the sorted \"<sha256>  <path>\\n\" lines of files"
+      "description": "sha256 of the \"<sha256>  <path>\\n\" lines of files, in files order (paths in byte order)"
     },
     "files": {
       "type": "array",

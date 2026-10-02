@@ -20,8 +20,10 @@ type ControllerFile struct {
 }
 
 // CheckControllerFiles rejects Controller-produced data and files that this
-// Store would refuse, before any attempt is created or byte is written. Stage
-// still validates the written candidate in full.
+// Store would refuse, before any attempt is created or byte is written. It
+// folds ASCII case only; a name collision it cannot see (for example Unicode
+// normalization) is still refused when the file is written. Stage validates
+// the written candidate in full.
 func (s *Store) CheckControllerFiles(data json.RawMessage, files []ControllerFile) error {
 	_, err := s.controllerEntries(Identity{}, data, files)
 	return err

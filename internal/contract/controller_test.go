@@ -61,6 +61,29 @@ func TestWriteControllerCandidate(t *testing.T) {
 			}
 		}
 	})
+	t.Run("a name collision the case fold cannot see is a definition error", func(t *testing.T) {
+		s := storeTestNew(t, Limits{})
+		a, _ := storeTestAttempt(t, s, "")
+		probe := filepath.Join(a.Dir(), "evidence", "\u00e9.txt")
+		if err := os.WriteFile(probe, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := os.Lstat(filepath.Join(a.Dir(), "evidence", "e\u0301.txt"))
+		if err := os.Remove(probe); err != nil {
+			t.Fatal(err)
+		}
+		if err != nil {
+			t.Skip("this filesystem does not normalize Unicode names")
+		}
+		err = a.WriteControllerCandidate(json.RawMessage(`{"answer":"yes"}`), []ControllerFile{{ID: "first", Path: "evidence/\u00e9.txt", Data: []byte("1")}, {ID: "second", Path: "evidence/e\u0301.txt", Data: []byte("2")}})
+		var typed *Error
+		if !errors.As(err, &typed) || typed.Code != InvalidDefinition {
+			t.Fatalf("error = %v, want InvalidDefinition", err)
+		}
+		if _, err := os.Lstat(probe); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("first colliding file left behind: %v", err)
+		}
+	})
 	t.Run("an envelope over the candidate limit writes nothing", func(t *testing.T) {
 		s := storeTestNew(t, Limits{MaxPromptBytes: 64 << 10, MaxCandidateBytes: 300, MaxJSONDepth: 64, MaxFileBytes: 1 << 20, MaxAttemptFileBytes: 1 << 20, MaxAttemptFiles: 8})
 		a, _ := storeTestAttempt(t, s, "")

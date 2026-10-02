@@ -34,6 +34,7 @@ const (
 	skillFileLimit    = 1 << 20
 	skillTotalLimit   = 8 << 20
 	skillFileCount    = 128
+	upstreamFileLimit = 4 << 20
 	manifestSchema    = "pwc-triage-skills/manifest/v1"
 	skillsExtractName = "triage-skills"
 	staleGapID        = "derived-skills-stale"
@@ -192,7 +193,7 @@ func readSkillSource(ctx context.Context, source string) (skillSource, error) {
 				}
 				return nil
 			}
-			if !utf8.ValidString(name) || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+			if !utf8.ValidString(name) || strings.IndexFunc(name, func(r rune) bool { return !unicode.IsGraphic(r) }) >= 0 {
 				return fmt.Errorf("skill entry %q has a name that is not printable UTF-8", name)
 			}
 			switch {
@@ -242,9 +243,12 @@ func parseManifest(raw []byte) (upstreamFiles, error) {
 	}
 	var schema, root string
 	var entries []map[string]json.RawMessage
-	for key, target := range map[string]any{"schema": &schema, "upstream_root": &root, "upstream": &entries} {
-		if err := json.Unmarshal(top[key], target); err != nil {
-			return upstreamFiles{}, fmt.Errorf("skill manifest.json: field %s: %w", key, err)
+	for _, field := range []struct {
+		key    string
+		target any
+	}{{"schema", &schema}, {"upstream_root", &root}, {"upstream", &entries}} {
+		if err := json.Unmarshal(top[field.key], field.target); err != nil {
+			return upstreamFiles{}, fmt.Errorf("skill manifest.json: field %s: %w", field.key, err)
 		}
 	}
 	if schema != manifestSchema {
@@ -299,7 +303,7 @@ func checkUpstream(ctx context.Context, u upstreamFiles) ([]Gap, error) {
 		}
 		defer func() { _ = dir.Close() }()
 		for i, path := range u.paths {
-			current, err := contract.ReadStable(ctx, dir, filepath.FromSlash(path), skillFileLimit)
+			current, err := contract.ReadStable(ctx, dir, filepath.FromSlash(path), upstreamFileLimit)
 			if cause := context.Cause(ctx); cause != nil {
 				return r, cause
 			}
