@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/common.v1.json",
+  "$defs": {
+    "ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "attempt_id", "path", "schema_id", "sha256", "manifest_sha256"],
+      "description": "Exact committed Ref; copy every field byte-exact from the request, never retype or shorten it",
+      "properties": {
+        "run_id": {"type": "string"},
+        "attempt_id": {"type": "string"},
+        "path": {"type": "string"},
+        "schema_id": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Full lowercase 64-hex-character sha256 of the referenced contract"},
+        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Full lowercase 64-hex-character sha256 of the referenced manifest"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "file_id"],
+      "description": "A cited kind=evidence file. ref null cites this contract's own files[]; otherwise ref is one of the Step's citable inputs and file_id is that input's files[] id",
+      "properties": {
+        "ref": {"anyOf": [{"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"}, {"type": "null"}]},
+        "file_id": {"type": "string", "minLength": 1, "description": "Bare files[] id, never a path or a name with an added extension"}
+      }
+    },
+    "gap_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+      "description": "Gap id: unique within the contract that declares the gap"
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text"],
+      "description": "Work that remains undone or failed; a genuine absence confirmed from evidence is not a gap",
+      "properties": {
+        "id": {"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap_id"},
+        "text": {"type": "string", "pattern": "\\S"}
+      }
+    },
+    "gap_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "gap_id"],
+      "description": "A gap declared by an exact committed input, cited by that input's Ref and the gap id",
+      "properties": {
+        "ref": {"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"},
+        "gap_id": {"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap_id"}
+      }
+    },
+    "gap_disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gap", "disposition", "reason", "basis"],
+      "description": "The declaring role's current judgment of an upstream gap; a later disposition of the same gap supersedes an earlier one",
+      "properties": {
+        "gap": {"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap_ref"},
+        "disposition": {"enum": ["open", "resolved", "not_applicable"]},
+        "reason": {"type": "string", "pattern": "\\S"},
+        "basis": {"type": "array", "minItems": 1, "items": {"$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"}}
+      }
+    }
+  }
+}
