@@ -40,6 +40,8 @@ Planner Agent 可以提出下一步工作；Controller 依已批准的 contract�
 - 不據此新增 Controller 自帶的 acquisition executable、可選 wrapper、新 skill 或通用 adapter 框架，更不強制 Agent 呼叫以取代領域自主操作。
 - 真有工具缺口時，先核對 skill 全貌、scripts、立即 callers 與既有工具，提出具體缺口及必要改動，取得確認再施工。既有已批准工具與 workflow resources 不因此被自動撤除。
 - Step prompt 交代角色、工作、授權 scope、inputs／outputs 與完成條件；不另造共通安全 instructions、專用 AGENTS.md、hooks、allowlist、LaunchProfile、capability manifest、credential broker 或 per-Step 權限輪替。
+- 前述「不新增…新 skill」針對因工具缺口而另造 skill。Workflow 專用 skills（repo 內 embed，或 repo 外私有目錄）依 [新增 workflow 指南](docs/ADDING-A-WORKFLOW.md) 交付，不受此限；仍不得修改既有 skills／agents／settings。
+- 單一 workflow 自有、注入該 workflow 各 Step requirements 的流程契約常數（例如由 Controller 而非 Agent 派工、不建立或委派 subagent、不寫回外部系統、無人可詢問時降級並列缺項）屬 Step requirements，不算「共通安全 instructions」；後者指跨 workflow 的通用安全政策、runtime 注入或 hook。此類常數須明寫優先於衝突的全域指示，且不得含公司內部名詞。
 
 ## 四、硬性保證不能退成 prompt
 
@@ -64,6 +66,7 @@ Planner Agent 可以提出下一步工作；Controller 依已批准的 contract�
 - 使用真 engine／Store／protocol 路徑，只替代外部 API、provider 或明確批准的 filesystem dependency boundary；OS File.Sync 可注入正常成功或故障結果，產品預設真 Sync，durability／storage-journal fault／持久化順序及 fsync queue 測試保真。這是正常 DI，不是產品 fast mode；其他 filesystem 操作不變。不 mock Step、validator、內部編排或 parser 來製造成功。
 - 驗收 exact 待提交 tree，清楚列出 skips、未執行與未驗 live 能力。匿名 fixtures、工具存在、skill 可載入、Agent 實際成功操作是不同層級的證據。
 - Repository 只保留通用 source、匿名 tests 與文件。真資料、認證、個人路徑、逐次工程報告及交接 metadata 留在 repo 外指定位置；不覆蓋不明來源變更，不自行發布。
+- 本 repo 為公開。公司內部系統、架構、主機與環境名稱同屬不得入 repo 的資料；領域細節留在 repo 外的私有 skill 或文件，repo 內的 requirements、schema 說明與文件只用通用描述。
 
 ## 七、共用機制不能隨 workflow 重造
 
