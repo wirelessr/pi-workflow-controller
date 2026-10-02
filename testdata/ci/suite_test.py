@@ -22,23 +22,18 @@ class SuiteTest(unittest.TestCase):
         return path
 
     def test_partition(self):
-        tops = {suite.TRIAGE: sorted(suite.PURE | suite.STORE | {suite.RPC, 'TestNewLocal'}),
-                suite.ENGINE: [suite.QUEUE, 'TestNewEngine'], 'new/pkg': ['TestNew']}
+        tops = {suite.ENGINE: [suite.QUEUE, 'TestNewEngine'], 'new/pkg': ['TestNew']}
         groups = suite.partition(tops)
         cases = [('new/pkg', 'TestNew/new-child', 'base-new-pkg'),
-                 (suite.TRIAGE, 'TestNewLocal/unknown', 'triage-local'),
-                 (suite.TRIAGE, suite.RPC, None)]
-        for name, expected in [('m1-x', 'rpc-m1-3'), ('m4-x', 'rpc-m4'), ('m5-x', 'rpc-m5'),
-                               ('m6-x', 'rpc-m6'), ('m7-x', 'rpc-m7'), ('unknown', 'rpc-other'),
-                               ('m', 'rpc-other'), ('m1', 'rpc-other'), ('m1x', 'rpc-other'), ('m8-x', 'rpc-other')]:
-            cases.append((suite.TRIAGE, suite.RPC + '/' + name, expected))
+                 (suite.ENGINE, 'TestNewEngine/child', 'base-internal-engine'),
+                 (suite.ENGINE, suite.QUEUE, None)]
         for name, expected in [('default1024', 'queue-stress'), ('small2', 'queue-small'),
                                ('default102', 'queue-small'), ('default1024x', 'queue-small'), ('unknown', 'queue-small')]:
             cases.append((suite.ENGINE, suite.QUEUE + '/' + name, expected))
         for package, name, expected in cases:
             with self.subTest(name=name):
                 self.assertEqual(suite.owner(groups, package, name), expected)
-        for bad in [{}, {suite.TRIAGE: ['TestNew']}, {'p': ['TestX', 'TestX']}]:
+        for bad in [{}, {suite.ENGINE: ['TestNew']}, {'p': ['TestX', 'TestX']}]:
             with self.subTest(inventory=bad), self.assertRaises(ValueError):
                 suite.partition(bad)
         for package, name in [('new/pkg', 'TestUnknown'), ('unknown/pkg', 'TestNew')]:

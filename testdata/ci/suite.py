@@ -10,22 +10,8 @@ import stat
 import subprocess
 import time
 
-TRIAGE = "pi-workflow-controller/internal/workflows/triage"
 ENGINE = "pi-workflow-controller/internal/engine"
 QUEUE = "TestEnginePersistenceObservationQueueSaturation"
-RPC = "TestIntakeToContext"
-PURE = set("TestTriagePureValidation TestTriageReportBufferCopyLimit TestTriageReportMetadataPredicates TestTriageClaimProjectionPredicates TestTriageReportPolicyBoundaries TestM6SupplementRetryArithmetic".split())
-STORE = set("TestRawFileReaderBoundaries TestTriageReportFileHardcap TestValidationRejectionFailures TestTriageValidation TestTriageReportResources".split())
-RPC_PATTERNS = {
-    "rpc-m1-3": "^m[1-3]-.*$", "rpc-m4": "^m4-.*$",
-    "rpc-m5": "^m5-.*$", "rpc-m6": "^m6-.*$", "rpc-m7": "^m7-.*$",
-    "rpc-other": "^([^m].*|m([^1-7].*)?|m[1-7]([^-].*)?)$",
-}
-TARGETS = [
-    "m5-delivery-fresh-handoff", "m6-mandatory-reframe-inspection",
-    "m6-planner-history-reopen", "m6-ordinary-cleanup-priority",
-    "m4-mixed-timeout", "m4-mixed-journal-fatal-late-abort",
-]
 # Only opt-in integration identities are configured here, never a case registry.
 OPTINS = {
     ENGINE: {
@@ -87,21 +73,13 @@ def partition(tops):
         groups.append(dict(id=identity, package=package, tops=sorted(names),
                            run=run or anchored(names), parent=parent))
     for package, names in sorted(tops.items()):
-        if package == TRIAGE:
-            require(PURE | STORE | {RPC} <= set(names), "missing triage parent")
-            add("triage-pure", package, PURE)
-            add("triage-store", package, STORE)
-            add("triage-local", package, set(names) - PURE - STORE - {RPC})
-            for identity, pattern in RPC_PATTERNS.items():
-                add(identity, package, [RPC], "^" + RPC + "$/" + pattern, RPC)
-        else:
-            selected = set(names)
-            if package == ENGINE:
-                require(QUEUE in selected, "missing queue parent")
-                selected.remove(QUEUE)
-                add("queue-small", package, [QUEUE], "^" + QUEUE + "$/" + complement("default1024"), QUEUE)
-                add("queue-stress", package, [QUEUE], "^" + QUEUE + "$/^default1024$", QUEUE)
-            add("base-" + package.removeprefix("pi-workflow-controller/").replace("/", "-"), package, selected)
+        selected = set(names)
+        if package == ENGINE:
+            require(QUEUE in selected, "missing queue parent")
+            selected.remove(QUEUE)
+            add("queue-small", package, [QUEUE], "^" + QUEUE + "$/" + complement("default1024"), QUEUE)
+            add("queue-stress", package, [QUEUE], "^" + QUEUE + "$/^default1024$", QUEUE)
+        add("base-" + package.removeprefix("pi-workflow-controller/").replace("/", "-"), package, selected)
     require(len({g['id'] for g in groups}) == len(groups), "group ID collision")
     return groups
 
@@ -292,14 +270,12 @@ def run_group(plan, group, mode, directory, count=1):
 def targeted(plan):
     result = []
     for ident, package, names, selector in [
-        ('target-triage', TRIAGE, [RPC], '^' + RPC + '$/' +
-         '^(' + '|'.join(TARGETS) + '|m6-deadline-slow-intake.*|m5-supplement-exhausted.*)$'),
         ('target-host', 'pi-workflow-controller/internal/testutil/protocol',
          ['TestHostRegisterCleanup', 'TestHostRegisterCleanupFailures'], None),
         ('target-engine', ENGINE, [QUEUE, 'TestEnginePersistenceFinalizationIOFailures', 'TestEnginePersistenceStageConfirmBoundary'], None),
     ]:
         require(set(names) <= set(plan['tops'][package]), 'missing targeted parent')
-        result.append(dict(id=ident, package=package, tops=names, run=selector or anchored(names), parent=RPC if package == TRIAGE else None))
+        result.append(dict(id=ident, package=package, tops=names, run=selector or anchored(names), parent=None))
     return result
 
 
@@ -345,10 +321,6 @@ def main():
                             not group['parent'] or not tail or re.fullmatch(group['run'].split('/', 1)[1], tail[0])):
                         expected[name] = actions * 3
                 require(terms == expected, 'targeted/full collection mismatch')
-                if group['package'] == TRIAGE:
-                    require(all(RPC + '/' + n in terms for n in TARGETS) and
-                            sum(n.startswith(RPC + '/m6-deadline-slow-intake') for n in terms) >= 2 and
-                            sum(n.startswith(RPC + '/m5-supplement-exhausted') for n in terms) >= 2, 'missing targeted leaf')
         references = {}
         for package in plan['tops']:
             stem = Path(args.directory) / ('reference--' + package.replace('/', '-'))

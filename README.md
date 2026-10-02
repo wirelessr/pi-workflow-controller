@@ -13,7 +13,7 @@
 
 `code-review` 只讀 pinned code／來源，不執行被審 repository 的 tests/build/scripts，不發 comments 或其他外部寫入。合法 `limited` report 可以是執行成功，但不代表 PR 全面通過；必要 reviewer 失敗不能 exit 0。模型、來源及失敗語義見 [CODE-REVIEW](docs/CODE-REVIEW.md)。
 
-`jira-triage` 目前未註冊：原 Planner 版未通過 alpha，正以 v2（固定階段 intake／facts、身分確認、調查 rounds、稽核與對抗驗證）改寫，完成前 `list` 不列出、`run jira-triage` 視為未知 workflow。舊實作暫留於 `internal/workflows/triage/` 供逐步搬移，其說明見 [JIRA-TRIAGE](docs/JIRA-TRIAGE.md)，不代表可執行能力。
+`jira-triage` 目前未註冊：原 Planner 版未通過 alpha，正以 v2（固定階段 intake／facts、身分確認、調查 rounds、稽核與對抗驗證）改寫，完成前 `list` 不列出、`run jira-triage` 視為未知 workflow。舊實作已刪除；新版本在 `internal/workflows/triagev2`，現況見 [JIRA-TRIAGE](docs/JIRA-TRIAGE.md)，不代表可執行能力。
 
 ## CI 與 coverage
 
@@ -117,7 +117,7 @@ NODE_TLS_REJECT_UNAUTHORIZED=1 pi --session "$SESSION"
 | [IMPLEMENTATION](IMPLEMENTATION.md) | 開發維護路線、責任分工與 source/tests 入口 |
 | [ADDING-A-WORKFLOW](docs/ADDING-A-WORKFLOW.md) | Workflow authoring、registry／skills／交付與清理 |
 | [CODE-REVIEW](docs/CODE-REVIEW.md) | 固定靜態 review 的業務設計 |
-| [JIRA-TRIAGE](docs/JIRA-TRIAGE.md) | 未註冊的舊調查 workflow 設計（v2 改寫中，僅供搬移參考） |
+| [JIRA-TRIAGE](docs/JIRA-TRIAGE.md) | 未註冊的調查 workflow：新版方向與已落地的共用能力 |
 | [FINAL-DELIVERY](docs/FINAL-DELIVERY.md) | FinalSelection／FinalDelivery／result.json.final |
 | [VERIFICATION](docs/VERIFICATION.md) | 分組測試 gates、共享環境安全與發布 scan 方法 |
 
