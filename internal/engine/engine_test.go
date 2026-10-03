@@ -127,6 +127,9 @@ func (s *engTestSession) Execute(ctx context.Context, dispatch runtime.Dispatch)
 	if request.Identity.DispatchToken != dispatch.Token || request.Output.SchemaID != engTestSchema {
 		return runtime.Execution{}, fmt.Errorf("dispatch/request identity mismatch: %+v", request)
 	}
+	if strings.Contains(dispatch.Message, "\n"+feedbackDispatchNote+"\n") != (request.Feedback != nil) {
+		return runtime.Execution{}, fmt.Errorf("feedback note does not match request feedback %+v: %q", request.Feedback, dispatch.Message)
+	}
 	resources := []contract.SchemaResource{request.Output.Schema, request.Output.Envelope}
 	for _, resource := range request.Output.Resources {
 		resources = append(resources, resource)

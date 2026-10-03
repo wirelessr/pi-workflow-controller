@@ -10,6 +10,9 @@ import (
 	"pi-workflow-controller/internal/runtime"
 )
 
+// feedbackDispatchNote marks a dispatch whose request carries feedback.
+const feedbackDispatchNote = "This request carries request.feedback: read request.feedback.message before starting. It states what this attempt must address; the rest of the request may be identical to a previous attempt's."
+
 func (s *Scope) Step(ctx context.Context, spec StepSpec) (result StepResult, err error) {
 	if s == nil || s.run == nil {
 		return result, newFailure(InvalidDefinition, "Step", "scope is not initialized")
@@ -151,7 +154,13 @@ func (s *Scope) Step(ctx context.Context, spec StepSpec) (result StepResult, err
 	if err != nil {
 		return
 	}
-	message := fmt.Sprintf("Controller dispatch %s\nRead request JSON: %s\nFirst execute the task in request.prompt, using its inputs and feedback. Do not skip the task to construct an output. After the task finishes, read output.schema.path, output.envelope.path and resources. The output is an envelope, not a copy of the request: meta contains identity values and schema_id; data contains the task result validated by output.schema. Write evidence files directly into %s and artifact files directly into %s, creating either directory if absent. Each files[] entry pairs a unique id with the path as written under that directory, exactly evidence/<name> (e.g. evidence/issue.json) or artifacts/<name>; never nest another evidence/ or artifacts/ level, never use an absolute path or a workspace scratch path. Write the complete envelope with exactly request.identity and output.schema_id to: %s\nWrite only this attempt's candidate; do not modify published inputs.\n", id.DispatchToken, attempt.RequestPath(), filepath.Join(attempt.Dir(), "evidence"), filepath.Join(attempt.Dir(), "artifacts"), attempt.CandidatePath())
+	feedbackNote := ""
+	if spec.Feedback != nil {
+		// A live repair reran an unchanged request after diffing only its
+		// prompt against the previous one and never read the feedback.
+		feedbackNote = feedbackDispatchNote + "\n"
+	}
+	message := fmt.Sprintf("Controller dispatch %s\nRead request JSON: %s\n%sFirst execute the task in request.prompt, using its inputs and feedback. Do not skip the task to construct an output. After the task finishes, read output.schema.path, output.envelope.path and resources. The output is an envelope, not a copy of the request: meta contains identity values and schema_id; data contains the task result validated by output.schema. Write evidence files directly into %s and artifact files directly into %s, creating either directory if absent. Each files[] entry pairs a unique id with the path as written under that directory, exactly evidence/<name> (e.g. evidence/issue.json) or artifacts/<name>; never nest another evidence/ or artifacts/ level, never use an absolute path or a workspace scratch path. Write the complete envelope with exactly request.identity and output.schema_id to: %s\nWrite only this attempt's candidate; do not modify published inputs.\n", id.DispatchToken, attempt.RequestPath(), feedbackNote, filepath.Join(attempt.Dir(), "evidence"), filepath.Join(attempt.Dir(), "artifacts"), attempt.CandidatePath())
 	dispatch := runtime.Dispatch{Token: id.DispatchToken, Message: message}
 	if spec.Observe {
 		sink := r.newEntrySink(h.id, id.AttemptID)
