@@ -44,6 +44,8 @@ type task struct {
 	// Judge lists the item ids a fact check must give a verdict for; it is
 	// present, possibly empty, only on fact checks.
 	Judge *[]string `json:"judge,omitempty"`
+	// Trigger is the steward trigger a steward Step serves.
+	Trigger string `json:"trigger,omitempty"`
 	// Vision is the request a vision Step answers.
 	Vision *visionTask `json:"vision,omitempty"`
 }

@@ -27,6 +27,8 @@ Controller 只負責階段邊界的前置條件、exact committed Refs、確定�
 - Rounds（`runRounds`）：每輪一個 round contract。Go 驗收 id、引用與定位、時間錨點重算、身分 decision 必須等於所引用 lookup 的 row（home stack 等於該 lookup 的 stack）、runtime 查詢收據的 UTC 窗口非零，以及 gap disposition 指向輸入中確實存在的 gap；不合格時同 session 修復一次。宣告的事實、錨點與 confirmed 身分 decision 交 fresh 的 fact-check 判讀（request 列出要判讀的 id）；同一項目累計被退回達上限即記為缺口，之後不得再宣告。Runtime 權限寫在每輪 request：home stack 的 confirmed decision 經判讀支持前為 identity-only（只做唯讀身分查詢），之後為 open（唯讀）。同一輪若沒有經判讀支持的 confirmed decision，任何 unconfirmed 或 conflict 的 home stack decision 會再關閉 runtime；被退回的 confirmed decision 不改變現狀。候選結論的程式碼引用須標明讀取的 revision 與其和部署版本的關係，讀部署版本時須指向 deployed build，程式碼片段須在 allowed evidence 內。這是 Agent 操作規則，不是阻擋；跨 stack 搜尋是否完整由 validator 判讀，不是 Controller 保證。
 - Session：容量低於門檻時下一輪沿用同一 session；達門檻或用量未知時的處理（strict close 後 fresh，或沿用並告知）寫在 feedback。逾時的一輪（或其 fact-check）從相同 committed inputs 以 fresh session 重跑，有限次數，會計不重置；逾時 attempt 的落地檔不採用。Run 的 session／attempt 額度不足以涵蓋下一輪最壞情況時，rounds 提前結束並標明原因。
 - Vision：facts 與 continue 的 round 可列出圖片請求；Controller 在下一輪之前派發 vision Step（不載入私有 skill，requirements 明寫自己用 read 讀圖、不委派），每個請求一個 fresh session，同時至多設定的數量，總數受 run 的上限與剩餘 session／attempt 額度限制。Vision 產物只是轉錄證據（自己的 evidence 檔），由引用它的 Agent 判斷；未執行的請求（額度用盡或已是最後一輪）在 Controller 的 batch 紀錄中列為缺口；vision 並行數必須留一個 live session 給 investigator。
-- 在 Steward 與對抗驗證落地前，candidate／stuck／blocked 一律結束 rounds；round 上限用盡也結束。
+- 稽核（V1）：每輪的 Step 開啟稽核觀測；輪末 Controller 以 Attach 固定該輪所有 attempt（含逾時失敗的）的原始 entries 與 tool call 索引，交 fresh 的 validator 對照 receipts 稽核。每個 finding 須有可解析的定位（記錄中的 entry id、該輪的 receipt 或證據）；findings 是回饋，不要求重做已提交的輪次。覆蓋不完整時 request 會明說。
+- Steward：身分輪後 T1、candidate 時 T2a、stuck 時 T3（只有 redirect），各為 fresh session；challenge 作為下一輪的 feedback，T1 與 T2a 的 challenge 計入上限，T3 不計。T2a pass 或 blocked 結束 rounds（對抗驗證落地前）；challenge 額度用盡時 candidate 也結束 rounds 並標明原因。
+- 在對抗驗證落地前，T2a pass 的 candidate 與 blocked 結束 rounds；round 上限用盡也結束。
 
 匿名測試只證明結構與流程；真 Pi／provider／skills／live 能力尚未驗證。

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/observation.v1.json",
+  "description": "The Controller's audit snapshot of one round's session: per attempt, the raw entries file and the tool call index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "round",
+    "attempts"
+  ],
+  "properties": {
+    "round": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+    },
+    "attempts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attempt_id",
+          "committed",
+          "entries",
+          "calls",
+          "entries_file",
+          "calls_file",
+          "gaps"
+        ],
+        "properties": {
+          "attempt_id": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "committed": {
+            "type": "boolean",
+            "description": "Whether this attempt produced the round; failed attempts are audited too"
+          },
+          "entries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "calls": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "entries_file": {
+            "anyOf": [
+              {
+                "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "calls_file": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+          },
+          "gaps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Why coverage of this attempt may be incomplete"
+          }
+        }
+      }
+    }
+  }
+}

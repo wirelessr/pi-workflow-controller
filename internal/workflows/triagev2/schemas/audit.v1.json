@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/audit.v1.json",
+  "description": "Findings of the audit of one round against its receipts and session observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "round",
+    "findings",
+    "gaps"
+  ],
+  "properties": {
+    "round": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref",
+      "description": "The round under audit, copied byte-exact from the request"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "category",
+          "entry",
+          "receipt",
+          "evidence",
+          "reason",
+          "effect"
+        ],
+        "description": "One finding, located by a session entry id, a receipt id of the round, or evidence; at least one",
+        "properties": {
+          "category": {
+            "enum": [
+              "unreceipted-query",
+              "outside-stack",
+              "delegation",
+              "write",
+              "detached-process",
+              "time-label",
+              "unlabeled-confidence"
+            ]
+          },
+          "entry": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "\\S"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            }
+          },
+          "reason": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "effect": {
+            "enum": [
+              "undermines",
+              "note"
+            ]
+          }
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"
+      }
+    }
+  }
+}

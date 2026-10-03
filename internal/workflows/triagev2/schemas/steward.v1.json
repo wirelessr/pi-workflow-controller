@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/steward.v1.json",
+  "description": "The steward's verdict at one trigger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "trigger",
+    "verdict",
+    "notes",
+    "items",
+    "wiki",
+    "gaps"
+  ],
+  "properties": {
+    "trigger": {
+      "enum": [
+        "T1",
+        "T2a",
+        "T2b",
+        "T3"
+      ],
+      "description": "The trigger named in the request"
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "challenge"
+      ]
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "\\S"
+      },
+      "description": "Non-blocking notes on a pass; they never reach verifiers"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "pattern_id",
+          "target",
+          "question"
+        ],
+        "properties": {
+          "pattern_id": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ref",
+              "id"
+            ],
+            "description": "The result targeted: an exact input, and optionally the id of an item inside it",
+            "properties": {
+              "ref": {
+                "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+              },
+              "id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "\\S"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "question": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "A concrete question or redirection the investigator can act on in one round"
+          }
+        }
+      }
+    },
+    "wiki": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "query",
+          "evidence"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            },
+            "description": "Copies of the pages relied on, in this contract's own evidence files"
+          }
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "verdict": {
+            "const": "challenge"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "items": {
+            "minItems": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "items": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "trigger": {
+            "const": "T3"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "verdict": {
+            "const": "challenge"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"pi-workflow-controller/internal/contract"
@@ -23,7 +24,7 @@ const budgetRequirements = `Round time budget: %s. End the round before it; work
 
 // RoundModels binds the investigator and the independent fact check.
 type RoundModels struct {
-	Investigator, Validator runtime.ModelSpec
+	Investigator, Validator, Steward runtime.ModelSpec
 }
 
 // RoundPolicy bounds the rounds; the workflow definition names every value.
@@ -38,7 +39,12 @@ type RoundPolicy struct {
 	// the same committed inputs.
 	TimeoutRetries int
 	RoundTimeout   time.Duration
+	// CheckTimeout bounds each fact check and audit.
 	CheckTimeout   time.Duration
+	StewardTimeout time.Duration
+	// MaxChallenges is Cmax, the steward challenges at T1 and T2a of the
+	// whole run; T3 redirections do not count.
+	MaxChallenges int
 	// HandoffPercent is the context usage at which the session is strictly
 	// closed and the next round starts fresh.
 	HandoffPercent float64
@@ -46,8 +52,8 @@ type RoundPolicy struct {
 }
 
 func (p RoundPolicy) check() error {
-	if p.MaxRounds < 1 || p.MaxRejections < 1 || p.TimeoutRetries < 0 || p.RoundTimeout <= 0 || p.CheckTimeout <= 0 {
-		return fmt.Errorf("round policy needs MaxRounds and MaxRejections of at least 1, TimeoutRetries of at least 0 and positive RoundTimeout and CheckTimeout")
+	if p.MaxRounds < 1 || p.MaxRejections < 1 || p.MaxChallenges < 1 || p.TimeoutRetries < 0 || p.RoundTimeout <= 0 || p.CheckTimeout <= 0 || p.StewardTimeout <= 0 {
+		return fmt.Errorf("round policy needs MaxRounds, MaxRejections and MaxChallenges of at least 1, TimeoutRetries of at least 0 and positive RoundTimeout, CheckTimeout and StewardTimeout")
 	}
 	if math.IsNaN(p.HandoffPercent) || p.HandoffPercent <= 0 || p.HandoffPercent > 100 {
 		return fmt.Errorf("round policy needs a HandoffPercent in (0,100]")
@@ -55,18 +61,30 @@ func (p RoundPolicy) check() error {
 	return p.Vision.check()
 }
 
-// RoundRecord is one accepted round with its check and fact status; Check
-// and Status are zero when the round declared nothing to judge.
+// RoundRecord is one accepted round with its check, fact status, session
+// observation and audit; Check and Status are zero when the round declared
+// nothing to judge.
 type RoundRecord struct {
-	Round, Check, Status contract.Ref
+	Round, Check, Status, Observation, Audit contract.Ref
 }
 
-// Rounds is the outcome of the round loop. Until the steward and
-// verification stages exist, a candidate, stuck or blocked round ends it.
-// Limit says what ended rounds that still wanted to continue; with
-// LimitRun and no Records, the budget could not cover even the first round.
+// StewardRecord is one steward verdict.
+type StewardRecord struct {
+	Trigger string
+	Round   int
+	Ref     contract.Ref
+	Verdict string
+}
+
+// Rounds is the outcome of the round loop. Until verification exists, a
+// candidate the steward passes at T2a, or a blocked round, ends it; Pass
+// is that T2a verdict. Limit says what ended rounds that still wanted to
+// continue; with LimitRun and no Records, the budget could not cover even
+// the first round.
 type Rounds struct {
-	Records []RoundRecord
+	Records  []RoundRecord
+	Stewards []StewardRecord
+	Pass     contract.Ref
 	// Vision holds the vision batch records, with their gaps.
 	Vision     []contract.Ref
 	Last       Round
@@ -76,8 +94,9 @@ type Rounds struct {
 }
 
 const (
-	LimitRounds = "rounds"
-	LimitRun    = "run budget"
+	LimitRounds     = "rounds"
+	LimitRun        = "run budget"
+	LimitChallenges = "steward challenges"
 )
 
 // ledger is the state the rounds carry: rejections per item key, items
@@ -102,7 +121,7 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 	var ts *TaskSession
 	var feedback *engine.Feedback
 	var last engine.StepResult
-	visionUsed := 0
+	visionUsed, challenges := 0, 0
 	// vision runs one contract's vision requests and makes the results
 	// inputs of the next round.
 	// With dispatch false, as after the last round, every request gets a
@@ -157,12 +176,14 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		t := newTask(r, "investigator", s0.Ticket, names, roundRequirements, gate, fmt.Sprintf(budgetRequirements, policy.RoundTimeout), citationRequirements)
 		t.Round, t.Citable = n, slices.Clone(inputs)
 		var round Round
+		var attempts []observed
 		step := TaskStep{Model: models.Investigator, Stage: "investigator", Key: "round", Task: t, Schema: RoundSchema, Inputs: t.inputs(), Recovery: true, Timeout: policy.RoundTimeout,
 			Validate: func(ctx context.Context, ref contract.Ref) error {
 				var err error
 				round, err = checkRound(ctx, r, ref, roundCheck{inputs: t.inputs(), absent: book.absent})
 				return err
-			}}
+			},
+			Observed: func(id string, o *engine.Observation) { attempts = append(attempts, observed{id, o}) }}
 		ref, failures, err := RetryInputs(ctx, r, root, fmt.Sprintf("round-%d", n), "round", policy.TimeoutRetries, func(ctx context.Context, s *engine.Scope, retry *engine.Feedback) (contract.Ref, error) {
 			if ts == nil {
 				opened, err := OpenTaskSession(ctx, r, step)
@@ -207,11 +228,73 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 			inputs = append(inputs, LabeledRef{fmt.Sprintf("round %d fact check", n), record.Check}, LabeledRef{fmt.Sprintf("round %d fact status", n), record.Status})
 		}
 		updateHome(book, round, supported)
+		var entries map[string]bool
+		if record.Observation, entries, err = attachObservations(ctx, r, fmt.Sprintf("round-%d-observation", n), ref, attempts); err != nil {
+			return out, err
+		}
+		observation, err := readAccepted[ObservationRecord](ctx, r, record.Observation, ObservationSchema)
+		if err != nil {
+			return out, err
+		}
+		var findings Audit
+		var fails []RecoveryFailure
+		record.Audit, findings, fails, err = runAudit(ctx, r, skills, audit{Model: models.Validator, Ticket: s0.Ticket, Round: n, Ref: ref, Data: round, Observation: record.Observation, Record: observation.Data, Entries: entries, Home: book.home, Retries: policy.TimeoutRetries, Timeout: policy.CheckTimeout})
+		out.Recoveries = append(out.Recoveries, fails...)
+		if err != nil {
+			return out, err
+		}
+		inputs = append(inputs, LabeledRef{fmt.Sprintf("round %d audit", n), record.Audit})
+		if len(findings.Findings) > 0 {
+			feedback = joinFeedback(feedback, &engine.Feedback{Message: fmt.Sprintf("The audit of round %d reported %d findings; read round %d audit.", n, len(findings.Findings), n), Refs: []contract.Ref{record.Audit}})
+		}
 		out.Records, out.Last, out.HomeStack = append(out.Records, record), round, book.home
 		if err := root.Decision(ctx, fmt.Sprintf("round-%d-recorded", n), "Investigation round accepted with status "+round.Status+"; not a verified finding", []contract.Ref{ref}); err != nil {
 			return out, err
 		}
-		if round.Status != "continue" {
+		// ask runs the steward at a trigger, records it and adds a
+		// challenge to the next round's feedback.
+		ask := func(trigger string) (Steward, error) {
+			key := fmt.Sprintf("steward-%s-round-%d", strings.ToLower(trigger), n)
+			sref, v, fails, err := runSteward(ctx, r, skills, steward{Model: models.Steward, Ticket: s0.Ticket, Trigger: trigger, Key: key, Round: n, Citable: slices.Clone(inputs), Unconfirmed: book.home == "", Retries: policy.TimeoutRetries, Timeout: policy.StewardTimeout})
+			out.Recoveries = append(out.Recoveries, fails...)
+			if err != nil {
+				return v, err
+			}
+			out.Stewards = append(out.Stewards, StewardRecord{Trigger: trigger, Round: n, Ref: sref, Verdict: v.Verdict})
+			inputs = append(inputs, LabeledRef{fmt.Sprintf("steward %s after round %d", trigger, n), sref})
+			if v.Verdict == "challenge" {
+				if trigger != "T3" {
+					challenges++
+				}
+				feedback = joinFeedback(challengeFeedback(sref, v), feedback)
+			}
+			return v, nil
+		}
+		if n == 1 {
+			if _, err := ask("T1"); err != nil {
+				return out, err
+			}
+		}
+		switch round.Status {
+		case "blocked":
+		case "candidate":
+			if challenges >= policy.MaxChallenges {
+				out.Limit = LimitChallenges
+				break
+			}
+			v, err := ask("T2a")
+			if err != nil {
+				return out, err
+			}
+			if v.Verdict == "pass" {
+				out.Pass = out.Stewards[len(out.Stewards)-1].Ref
+			}
+		case "stuck":
+			if _, err := ask("T3"); err != nil {
+				return out, err
+			}
+		}
+		if round.Status == "blocked" || out.Pass != (contract.Ref{}) || out.Limit != "" {
 			break
 		}
 		if err := vision(fmt.Sprintf("vision-round-%d", n), fmt.Sprintf("round %d", n), ref, round.VisionRequests, n < policy.MaxRounds); err != nil {
@@ -242,12 +325,12 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 
 const rerunNote = "The previous attempt of this round failed (%s) and its work was not committed; queries it started may still be running remotely, so reuse what the inputs already hold and narrow expensive queries. "
 
-// roundCost is the worst case of one round: its investigator Step and its
-// fact check each retried after a timeout and repaired once, plus the fact
-// status record.
+// roundCost is the worst case of one round: its investigator Step, fact
+// check, audit and steward each retried after a timeout and repaired once,
+// plus the fact status and observation records.
 func roundCost(p RoundPolicy) (sessions, attempts int) {
-	steps := 2 * (p.TimeoutRetries + 1)
-	return steps, 2*steps + 1
+	steps := 4 * (p.TimeoutRetries + 1)
+	return steps, 2*steps + 2
 }
 
 // roundFits reports whether the run's budget still covers one more round.

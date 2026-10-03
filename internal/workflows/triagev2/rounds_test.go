@@ -31,11 +31,13 @@ func (c investigatorCall) round0(t *testing.T, change func(*Round)) {
 	c.reply(t, v, roundFiles())
 }
 
-func stuck(v *Round) { v.Status = "stuck" }
+// ends makes a round end the investigation: blocked, with what would
+// unblock it.
+func ends(v *Round) { v.Status, v.Unblock = "blocked", ptr("a kubeconfig for pop-c") }
 
 func TestRounds(t *testing.T) {
 	model := runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}
-	policy := RoundPolicy{MaxRounds: 3, MaxRejections: 2, TimeoutRetries: 1, RoundTimeout: 30 * time.Second, CheckTimeout: 30 * time.Second, HandoffPercent: 80,
+	policy := RoundPolicy{MaxRounds: 3, MaxRejections: 2, MaxChallenges: 2, TimeoutRetries: 1, RoundTimeout: 30 * time.Second, CheckTimeout: 30 * time.Second, StewardTimeout: 30 * time.Second, HandoffPercent: 80,
 		Vision: VisionPolicy{Model: model, MaxSteps: 2, Parallel: 2, Timeout: 30 * time.Second}}
 	allSupported := func(string) string { return "supported" }
 	for _, tc := range []struct {
@@ -46,15 +48,19 @@ func TestRounds(t *testing.T) {
 		verdict func(id string) string
 		agent   func(t *testing.T, c investigatorCall) string
 		checker func(t *testing.T, call agentCall, n int) string
+		auditor func(t *testing.T, call agentCall) string
+		steward func(t *testing.T, call agentCall) string
 		facts   func(*Facts, agentCall)
 		vision  func(t *testing.T, call agentCall) string
 		run     func(*engine.RunPolicy)
 		within  time.Duration
 		fails   string
 		roles   string
-		check   func(t *testing.T, out Rounds, calls []investigatorCall, handles []string)
+		// stewards lists the steward triggers in order; empty means T1.
+		stewards string
+		check    func(t *testing.T, out Rounds, calls []investigatorCall, handles []string)
 	}{
-		{name: "a confirmed home stack opens runtime and a candidate ends the rounds", verdict: allSupported,
+		{name: "a confirmed home stack opens runtime and a candidate the steward passes ends the rounds", verdict: allSupported, stewards: "T1 T2a",
 			roles: "intake facts fact-check investigator fact-check investigator",
 			agent: func(t *testing.T, c investigatorCall) string {
 				if c.round == 1 {
@@ -79,7 +85,7 @@ func TestRounds(t *testing.T) {
 				for _, in := range second.Citable {
 					labels = append(labels, in.Label)
 				}
-				if strings.Join(labels, ",") != "caller prompt,intake,facts,fact check,fact status,round 1,round 1 fact check,round 1 fact status" {
+				if strings.Join(labels, ",") != "caller prompt,intake,facts,fact check,fact status,round 1,round 1 fact check,round 1 fact status,round 1 audit,steward T1 after round 1" {
 					t.Errorf("second round inputs = %v", labels)
 				}
 				if calls[1].Request.Feedback != nil {
@@ -98,6 +104,13 @@ func TestRounds(t *testing.T) {
 			}
 			return "supported"
 		}, roles: "intake facts fact-check investigator fact-check investigator fact-check investigator investigator fact-check",
+			steward: func(t *testing.T, call agentCall) string {
+				if !strings.Contains(call.Task.Requirements, stewardUnconfirmed) {
+					t.Errorf("T1 requirements do not flag the unconfirmed home stack")
+				}
+				call.reply(t, stewardVerdict(call, "pass"), nil)
+				return ""
+			},
 			agent: func(t *testing.T, c investigatorCall) string {
 				switch {
 				case c.round == 3 && c.repair:
@@ -105,7 +118,7 @@ func TestRounds(t *testing.T) {
 						t.Errorf("repair feedback = %q", c.Request.Feedback.Message)
 					}
 					c.round0(t, func(v *Round) {
-						stuck(v)
+						ends(v)
 						v.Identity.Decisions = v.Identity.Decisions[1:]
 						v.FactsUpdate = []Fact{}
 					})
@@ -133,7 +146,7 @@ func TestRounds(t *testing.T) {
 				if first := decodeRef[FactStatus](t, nil, out.Records[0].Status); len(first.Gaps) != 0 || first.Facts != out.Records[0].Round {
 					t.Errorf("round 1 status = %+v", first)
 				}
-				if out.HomeStack != "" || len(out.Records) != 3 || out.Last.Status != "stuck" {
+				if out.HomeStack != "" || len(out.Records) != 3 || out.Last.Status != "blocked" {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
@@ -153,7 +166,7 @@ func TestRounds(t *testing.T) {
 					case 2:
 						v.Identity.Decisions = append([]Decision{conflict}, v.Identity.Decisions...)
 					default:
-						stuck(v)
+						ends(v)
 						v.Identity, v.FactsUpdate = nil, []Fact{}
 					}
 				})
@@ -171,7 +184,7 @@ func TestRounds(t *testing.T) {
 			}},
 		{name: "a timed-out fact check reruns within its own timeout", verdict: allSupported, policy: func(p *RoundPolicy) { p.CheckTimeout = time.Second }, within: 20 * time.Second,
 			roles: "intake facts fact-check investigator fact-check fact-check",
-			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, stuck); return "" },
+			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, ends); return "" },
 			checker: func(t *testing.T, call agentCall, n int) string {
 				if n == 1 {
 					return "hold"
@@ -187,7 +200,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("recoveries = %+v", out.Recoveries)
 				}
 			}},
-		{name: "a run budget that cannot cover the first round runs none", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 14 },
+		{name: "a run budget that cannot cover the first round runs none", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 23 },
 			roles: "intake facts fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
 				t.Error("dispatched a round past the budget")
@@ -217,7 +230,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("one round reached the limit of 2 with a repeated key: %+v", status.Gaps)
 				}
 			}},
-		{name: "a run budget that cannot cover another round ends the rounds", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 17 },
+		{name: "a run budget that cannot cover another round ends the rounds", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 24 },
 			roles: "intake facts fact-check investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, nil); return "" },
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
@@ -233,7 +246,7 @@ func TestRounds(t *testing.T) {
 					case 2:
 						v.Identity.Decisions[0] = Decision{ID: "d-pop", Fact: "home_pop", Status: "unconfirmed", Identifiers: []string{}, Reason: "a second stack now has the same row"}
 					case 3:
-						stuck(v)
+						ends(v)
 						v.Identity, v.FactsUpdate = nil, []Fact{}
 					}
 				})
@@ -257,7 +270,7 @@ func TestRounds(t *testing.T) {
 						v.Identity.Lookups[1].Rows = []Row{{TenantID: ptr("17"), Orgkey: ptr("org-17")}}
 						v.Identity.Decisions[0] = Decision{ID: "d-pop-b", Fact: "home_pop", Value: ptr("pop-b"), Status: "confirmed", Lookup: ptr("l-b"), Row: ptr(0), Identifiers: []string{"orgkey"}, Reason: "row on pop-b"}
 					case 3:
-						stuck(v)
+						ends(v)
 						v.Identity, v.FactsUpdate = nil, []Fact{}
 					}
 				})
@@ -294,7 +307,7 @@ func TestRounds(t *testing.T) {
 			agent: func(t *testing.T, c investigatorCall) string {
 				shot := c.citable("vision shot of facts")
 				c.round0(t, func(v *Round) {
-					stuck(v)
+					ends(v)
 					v.FactsUpdate[0].Evidence = []Evidence{citeRange(shot, "transcript", 5, 20)}
 				})
 				return ""
@@ -321,7 +334,7 @@ func TestRounds(t *testing.T) {
 						}
 						return
 					}
-					stuck(v)
+					ends(v)
 				})
 				return ""
 			},
@@ -372,7 +385,7 @@ func TestRounds(t *testing.T) {
 				transcribe(t, call, nil)
 				return ""
 			},
-			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, stuck); return "" }},
+			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, ends); return "" }},
 		{name: "a vision Step that answers another request is repaired", verdict: allSupported,
 			roles: "intake facts fact-check vision vision investigator fact-check",
 			facts: func(f *Facts, call agentCall) {
@@ -389,7 +402,7 @@ func TestRounds(t *testing.T) {
 				transcribe(t, call, nil)
 				return ""
 			},
-			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, stuck); return "" }},
+			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, ends); return "" }},
 		{name: "a timed-out vision Step reruns", verdict: allSupported, roles: "intake facts fact-check vision vision investigator fact-check",
 			facts: func(f *Facts, call agentCall) {
 				f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: ptr(call.citable("intake")), FileID: "bundle"}, Question: "which host does the screenshot show"}}
@@ -402,13 +415,13 @@ func TestRounds(t *testing.T) {
 				transcribe(t, call, nil)
 				return ""
 			},
-			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, stuck); return "" },
+			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, ends); return "" },
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
 				if len(out.Recoveries) != 1 || out.Recoveries[0].Stage != "vision" || out.Recoveries[0].Code != engine.TimedOut {
 					t.Errorf("recoveries = %+v", out.Recoveries)
 				}
 			}},
-		{name: "vision requests beside an exactly covered round become gaps", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 15 },
+		{name: "vision requests beside an exactly covered round become gaps", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 24 },
 			roles: "intake facts fact-check",
 			facts: func(f *Facts, call agentCall) {
 				f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: ptr(call.citable("intake")), FileID: "bundle"}, Question: "what does it show"}}
@@ -425,7 +438,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("vision batch = %+v", batch)
 				}
 			}},
-		{name: "vision requests of a last round with little budget left become gaps", verdict: allSupported, policy: func(p *RoundPolicy) { p.MaxRounds = 1 }, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 16 },
+		{name: "vision requests of a last round with little budget left become gaps", verdict: allSupported, policy: func(p *RoundPolicy) { p.MaxRounds = 1 }, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 24 },
 			roles: "intake facts fact-check investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
 				c.round0(t, func(v *Round) {
@@ -455,6 +468,109 @@ func TestRounds(t *testing.T) {
 		{name: "vision parallelism must leave a live session for the investigator", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxLiveSessions = 2 },
 			roles: "intake facts fact-check", fails: "leaves no live session for the investigator",
 			agent: func(t *testing.T, c investigatorCall) string { return "" }},
+		{name: "a T1 challenge on a receipt reaches the next round", verdict: allSupported,
+			roles: "intake facts fact-check investigator fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					if c.round == 2 {
+						ends(v)
+					}
+				})
+				return ""
+			},
+			steward: func(t *testing.T, call agentCall) string {
+				v := stewardVerdict(call, "challenge")
+				switch {
+				case call.Request.Feedback == nil:
+					v.Items[0].Target.ID = ptr("nope")
+				case !strings.Contains(call.Request.Feedback.Message, `has no item with id "nope"`):
+					t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
+				default:
+					v.Items[0].Target.ID = ptr("q1")
+				}
+				call.reply(t, v, nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
+				fb := calls[1].Request.Feedback
+				if fb == nil || !strings.Contains(fb.Message, "The steward (T1) challenged: [ORCH-CB4]") || !strings.Contains(fb.Message, "item q1") || len(out.Stewards) != 1 || out.Stewards[0].Verdict != "challenge" || !slices.Contains(fb.Refs, out.Stewards[0].Ref) {
+					t.Errorf("round 2 feedback = %+v", fb)
+				}
+			}},
+		{name: "a T2a challenge sends the candidate back and the challenge limit ends the rounds", verdict: allSupported, stewards: "T1 T2a",
+			policy: func(p *RoundPolicy) { p.MaxChallenges = 1 },
+			roles:  "intake facts fact-check investigator investigator",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
+					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
+				})
+				return ""
+			},
+			steward: func(t *testing.T, call agentCall) string {
+				verdict := "pass"
+				if call.Task.Trigger == "T2a" {
+					verdict = "challenge"
+				}
+				call.reply(t, stewardVerdict(call, verdict), nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
+				if out.Limit != LimitChallenges || out.Pass != (contract.Ref{}) || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T2a) challenged") {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
+		{name: "a stuck round gets a T3 redirection that does not count as a challenge", verdict: allSupported, stewards: "T1 T3 T2a",
+			policy: func(p *RoundPolicy) { p.MaxChallenges = 1 },
+			roles:  "intake facts fact-check investigator investigator",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.FactsUpdate, v.Identity = []Fact{}, nil
+					v.Status = "stuck"
+					if c.round == 2 {
+						v.Status, v.DeployedBuilds, v.Candidate = "candidate", deployedBuild(), codeClaim("b1", nil)
+					}
+				})
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
+				if out.Pass == (contract.Ref{}) || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T3) challenged") {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
+		{name: "audit findings reach the next round and a finding without a recorded entry is repaired", verdict: allSupported,
+			roles: "intake facts fact-check investigator fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					if c.round == 2 {
+						ends(v)
+					}
+				})
+				return ""
+			},
+			auditor: func(t *testing.T, call agentCall) string {
+				finding := Finding{Category: "unreceipted-query", Entry: ptr("nope"), Evidence: []Evidence{}, Reason: "a log search without a receipt", Effect: "undermines"}
+				if call.Request.Feedback != nil {
+					if !strings.Contains(call.Request.Feedback.Message, `findings[0].entry: got "nope"`) {
+						t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
+					}
+					finding.Entry, finding.Receipt = nil, ptr("q1")
+				}
+				if !strings.Contains(call.Task.Requirements, "The confirmed home stack is") {
+					t.Errorf("audit requirements = %q", call.Task.Requirements)
+				}
+				findings := []Finding{finding}
+				if call.Task.Round == 2 {
+					findings = []Finding{}
+				}
+				call.reply(t, Audit{Round: call.citable("round under audit"), Findings: findings, Gaps: []Gap{}}, nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
+				if fb := calls[1].Request.Feedback; fb == nil || !strings.Contains(fb.Message, "The audit of round 1 reported 1 findings") || !slices.Contains(fb.Refs, out.Records[0].Audit) {
+					t.Errorf("round 2 feedback = %+v", fb)
+				}
+			}},
 		{name: "a timed-out round reruns in a fresh session from the same inputs", verdict: allSupported, policy: func(p *RoundPolicy) { p.RoundTimeout = time.Second },
 			roles: "intake facts fact-check investigator investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
@@ -464,12 +580,16 @@ func TestRounds(t *testing.T) {
 				if c.Request.Feedback.SourceCode != string(engine.TimedOut) || !strings.HasPrefix(c.Request.Feedback.Message, fmt.Sprintf(rerunNote, engine.TimedOut)) {
 					t.Errorf("rerun feedback = %+v, want the timeout diagnostic", c.Request.Feedback)
 				}
-				c.round0(t, stuck)
+				c.round0(t, ends)
 				return ""
 			},
 			check: func(t *testing.T, out Rounds, calls []investigatorCall, handles []string) {
 				if len(out.Recoveries) != 1 || out.Recoveries[0].Code != engine.TimedOut || len(handles) != 2 || handles[0] == handles[1] {
 					t.Errorf("recoveries = %+v handles = %v", out.Recoveries, handles)
+				}
+				record := decodeRef[ObservationRecord](t, nil, out.Records[0].Observation)
+				if len(record.Attempts) != 2 || record.Attempts[0].Committed || !record.Attempts[1].Committed || record.Round != out.Records[0].Round {
+					t.Errorf("observation record = %+v, want the timed-out attempt and the committed one", record)
 				}
 				if a, b := calls[0].Task.Citable, calls[1].Task.Citable; len(a) != len(b) || a[len(a)-1] != b[len(b)-1] {
 					t.Errorf("rerun inputs differ: %v vs %v", a, b)
@@ -479,7 +599,7 @@ func TestRounds(t *testing.T) {
 			roles: "intake facts fact-check investigator fact-check investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
 				if c.round == 2 {
-					c.round0(t, stuck)
+					c.round0(t, ends)
 					return ""
 				}
 				c.round0(t, nil)
@@ -497,7 +617,7 @@ func TestRounds(t *testing.T) {
 			roles: "intake facts fact-check investigator fact-check investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
 				if c.round == 2 {
-					c.round0(t, stuck)
+					c.round0(t, ends)
 					return ""
 				}
 				c.round0(t, nil)
@@ -523,13 +643,13 @@ func TestRounds(t *testing.T) {
 			roles: "intake facts fact-check investigator investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
 				if !c.repair {
-					c.round0(t, func(v *Round) { stuck(v); v.Identity.Decisions[0].Value = ptr("pop-b") })
+					c.round0(t, func(v *Round) { ends(v); v.Identity.Decisions[0].Value = ptr("pop-b") })
 					return ""
 				}
 				if !strings.Contains(c.Request.Feedback.Message, `want "pop-a", the stack of lookup "l-a" row 0`) {
 					t.Errorf("repair feedback = %q", c.Request.Feedback.Message)
 				}
-				c.round0(t, stuck)
+				c.round0(t, ends)
 				return ""
 			},
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, handles []string) {
@@ -554,6 +674,7 @@ func TestRounds(t *testing.T) {
 			skills := newSkillFixture(t)
 			var out Rounds
 			var calls []investigatorCall
+			var stewards []agentCall
 			checks := 0
 			started := time.Now()
 			harnessPolicy = tc.run
@@ -567,7 +688,7 @@ func TestRounds(t *testing.T) {
 				if err != nil {
 					return engine.Result{}, err
 				}
-				out, err = runRounds(ctx, r, sk, s0, RoundModels{Investigator: model, Validator: model}, p)
+				out, err = runRounds(ctx, r, sk, s0, RoundModels{Investigator: model, Validator: model, Steward: model}, p)
 				if err != nil {
 					return engine.Result{}, err
 				}
@@ -607,6 +728,17 @@ func TestRounds(t *testing.T) {
 						return tc.checker(t, call, checks)
 					}
 					call.reply(t, checkFor(t, call, tc.verdict), nil)
+				case "audit":
+					if tc.auditor != nil {
+						return tc.auditor(t, call)
+					}
+					call.reply(t, Audit{Round: call.citable("round under audit"), Findings: []Finding{}, Gaps: []Gap{}}, nil)
+				case "steward":
+					stewards = append(stewards, call)
+					if tc.steward != nil {
+						return tc.steward(t, call)
+					}
+					call.reply(t, stewardVerdict(call, "pass"), nil)
 				case "investigator":
 					c := investigatorCall{agentCall: call, round: call.Task.Round, repair: call.Request.Feedback != nil && strings.HasPrefix(call.Request.Feedback.Message, "Previous contract")}
 					calls = append(calls, c)
@@ -626,8 +758,33 @@ func TestRounds(t *testing.T) {
 			if tc.within > 0 && time.Since(started) > tc.within {
 				t.Errorf("took %s, want under %s", time.Since(started), tc.within)
 			}
-			if got := strings.Join(res.Roles, " "); got != tc.roles {
-				t.Fatalf("dispatched roles = %q, want %q", got, tc.roles)
+			var roles []string
+			audits := 0
+			for _, role := range res.Roles {
+				switch role {
+				case "audit":
+					audits++
+				case "steward":
+				default:
+					roles = append(roles, role)
+				}
+			}
+			if got := strings.Join(roles, " "); got != tc.roles {
+				t.Fatalf("dispatched roles without audits and stewards = %q, want %q", got, tc.roles)
+			}
+			if tc.fails == "" && (audits < len(out.Records) || len(out.Records) > 0 && out.Records[len(out.Records)-1].Audit == (contract.Ref{})) {
+				t.Errorf("audits = %d for %d rounds", audits, len(out.Records))
+			}
+			var triggers []string
+			for _, st := range out.Stewards {
+				triggers = append(triggers, st.Trigger)
+			}
+			want := tc.stewards
+			if want == "" && len(out.Records) > 0 {
+				want = "T1"
+			}
+			if got := strings.Join(triggers, " "); tc.fails == "" && got != want {
+				t.Errorf("steward triggers = %q, want %q", got, want)
 			}
 			var handles []string
 			var rounds []engine.AttemptState
@@ -667,7 +824,7 @@ func TestRoundFits(t *testing.T) {
 	for _, tc := range []struct {
 		sessions, attempts int
 		fits               bool
-	}{{6, 11, true}, {7, 11, false}, {6, 12, false}} {
+	}{{2, 2, true}, {3, 2, false}, {2, 3, false}} {
 		if got := roundFits(snapshot(tc.sessions, tc.attempts), p); got != tc.fits {
 			t.Errorf("roundFits(%d sessions, %d attempts) = %v, want %v", tc.sessions, tc.attempts, got, tc.fits)
 		}
@@ -724,19 +881,20 @@ func TestVisionAllowed(t *testing.T) {
 		}
 		return s
 	}
-	// A round reserves 4 sessions and 9 attempts; a vision Step takes up to
+	// A round reserves 8 sessions and 18 attempts; a vision Step takes up to
 	// 2 sessions and 4 attempts; the batch record takes 1 attempt.
 	for _, tc := range []struct {
 		sessions, attempts, used, want int
 	}{
 		{0, 0, 0, 5},
 		{0, 0, 3, 2},
-		{10, 0, 0, 3},
-		{0, 22, 0, 2},
-		{0, 26, 0, 1},
-		{0, 31, 0, 0},
-		{0, 27, 0, 0},
-		{16, 0, 0, 0},
+		{10, 0, 0, 1},
+		{14, 0, 0, 0},
+		{0, 9, 0, 3},
+		{0, 13, 0, 2},
+		{0, 17, 0, 1},
+		{0, 18, 0, 0},
+		{0, 21, 0, 0},
 	} {
 		if got := visionAllowed(snapshot(tc.sessions, tc.attempts), p, tc.used); got != tc.want {
 			t.Errorf("visionAllowed(%d sessions, %d attempts, %d used) = %d, want %d", tc.sessions, tc.attempts, tc.used, got, tc.want)
@@ -800,4 +958,18 @@ func TestVisionPolicyCheck(t *testing.T) {
 			t.Errorf("%s: check = %v", tc.name, err)
 		}
 	}
+}
+
+// stewardVerdict is the fake steward: a pass, or a challenge on the latest
+// round; T3 always challenges.
+func stewardVerdict(call agentCall, verdict string) Steward {
+	if call.Task.Trigger == "T3" {
+		verdict = "challenge"
+	}
+	v := Steward{Trigger: call.Task.Trigger, Verdict: verdict, Notes: []string{}, Items: []StewardItem{}, Wiki: []StewardWiki{}, Gaps: []Gap{}}
+	if verdict == "challenge" {
+		round := call.citable(fmt.Sprintf("round %d", call.Task.Round))
+		v.Items = []StewardItem{{PatternID: "ORCH-CB4", Target: StewardTarget{Ref: round}, Question: "where is the runtime evidence for this?"}}
+	}
+	return v
 }

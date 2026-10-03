@@ -34,6 +34,9 @@ type TaskStep struct {
 	// Timeout bounds each attempt; zero means the run policy's attempt
 	// timeout.
 	Timeout time.Duration
+	// Observed, when set, records every attempt's session entries and tool
+	// calls and receives each attempt's observation, failed ones included.
+	Observed func(attemptID string, o *engine.Observation)
 }
 
 // RunTaskStep allows a single repair retry covering both contract-shape
@@ -88,7 +91,7 @@ func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engin
 	if err != nil {
 		return engine.StepResult{}, err
 	}
-	spec := engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: t.Inputs, Feedback: t.Feedback, Output: contract.Spec{SchemaID: t.Schema}, Timeout: t.Timeout}
+	spec := engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: t.Inputs, Feedback: t.Feedback, Output: contract.Spec{SchemaID: t.Schema}, Timeout: t.Timeout, Observe: t.Observed != nil}
 	var out engine.StepResult
 	var lastFeedback *engine.Feedback
 	// Mechanical contract-shape repair, one budgeted re-attempt on the same
@@ -119,6 +122,9 @@ func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engin
 		}
 		var e error
 		out, e = attemptScope.Step(ctx, attemptSpec)
+		if t.Observed != nil && out.Observation != nil {
+			t.Observed(out.AttemptID, out.Observation)
+		}
 		if e == nil {
 			if out.Output != (contract.Ref{}) {
 				lastPublished = out.Output
