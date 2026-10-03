@@ -314,8 +314,10 @@
           "target_basis",
           "source",
           "condition",
+          "kind",
           "from",
           "to",
+          "at",
           "time_basis",
           "status",
           "outcome",
@@ -349,23 +351,44 @@
             "pattern": "\\S",
             "description": "The query, filter or command as run"
           },
+          "kind": {
+            "enum": [
+              "window",
+              "snapshot"
+            ],
+            "description": "window: a time-ranged search (logs, metrics), with from and to; snapshot: current state read once (database rows, cluster state), with at"
+          },
           "from": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "pattern": "Z$",
-            "description": "Explicit UTC RFC 3339 ending in Z"
+            "description": "Explicit UTC RFC 3339 ending in Z; null for a snapshot"
           },
           "to": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "pattern": "Z$",
-            "description": "Explicit UTC RFC 3339 ending in Z"
+            "description": "Explicit UTC RFC 3339 ending in Z; null for a snapshot"
+          },
+          "at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "Z$",
+            "description": "When a snapshot was read, explicit UTC RFC 3339 ending in Z; null for a window"
           },
           "time_basis": {
             "type": "array",
-            "minItems": 1,
+            "minItems": 0,
             "items": {
               "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
             },
-            "description": "Evidence the UTC window was taken from"
+            "description": "Evidence the UTC window or snapshot time was taken from; a window needs at least one"
           },
           "status": {
             "enum": [
@@ -388,7 +411,56 @@
             },
             "description": "The raw result or failure output"
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "window"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "from": {
+                  "type": "string"
+                },
+                "to": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "null"
+                },
+                "time_basis": {
+                  "minItems": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "snapshot"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "from": {
+                  "type": "null"
+                },
+                "to": {
+                  "type": "null"
+                },
+                "at": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ]
       }
     },
     "deployed_builds": {

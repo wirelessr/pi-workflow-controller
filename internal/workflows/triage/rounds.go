@@ -16,7 +16,7 @@ import (
 
 const roundRequirements = `You are the investigator for one round: report it through the round contract and end it at a decision point. Rebuild state from the inputs, not memory. Facts, time anchors and identity decisions you declare are judged by an independent check before later rounds may rely on them; the inputs hold each earlier check and the items recorded absent.`
 
-const identityOnlyRequirements = `Runtime access this round: identity-only. The home stack is not confirmed, so the only runtime action allowed is a read-only identity lookup on every known stack; run no other runtime, log or metric query. Code, documents and the ticket may still be read.`
+const identityOnlyRequirements = `Runtime access this round: identity-only. The home stack is not confirmed, so the only runtime action allowed is a read-only identity lookup; the identity skill says which stacks to query. Run no other runtime, log or metric query. Code, documents and the ticket may still be read.`
 
 const openRequirements = `Runtime access this round: open, read-only, with home stack %q as confirmed by an earlier round and its check. Do not change anything in any system.`
 

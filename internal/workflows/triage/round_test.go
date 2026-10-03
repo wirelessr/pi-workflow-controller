@@ -48,7 +48,7 @@ func baseRound(intake contract.Ref) Round {
 				{ID: "d-tenant", Fact: "tenant_id", Value: ptr("17"), Status: "confirmed", Lookup: ptr("l-a"), Row: ptr(0), Identifiers: []string{"orgkey"}, Reason: "row matches the orgkey"},
 			},
 		},
-		Receipts: []Receipt{{ID: "q1", Target: "pop-a", Source: "logs", Condition: "level=error", From: "2025-01-01T22:00:00Z", To: "2025-01-01T23:00:00Z",
+		Receipts: []Receipt{{ID: "q1", Target: "pop-a", Source: "logs", Condition: "level=error", Kind: "window", From: ptr("2025-01-01T22:00:00Z"), To: ptr("2025-01-01T23:00:00Z"),
 			TimeBasis: []Evidence{cite(intake, "page-0")}, Status: "ok", Outcome: "3 errors", Evidence: []Evidence{{FileID: "query-1"}}}},
 		DeployedBuilds:  []Build{},
 		VisionRequests:  []VisionRequest{},
@@ -106,7 +106,22 @@ func TestCheckRound(t *testing.T) {
 		}},
 		{name: "duplicate id across sections", change: func(v *Round, _ refs) { v.Receipts[0].ID = "host" }, want: `receipts[0].id: "host" is already used at facts_update[0]`},
 		{name: "receipt window reversed", change: func(v *Round, _ refs) { v.Receipts[0].From, v.Receipts[0].To = v.Receipts[0].To, v.Receipts[0].From }, want: "receipts[0]: from \"2025-01-01T23:00:00Z\" is not strictly before"},
-		{name: "receipt window not RFC 3339", change: func(v *Round, _ refs) { v.Receipts[0].From = "2025-01-01 22:00Z" }, want: "receipts[0].from"},
+		{name: "receipt window not RFC 3339", change: func(v *Round, _ refs) { v.Receipts[0].From = ptr("2025-01-01 22:00Z") }, want: "receipts[0].from"},
+		{name: "empty receipt window suggests a snapshot", change: func(v *Round, _ refs) { v.Receipts[0].To = v.Receipts[0].From }, want: "want a nonzero UTC window, or kind snapshot with at"},
+		{name: "snapshot receipt", change: func(v *Round, _ refs) {
+			q := &v.Receipts[0]
+			q.Kind, q.From, q.To, q.At, q.TimeBasis = "snapshot", nil, nil, ptr("2025-01-02T08:00:00Z"), []Evidence{}
+		}},
+		{name: "snapshot receipt with a window", change: func(v *Round, _ refs) { v.Receipts[0].Kind, v.Receipts[0].At = "snapshot", ptr("2025-01-02T08:00:00Z") }, schema: true},
+		{name: "snapshot receipt without at", change: func(v *Round, _ refs) {
+			v.Receipts[0].Kind, v.Receipts[0].From, v.Receipts[0].To = "snapshot", nil, nil
+		}, schema: true},
+		{name: "snapshot time not UTC", change: func(v *Round, _ refs) {
+			q := &v.Receipts[0]
+			q.Kind, q.From, q.To, q.At = "snapshot", nil, nil, ptr("2025-01-02 08:00Z")
+		}, want: "receipts[0].at"},
+		{name: "window receipt without time basis", change: func(v *Round, _ refs) { v.Receipts[0].TimeBasis = []Evidence{} }, schema: true},
+		{name: "unknown receipt kind", change: func(v *Round, _ refs) { v.Receipts[0].Kind = "point" }, schema: true},
 		{name: "receipt without result evidence", change: func(v *Round, _ refs) { v.Receipts[0].Evidence = []Evidence{} }, schema: true},
 		{name: "receipt citing a file it does not have", change: func(v *Round, _ refs) { v.Receipts[0].Evidence = []Evidence{{FileID: "query-2"}} }, want: "receipts[0].evidence[0].file_id"},
 		{name: "build citation resolves", change: func(v *Round, _ refs) { v.DeployedBuilds = deployedBuild() }},

@@ -71,8 +71,10 @@ type Receipt struct {
 	TargetBasis *string    `json:"target_basis"`
 	Source      string     `json:"source"`
 	Condition   string     `json:"condition"`
-	From        string     `json:"from"`
-	To          string     `json:"to"`
+	Kind        string     `json:"kind"`
+	From        *string    `json:"from"`
+	To          *string    `json:"to"`
+	At          *string    `json:"at"`
 	TimeBasis   []Evidence `json:"time_basis"`
 	Status      string     `json:"status"`
 	Outcome     string     `json:"outcome"`
@@ -285,19 +287,37 @@ func checkIdentity(ids idSet, cite func(string, Evidence) error, v Identity, abs
 	return nil
 }
 
-// checkReceipt carries the approved supporting-query rules: a nonzero
-// explicit UTC window and cited basis and result evidence.
+// checkReceipt carries the approved supporting-query rules for a
+// time-ranged search: a nonzero explicit UTC window. A snapshot of current
+// state has no window, only the explicit UTC time it was read (a decided
+// relaxation: the old rule forced a made-up window onto database reads).
+// Both cite their result evidence.
 func checkReceipt(field string, q Receipt, cite func(string, Evidence) error) error {
-	from, err := utc(q.From)
-	if err != nil {
-		return fmt.Errorf("%s.from: %w", field, err)
-	}
-	to, err := utc(q.To)
-	if err != nil {
-		return fmt.Errorf("%s.to: %w", field, err)
-	}
-	if !from.Before(to) {
-		return fmt.Errorf("%s: from %q is not strictly before to %q; want a nonzero UTC window", field, q.From, q.To)
+	switch q.Kind {
+	case "window":
+		if q.From == nil || q.To == nil {
+			return fmt.Errorf("%s: a window receipt needs from and to", field)
+		}
+		from, err := utc(*q.From)
+		if err != nil {
+			return fmt.Errorf("%s.from: %w", field, err)
+		}
+		to, err := utc(*q.To)
+		if err != nil {
+			return fmt.Errorf("%s.to: %w", field, err)
+		}
+		if !from.Before(to) {
+			return fmt.Errorf("%s: from %q is not strictly before to %q; want a nonzero UTC window, or kind snapshot with at when the query read current state", field, *q.From, *q.To)
+		}
+	case "snapshot":
+		if q.At == nil {
+			return fmt.Errorf("%s: a snapshot receipt needs at", field)
+		}
+		if _, err := utc(*q.At); err != nil {
+			return fmt.Errorf("%s.at: %w", field, err)
+		}
+	default:
+		return fmt.Errorf("%s.kind: got %q; want window or snapshot", field, q.Kind)
 	}
 	if !nonblank(q.Source) || !nonblank(q.Condition) || !nonblank(q.Outcome) {
 		return fmt.Errorf("%s: source, condition and outcome must not be blank", field)
