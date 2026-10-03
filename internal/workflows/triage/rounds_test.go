@@ -506,8 +506,8 @@ func TestRounds(t *testing.T) {
 				v := stewardVerdict(call, "challenge")
 				switch {
 				case call.Request.Feedback == nil:
-					v.Items[0].Target.ID = ptr("nope")
-				case !strings.Contains(call.Request.Feedback.Message, `has no item with id "nope"`):
+					v.Items[0].Target.ID = ptr("query-1")
+				case !strings.Contains(call.Request.Feedback.Message, `has no item with id "query-1"; it is a files[] id there, not an item id`):
 					t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
 				default:
 					v.Items[0].Target.ID = ptr("q1")
@@ -1445,6 +1445,14 @@ func TestCheckVerification(t *testing.T) {
 		{name: "runtime basis outside", change: func(v *Verification, other contract.Ref) {
 			v.Assessment.RuntimeBasis = []Evidence{{Ref: &other, FileID: "prompt"}}
 		}, want: `assessment.runtime_basis[0]: file "prompt" is not cited exactly`},
+		{name: "basis with another ref", change: func(v *Verification, _ contract.Ref) {
+			e := v.AllowedEvidence[0]
+			e.Ref = nil
+			v.Assessment.Basis = []Evidence{e}
+		}, want: `is not cited exactly as the claim allows it: got ref null`},
+		{name: "basis of an unknown file", change: func(v *Verification, _ contract.Ref) {
+			v.Assessment.Basis = []Evidence{{FileID: "nowhere"}}
+		}, want: `file "nowhere" is not cited exactly as the claim allows it: the claim's allowed_evidence has no entry for this file id`},
 		{name: "counterexample basis outside", change: func(v *Verification, other contract.Ref) {
 			v.Assessment.Counterexamples = []VerificationIssue{{Statement: "s", Disposition: "d", Reason: "r", Basis: []Evidence{{Ref: &other, FileID: "prompt"}}}}
 		}, want: "assessment.counterexamples[0].basis[0]"},

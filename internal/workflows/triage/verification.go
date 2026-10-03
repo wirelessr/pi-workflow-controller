@@ -196,7 +196,7 @@ func checkVerification(ctx context.Context, r *engine.Run, ref, claimRef contrac
 	allowed := func(field string, basis []Evidence) error {
 		for i, e := range basis {
 			if !slices.ContainsFunc(claim.Candidate.AllowedEvidence, func(x Evidence) bool { return reflect.DeepEqual(x, e) }) {
-				return fmt.Errorf("%s[%d]: file %q is not cited exactly as the claim allows it", field, i, e.FileID)
+				return fmt.Errorf("%s[%d]: file %q is not cited exactly as the claim allows it: %s", field, i, e.FileID, allowedHint(claim.Candidate.AllowedEvidence, e))
 			}
 		}
 		return nil
@@ -304,4 +304,36 @@ func runVerification(ctx context.Context, r *engine.Run, ticket string, policy V
 	}
 	ref, err := r.Root().Attach(ctx, engine.AttachSpec{Key: fmt.Sprintf("verification-%d-delivery", n), Output: contract.Spec{SchemaID: DeliverySchema}, Data: delivery})
 	return ref, delivery, failures, err
+}
+
+// allowedHint names what differs between e and the claim's allowed entries
+// for the same file.
+func allowedHint(allowed []Evidence, e Evidence) string {
+	var want []string
+	for _, x := range allowed {
+		if x.FileID == e.FileID {
+			want = append(want, describeEvidence(x))
+		}
+	}
+	if len(want) == 0 {
+		return "the claim's allowed_evidence has no entry for this file id"
+	}
+	return fmt.Sprintf("got %s; want an exact copy of %s", describeEvidence(e), strings.Join(want, " or "))
+}
+
+func describeEvidence(e Evidence) string {
+	ref := "ref null"
+	if e.Ref != nil {
+		ref = "ref " + describeRef(*e.Ref)
+	}
+	switch l := e.Locator; {
+	case l == nil:
+		return ref + " without locator"
+	case l.Pointer != nil:
+		return fmt.Sprintf("%s with locator pointer %q", ref, *l.Pointer)
+	case l.Offset != nil && l.Length != nil:
+		return fmt.Sprintf("%s with locator offset %d length %d", ref, *l.Offset, *l.Length)
+	default:
+		return ref + " with an incomplete locator"
+	}
 }

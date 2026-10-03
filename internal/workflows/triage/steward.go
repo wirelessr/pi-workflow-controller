@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -76,7 +77,11 @@ func checkSteward(ctx context.Context, r *engine.Run, ref contract.Ref, trigger 
 			return err
 		}
 		if !hasItemID(p.Data, *item.Target.ID) {
-			return fmt.Errorf("%s.id: %s has no item with id %q", field, describeRef(item.Target.Ref), *item.Target.ID)
+			hint := ""
+			if slices.ContainsFunc(p.Files, func(f contract.FileEntry) bool { return f.ID == *item.Target.ID }) {
+				hint = "; it is a files[] id there, not an item id: use the id of an item in its data, or a null id to target the whole contract"
+			}
+			return fmt.Errorf("%s.id: %s has no item with id %q%s", field, describeRef(item.Target.Ref), *item.Target.ID, hint)
 		}
 	}
 	cite := citations{ctx, Inputs{}, ref, p.Files}.check
