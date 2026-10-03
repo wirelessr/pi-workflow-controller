@@ -99,7 +99,7 @@ def render(meta, data, documents):
     sections.append("## 缺口與下一步\n")
     for gap in data["gaps"]:
         reference("缺口來源", gap["ref"])
-        recorded = [g for g in document(gap["ref"])["gaps"] if g["id"] == gap["id"]]
+        recorded = [g for g in document(gap["ref"]).get("gaps", []) if g["id"] == gap["id"]]
         require(len(recorded) == 1, "report gap missing from its input")
         text("缺口", gap["id"] + ": " + recorded[0]["text"])
         text("處置", gap["disposition"] + ": " + gap["note"])

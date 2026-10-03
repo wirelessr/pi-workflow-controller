@@ -136,8 +136,10 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 	}
 	root := r.Root()
 	inputs := []LabeledRef{{"caller prompt", s0.Prompt}, {"intake", s0.Intake}, {"facts", s0.Facts}, {"fact check", s0.Check}, {"fact status", s0.Status}}
-	// Whoever reports the outcome, failed or not, gets what was committed.
-	defer func() { out.Inputs = inputs }()
+	// Whoever reports the outcome, failed or not, gets what was committed;
+	// session observations go to the report only.
+	var reportOnly []LabeledRef
+	defer func() { out.Inputs = append(slices.Clone(inputs), reportOnly...) }()
 	book := &ledger{rejections: map[string]int{}, absent: map[string]string{}}
 	var ts *TaskSession
 	var feedback *engine.Feedback
@@ -258,6 +260,7 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		if record.Observation, entries, err = attachObservations(ctx, r, fmt.Sprintf("round-%d-observation", n), ref, attempts); err != nil {
 			return out, err
 		}
+		reportOnly = append(reportOnly, LabeledRef{fmt.Sprintf("round %d observation", n), record.Observation})
 		observation, err := readAccepted[ObservationRecord](ctx, r, record.Observation, ObservationSchema)
 		if err != nil {
 			return out, err

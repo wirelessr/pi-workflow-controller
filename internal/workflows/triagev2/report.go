@@ -288,6 +288,7 @@ func renderReport(ctx context.Context, projection reportProjection) ([]byte, err
 // Step write the report over every committed result of the investigation;
 // a timed-out report reruns.
 func runReport(ctx context.Context, r *engine.Run, s0 S0, skills Skills, out Rounds, policy ReportPolicy, retries int) (contract.Ref, []RecoveryFailure, error) {
+	// retries must be the rounds' TimeoutRetries, which the budget checks reserve for.
 	if err := policy.check(); err != nil {
 		return contract.Ref{}, nil, err
 	}
@@ -300,15 +301,10 @@ func runReport(ctx context.Context, r *engine.Run, s0 S0, skills Skills, out Rou
 		return contract.Ref{}, nil, err
 	}
 	_, input := r.WorkflowInput()
-	// Every committed result with recorded gaps: the skills record, what
-	// the rounds handed on, and the session observations.
+	// Every committed result with recorded gaps: the skills record and
+	// what the rounds handed on, session observations included.
 	t := newTask(r, "report", s0.Ticket, nil, reportRequirements, citationRequirements)
 	t.Citable = append([]LabeledRef{{"skills", skills.Record}}, out.Inputs...)
-	for i, record := range out.Records {
-		if record.Observation != (contract.Ref{}) {
-			t.Citable = append(t.Citable, LabeledRef{fmt.Sprintf("round %d observation", i+1), record.Observation})
-		}
-	}
 	refs := t.inputs()
 	gaps, err := reportGaps(ctx, r, refs)
 	if err != nil {

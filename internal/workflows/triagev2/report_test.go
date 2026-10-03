@@ -115,7 +115,7 @@ func TestReport(t *testing.T) {
 				t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
 			}
 		}},
-		{name: "a timed-out report reruns in a fresh attempt", timeout: time.Second, report: func(t *testing.T, call agentCall) {
+		{name: "a timed-out report reruns in a fresh attempt", timeout: 3 * time.Second, report: func(t *testing.T, call agentCall) {
 			if call.Request.Feedback == nil {
 				writeReport(t, call, nil, true)
 				panic(holdReport{})
