@@ -9,7 +9,7 @@ from contextlib import ExitStack
 sys.dont_write_bytecode = True
 if "pwc_report_io" not in sys.modules:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pwc_report_io import fenced, open_candidate, read_ref, register_report, require, write_report
+from pwc_report_io import open_candidate, read_ref, register_report, require, write_report
 
 REPORT_ID = "triage-report"
 REPORT_PATH = "artifacts/triage-report.md"
@@ -25,14 +25,25 @@ def render(meta, data, documents):
         fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", body)), default=0))
         sections.append(label + "\n\n" + fence + "text\n" + body + "\n" + fence + "\n")
 
+    def inline(value):
+        body = str(value)
+        fence = "`" * (1 + max((len(run) for run in re.findall(r"`+", body)), default=0))
+        pad = " " if body.startswith("`") or body.endswith("`") else ""
+        return fence + pad + body + pad + fence
+
+    # One line per Ref: the exact Refs stay in the report contract, the
+    # report names the schema, attempt and path a reader opens.
+    def described(ref):
+        return inline(ref["schema_id"]) + " attempt " + inline(ref["attempt_id"]) + " " + inline(ref["path"])
+
     def reference(label, ref):
         if ref is not None:
-            sections.append(label + "\n\n" + fenced(dict(sorted(ref.items()))))
+            sections.append(label + "：" + described(ref) + "\n")
 
     def evidence(label, entries):
         for entry in entries or []:
-            reference(label, entry["ref"])
-            text("File ID", entry["file_id"])
+            source = "本 attempt" if entry["ref"] is None else described(entry["ref"])
+            sections.append(label + "：" + inline(entry["file_id"]) + " in " + source + "\n")
 
     def document(ref):
         matches = [doc["data"] for doc in documents if doc["ref"] == ref]
