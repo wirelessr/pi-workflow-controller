@@ -103,7 +103,8 @@ func hasItemID(data json.RawMessage, id string) bool {
 	walk = func(v any) bool {
 		switch x := v.(type) {
 		case map[string]any:
-			if x["id"] == id {
+			// An object with a ref points at another contract's item.
+			if _, pointer := x["ref"]; !pointer && x["id"] == id {
 				return true
 			}
 			for _, child := range x {

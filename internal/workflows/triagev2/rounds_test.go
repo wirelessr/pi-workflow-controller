@@ -1,9 +1,13 @@
 package triagev2
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -37,7 +41,7 @@ func ends(v *Round) { v.Status, v.Unblock = "blocked", ptr("a kubeconfig for pop
 
 func TestRounds(t *testing.T) {
 	model := runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}
-	policy := RoundPolicy{MaxRounds: 3, MaxRejections: 2, MaxChallenges: 2, TimeoutRetries: 1, RoundTimeout: 30 * time.Second, CheckTimeout: 30 * time.Second, StewardTimeout: 30 * time.Second, HandoffPercent: 80,
+	policy := RoundPolicy{MaxRounds: 3, MaxRejections: 2, MaxChallenges: 2, TimeoutRetries: 1, RoundTimeout: 30 * time.Second, CheckTimeout: 30 * time.Second, AuditTimeout: 30 * time.Second, StewardTimeout: 30 * time.Second, HandoffPercent: 80,
 		Vision: VisionPolicy{Model: model, MaxSteps: 2, Parallel: 2, Timeout: 30 * time.Second}}
 	allSupported := func(string) string { return "supported" }
 	for _, tc := range []struct {
@@ -200,7 +204,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("recoveries = %+v", out.Recoveries)
 				}
 			}},
-		{name: "a run budget that cannot cover the first round runs none", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 23 },
+		{name: "a run budget that cannot cover the first round runs none", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 27 },
 			roles: "intake facts fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
 				t.Error("dispatched a round past the budget")
@@ -230,7 +234,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("one round reached the limit of 2 with a repeated key: %+v", status.Gaps)
 				}
 			}},
-		{name: "a run budget that cannot cover another round ends the rounds", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 24 },
+		{name: "a run budget that cannot cover another round ends the rounds", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 28 },
 			roles: "intake facts fact-check investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, nil); return "" },
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
@@ -421,7 +425,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("recoveries = %+v", out.Recoveries)
 				}
 			}},
-		{name: "vision requests beside an exactly covered round become gaps", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 24 },
+		{name: "vision requests beside an exactly covered round become gaps", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 28 },
 			roles: "intake facts fact-check",
 			facts: func(f *Facts, call agentCall) {
 				f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: ptr(call.citable("intake")), FileID: "bundle"}, Question: "what does it show"}}
@@ -438,7 +442,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("vision batch = %+v", batch)
 				}
 			}},
-		{name: "vision requests of a last round with little budget left become gaps", verdict: allSupported, policy: func(p *RoundPolicy) { p.MaxRounds = 1 }, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 24 },
+		{name: "vision requests of a last round with little budget left become gaps", verdict: allSupported, policy: func(p *RoundPolicy) { p.MaxRounds = 1 }, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 28 },
 			roles: "intake facts fact-check investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
 				c.round0(t, func(v *Round) {
@@ -556,8 +560,10 @@ func TestRounds(t *testing.T) {
 					}
 					finding.Entry, finding.Receipt = nil, ptr("q1")
 				}
-				if !strings.Contains(call.Task.Requirements, "The confirmed home stack is") {
-					t.Errorf("audit requirements = %q", call.Task.Requirements)
+				// Round 1 ran identity-only even though it confirmed pop-a.
+				want := map[int]string{1: "The round ran with the confirmed home stack none", 2: `The round ran with the confirmed home stack "pop-a"`}[call.Task.Round]
+				if !strings.Contains(call.Task.Requirements, want) {
+					t.Errorf("round %d audit requirements do not say %q", call.Task.Round, want)
 				}
 				findings := []Finding{finding}
 				if call.Task.Round == 2 {
@@ -569,6 +575,89 @@ func TestRounds(t *testing.T) {
 			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
 				if fb := calls[1].Request.Feedback; fb == nil || !strings.Contains(fb.Message, "The audit of round 1 reported 1 findings") || !slices.Contains(fb.Refs, out.Records[0].Audit) {
 					t.Errorf("round 2 feedback = %+v", fb)
+				}
+			}},
+		{name: "a finding on an unknown receipt is repaired with a recorded entry", verdict: allSupported,
+			roles: "intake facts fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, ends); return "" },
+			auditor: func(t *testing.T, call agentCall) string {
+				finding := Finding{Category: "delegation", Receipt: ptr("q9"), Evidence: []Evidence{}, Reason: "a subagent call", Effect: "note"}
+				if call.Request.Feedback != nil {
+					if !strings.Contains(call.Request.Feedback.Message, `findings[0].receipt: got "q9"`) {
+						t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
+					}
+					finding.Receipt, finding.Entry = nil, ptr(firstEntryID(t, call.citable("session observation")))
+				}
+				call.reply(t, Audit{Round: call.citable("round under audit"), Findings: []Finding{finding}, Gaps: []Gap{}}, nil)
+				return ""
+			}},
+		{name: "a steward verdict for another trigger is repaired", verdict: allSupported,
+			roles: "intake facts fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) { v.Status = "continue" })
+				return ""
+			},
+			policy: func(p *RoundPolicy) { p.MaxRounds = 1 },
+			steward: func(t *testing.T, call agentCall) string {
+				v := stewardVerdict(call, "pass")
+				if call.Request.Feedback == nil {
+					v.Trigger = "T2a"
+				} else if !strings.Contains(call.Request.Feedback.Message, `trigger: got "T2a"; want "T1"`) {
+					t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
+				}
+				call.reply(t, v, nil)
+				return ""
+			}},
+		{name: "a steward wiki page cited from elsewhere is repaired into its own copy", verdict: allSupported,
+			roles: "intake facts fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) { v.Status = "continue" })
+				return ""
+			},
+			policy: func(p *RoundPolicy) { p.MaxRounds = 1 },
+			steward: func(t *testing.T, call agentCall) string {
+				v := stewardVerdict(call, "pass")
+				page := Evidence{FileID: "page"}
+				if call.Request.Feedback == nil {
+					page.Ref = ptr(call.citable("intake"))
+				} else if !strings.Contains(call.Request.Feedback.Message, "wiki[0].evidence[0].ref: want null") {
+					t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
+				}
+				v.Wiki = []StewardWiki{{Query: "tenant 17 failures", Evidence: []Evidence{page}}}
+				call.reply(t, v, map[string][]byte{"page": []byte("a prior investigation\n")})
+				return ""
+			}},
+		{name: "a T1 challenge on a round 1 candidate reaches round 2 before T2a", verdict: allSupported, stewards: "T1 T2a",
+			roles: "intake facts fact-check investigator investigator",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
+					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
+				})
+				return ""
+			},
+			steward: func(t *testing.T, call agentCall) string {
+				verdict := "pass"
+				if call.Task.Trigger == "T1" {
+					verdict = "challenge"
+				}
+				call.reply(t, stewardVerdict(call, verdict), nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
+				if out.Pass == (contract.Ref{}) || out.Stewards[1].Round != 2 || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T1) challenged") {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
+		{name: "a stuck last round gets no redirection", verdict: allSupported, policy: func(p *RoundPolicy) { p.MaxRounds = 1 },
+			roles: "intake facts fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) { v.Status = "stuck" })
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if out.Limit != LimitRounds || out.Last.Status != "stuck" {
+					t.Errorf("rounds = %+v", out)
 				}
 			}},
 		{name: "a timed-out round reruns in a fresh session from the same inputs", verdict: allSupported, policy: func(p *RoundPolicy) { p.RoundTimeout = time.Second },
@@ -655,6 +744,10 @@ func TestRounds(t *testing.T) {
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, handles []string) {
 				if len(handles) != 2 || handles[0] != handles[1] || out.HomeStack != "pop-a" {
 					t.Errorf("handles = %v home = %q", handles, out.HomeStack)
+				}
+				record := decodeRef[ObservationRecord](t, nil, out.Records[0].Observation)
+				if len(record.Attempts) != 2 || record.Attempts[0].Committed || !record.Attempts[1].Committed {
+					t.Errorf("observation record = %+v, want the rejected attempt and its repair", record)
 				}
 			}},
 	} {
@@ -779,8 +872,9 @@ func TestRounds(t *testing.T) {
 			for _, st := range out.Stewards {
 				triggers = append(triggers, st.Trigger)
 			}
+			// T1 follows the identity round unless that round was blocked.
 			want := tc.stewards
-			if want == "" && len(out.Records) > 0 {
+			if want == "" && len(out.Records) > 0 && (len(out.Records) != 1 || out.Last.Status != "blocked") {
 				want = "T1"
 			}
 			if got := strings.Join(triggers, " "); tc.fails == "" && got != want {
@@ -812,7 +906,7 @@ func TestRounds(t *testing.T) {
 func TestRoundFits(t *testing.T) {
 	p := RoundPolicy{TimeoutRetries: 1}
 	snapshot := func(sessions, attempts int) engine.Snapshot {
-		s := engine.Snapshot{Policy: engine.RunPolicy{MaxTotalSessions: 10, MaxTotalAttempts: 20}, Sessions: map[string]engine.SessionStatus{}, Attempts: map[string]engine.AttemptState{}}
+		s := engine.Snapshot{Policy: engine.RunPolicy{MaxTotalSessions: 12, MaxTotalAttempts: 24}, Sessions: map[string]engine.SessionStatus{}, Attempts: map[string]engine.AttemptState{}}
 		for i := range sessions {
 			s.Sessions[fmt.Sprint(i)] = engine.SessionStatus{}
 		}
@@ -881,20 +975,19 @@ func TestVisionAllowed(t *testing.T) {
 		}
 		return s
 	}
-	// A round reserves 8 sessions and 18 attempts; a vision Step takes up to
-	// 2 sessions and 4 attempts; the batch record takes 1 attempt.
+	// A round reserves 10 sessions and 22 attempts; a vision Step takes up
+	// to 2 sessions and 4 attempts; the batch record takes 1 attempt.
 	for _, tc := range []struct {
 		sessions, attempts, used, want int
 	}{
-		{0, 0, 0, 5},
+		{0, 0, 0, 4},
 		{0, 0, 3, 2},
-		{10, 0, 0, 1},
-		{14, 0, 0, 0},
-		{0, 9, 0, 3},
-		{0, 13, 0, 2},
-		{0, 17, 0, 1},
-		{0, 18, 0, 0},
-		{0, 21, 0, 0},
+		{8, 0, 0, 1},
+		{10, 0, 0, 0},
+		{0, 9, 0, 2},
+		{0, 13, 0, 1},
+		{0, 14, 0, 0},
+		{0, 17, 0, 0},
 	} {
 		if got := visionAllowed(snapshot(tc.sessions, tc.attempts), p, tc.used); got != tc.want {
 			t.Errorf("visionAllowed(%d sessions, %d attempts, %d used) = %d, want %d", tc.sessions, tc.attempts, tc.used, got, tc.want)
@@ -972,4 +1065,93 @@ func stewardVerdict(call agentCall, verdict string) Steward {
 		v.Items = []StewardItem{{PatternID: "ORCH-CB4", Target: StewardTarget{Ref: round}, Question: "where is the runtime evidence for this?"}}
 	}
 	return v
+}
+
+// firstEntryID reads the first recorded entry id of an observation record.
+func firstEntryID(t *testing.T, ref contract.Ref) string {
+	t.Helper()
+	raw, err := os.ReadFile(ref.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := contract.DecodePublication[ObservationRecord](raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range p.Files {
+		if f.ID != *p.Data.Attempts[0].EntriesFile {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(filepath.Dir(ref.Path), f.Path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ids := entryIDs(data); len(ids) > 0 {
+			return ids[0]
+		}
+	}
+	t.Fatal("the observation records no entry")
+	return ""
+}
+
+func TestHasItemID(t *testing.T) {
+	data := json.RawMessage(`{"receipts":[{"id":"q1"}],"gap_dispositions":[{"gap":{"ref":{"run_id":"r"},"id":"g-other"}}]}`)
+	for id, want := range map[string]bool{"q1": true, "g-other": false, "q2": false} {
+		if got := hasItemID(data, id); got != want {
+			t.Errorf("hasItemID(%q) = %v, want %v", id, got, want)
+		}
+	}
+}
+
+func TestAttachObservations(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big.jsonl")
+	if err := os.WriteFile(big, bytes.Repeat([]byte("x"), 64<<20+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	small := filepath.Join(dir, "small.jsonl")
+	if err := os.WriteFile(small, []byte(`{"source":"rpc","entry":{"id":"e1"}}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var record ObservationRecord
+	var ids map[string]bool
+	report := runSkills(t, func(ctx context.Context, r *engine.Run) error {
+		round, err := attachFixture(ctx, r, "round", PromptSchema, CallerPrompt{Ticket: "CASE-17"}, nil)
+		if err != nil {
+			return err
+		}
+		ref, got, err := attachObservations(ctx, r, "observation", round, []observed{
+			{"a1", &engine.Observation{Path: small, Entries: 1, Calls: []engine.ToolCall{{EntryID: "e2", Tool: "bash", Arguments: "ls"}}}},
+			{"a2", &engine.Observation{Path: big, Entries: 9}},
+			{"a3", &engine.Observation{Path: filepath.Join(dir, "absent.jsonl"), Gaps: []string{"stopped at the entry limit"}}},
+		})
+		if err != nil {
+			return err
+		}
+		ids = got
+		record = decodeRef[ObservationRecord](t, r, ref)
+		return nil
+	})
+	if report.Outcome != engine.Succeeded {
+		t.Fatalf("fixture run failed: %v", report.Failure)
+	}
+	if !ids["e1"] || !ids["e2"] || len(ids) != 2 {
+		t.Errorf("entry ids = %v", ids)
+	}
+	a := record.Attempts
+	if len(a) != 3 || a[0].EntriesFile == nil || a[0].CallsFile == nil || a[1].EntriesFile != nil || a[2].EntriesFile != nil {
+		t.Fatalf("attempts = %+v", a)
+	}
+	if !strings.Contains(strings.Join(a[1].Gaps, ";"), "entries file not attached") || !strings.Contains(strings.Join(a[2].Gaps, ";"), "could not be read") {
+		t.Errorf("gaps = %v / %v", a[1].Gaps, a[2].Gaps)
+	}
+	note := coverageNote(record)
+	for _, want := range []string{"a2: entries file not attached", "a3: stopped at the entry limit", "treat the absence of a call as unknown"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("coverage note %q lacks %q", note, want)
+		}
+	}
+	if coverageNote(ObservationRecord{Attempts: []ObservedAttempt{{AttemptID: "a"}}}) != "" {
+		t.Error("a complete observation has a coverage note")
+	}
 }

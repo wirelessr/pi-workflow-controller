@@ -54,7 +54,14 @@
             ]
           },
           "calls_file": {
-            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+            "anyOf": [
+              {
+                "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "gaps": {
             "type": "array",

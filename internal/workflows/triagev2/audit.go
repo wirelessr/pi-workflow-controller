@@ -21,7 +21,7 @@ const (
 	AuditSchema       = "triage.audit.v1"
 )
 
-const auditRequirements = `You audit one investigation round (the validator rules, mode V1): compare the round's receipts with the tool-call index of its session observation, failed attempts included, and report findings with their locators. The confirmed home stack is %s.`
+const auditRequirements = `You audit one investigation round (the validator rules, mode V1): compare the round's receipts with the tool-call index of its session observation, failed attempts included, and report findings with their locators. The round ran with the confirmed home stack %s.`
 
 type ObservedAttempt struct {
 	AttemptID   string   `json:"attempt_id"`
@@ -29,7 +29,7 @@ type ObservedAttempt struct {
 	Entries     int      `json:"entries"`
 	Calls       int      `json:"calls"`
 	EntriesFile *string  `json:"entries_file"`
-	CallsFile   string   `json:"calls_file"`
+	CallsFile   *string  `json:"calls_file"`
 	Gaps        []string `json:"gaps"`
 }
 
@@ -60,15 +60,30 @@ type observed struct {
 	o         *engine.Observation
 }
 
-// attachObservations commits a round's observations: per attempt, a copy of
-// the raw entries file and the tool call index as files, with the coverage
-// gaps. It returns the entry ids an audit finding may name.
+// attachObservations commits a round's observations: per attempt, the tool
+// call index and a copy of the raw entries file, as far as the run's file
+// limits allow; a file left out is a coverage gap, never a failure. It
+// returns the entry ids an audit finding may name.
 func attachObservations(ctx context.Context, r *engine.Run, key string, round contract.Ref, attempts []observed) (contract.Ref, map[string]bool, error) {
+	policy := r.Snapshot().Policy
+	room, slots := policy.MaxAttemptFileBytes, policy.MaxAttemptFiles
+	// fits reserves room for one file, or says why it is left out.
+	fits := func(size int) string {
+		switch {
+		case int64(size) > policy.MaxFileBytes:
+			return fmt.Sprintf("%d bytes exceed the file limit of %d", size, policy.MaxFileBytes)
+		case int64(size) > room || slots < 1:
+			return "the round's snapshot reached the attempt file limits"
+		}
+		room, slots = room-int64(size), slots-1
+		return ""
+	}
 	record := ObservationRecord{Round: round, Attempts: []ObservedAttempt{}}
 	var files []contract.ControllerFile
 	ids := map[string]bool{}
+	// Calls indexes first: they are small and what the audit reads.
 	for i, a := range attempts {
-		entry := ObservedAttempt{AttemptID: a.attemptID, Committed: a.attemptID == round.AttemptID, Entries: a.o.Entries, Calls: len(a.o.Calls), CallsFile: fmt.Sprintf("calls-%d", i+1), Gaps: slices.Clone(a.o.Gaps)}
+		entry := ObservedAttempt{AttemptID: a.attemptID, Committed: a.attemptID == round.AttemptID, Entries: a.o.Entries, Calls: len(a.o.Calls), Gaps: append([]string{}, a.o.Gaps...)}
 		var calls bytes.Buffer
 		for _, c := range a.o.Calls {
 			line, err := json.Marshal(c)
@@ -78,18 +93,37 @@ func attachObservations(ctx context.Context, r *engine.Run, key string, round co
 			calls.Write(append(line, '\n'))
 			ids[c.EntryID] = true
 		}
-		files = append(files, contract.ControllerFile{ID: entry.CallsFile, Path: "evidence/" + entry.CallsFile + ".jsonl", Data: calls.Bytes()})
-		if raw, err := os.ReadFile(a.o.Path); err != nil {
-			entry.Gaps = append(entry.Gaps, fmt.Sprintf("entries file could not be read: %v", err))
+		if why := fits(calls.Len()); why != "" {
+			entry.Gaps = append(entry.Gaps, "tool call index not attached: "+why)
 		} else {
-			id := fmt.Sprintf("entries-%d", i+1)
-			entry.EntriesFile = &id
-			files = append(files, contract.ControllerFile{ID: id, Path: "evidence/" + id + ".jsonl", Data: raw})
-			for _, entryID := range entryIDs(raw) {
-				ids[entryID] = true
-			}
+			id := fmt.Sprintf("calls-%d", i+1)
+			entry.CallsFile = &id
+			files = append(files, contract.ControllerFile{ID: id, Path: "evidence/" + id + ".jsonl", Data: calls.Bytes()})
 		}
 		record.Attempts = append(record.Attempts, entry)
+	}
+	for i, a := range attempts {
+		entry := &record.Attempts[i]
+		info, err := os.Stat(a.o.Path)
+		if err != nil {
+			entry.Gaps = append(entry.Gaps, fmt.Sprintf("entries file could not be read: %v", err))
+			continue
+		}
+		if why := fits(int(info.Size())); why != "" {
+			entry.Gaps = append(entry.Gaps, "entries file not attached: "+why)
+			continue
+		}
+		raw, err := os.ReadFile(a.o.Path)
+		if err != nil {
+			entry.Gaps = append(entry.Gaps, fmt.Sprintf("entries file could not be read: %v", err))
+			continue
+		}
+		id := fmt.Sprintf("entries-%d", i+1)
+		entry.EntriesFile = &id
+		files = append(files, contract.ControllerFile{ID: id, Path: "evidence/" + id + ".jsonl", Data: raw})
+		for _, entryID := range entryIDs(raw) {
+			ids[entryID] = true
+		}
 	}
 	ref, err := r.Root().Attach(ctx, engine.AttachSpec{Key: key, Output: contract.Spec{SchemaID: ObservationSchema}, Data: record, Files: files})
 	return ref, ids, err
@@ -112,6 +146,16 @@ func entryIDs(raw []byte) []string {
 		}
 	}
 	return ids
+}
+
+// sizeNote tells the auditor how much there is to read, so a part it
+// could not review is reported rather than taken as clean.
+func sizeNote(record ObservationRecord) string {
+	var parts []string
+	for _, a := range record.Attempts {
+		parts = append(parts, fmt.Sprintf("%s: %d tool calls, %d entries", a.AttemptID, a.Calls, a.Entries))
+	}
+	return "The observation holds " + strings.Join(parts, "; ") + ". Record any part of the index you could not review as a gap."
 }
 
 // coverageNote says what the audit cannot see.
@@ -184,7 +228,7 @@ func runAudit(ctx context.Context, r *engine.Run, skills Skills, a audit) (contr
 	if a.Home != "" {
 		home = fmt.Sprintf("%q", a.Home)
 	}
-	requirements := []string{fmt.Sprintf(auditRequirements, home), citationRequirements}
+	requirements := []string{fmt.Sprintf(auditRequirements, home), sizeNote(a.Record), citationRequirements}
 	if note := coverageNote(a.Record); note != "" {
 		requirements = append(requirements, note)
 	}

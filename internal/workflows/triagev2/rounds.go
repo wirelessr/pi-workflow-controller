@@ -39,8 +39,9 @@ type RoundPolicy struct {
 	// the same committed inputs.
 	TimeoutRetries int
 	RoundTimeout   time.Duration
-	// CheckTimeout bounds each fact check and audit.
+	// CheckTimeout bounds each fact check, AuditTimeout each audit.
 	CheckTimeout   time.Duration
+	AuditTimeout   time.Duration
 	StewardTimeout time.Duration
 	// MaxChallenges is Cmax, the steward challenges at T1 and T2a of the
 	// whole run; T3 redirections do not count.
@@ -52,8 +53,8 @@ type RoundPolicy struct {
 }
 
 func (p RoundPolicy) check() error {
-	if p.MaxRounds < 1 || p.MaxRejections < 1 || p.MaxChallenges < 1 || p.TimeoutRetries < 0 || p.RoundTimeout <= 0 || p.CheckTimeout <= 0 || p.StewardTimeout <= 0 {
-		return fmt.Errorf("round policy needs MaxRounds, MaxRejections and MaxChallenges of at least 1, TimeoutRetries of at least 0 and positive RoundTimeout, CheckTimeout and StewardTimeout")
+	if p.MaxRounds < 1 || p.MaxRejections < 1 || p.MaxChallenges < 1 || p.TimeoutRetries < 0 || p.RoundTimeout <= 0 || p.CheckTimeout <= 0 || p.AuditTimeout <= 0 || p.StewardTimeout <= 0 {
+		return fmt.Errorf("round policy needs MaxRounds, MaxRejections and MaxChallenges of at least 1, TimeoutRetries of at least 0 and positive RoundTimeout, CheckTimeout, AuditTimeout and StewardTimeout")
 	}
 	if math.IsNaN(p.HandoffPercent) || p.HandoffPercent <= 0 || p.HandoffPercent > 100 {
 		return fmt.Errorf("round policy needs a HandoffPercent in (0,100]")
@@ -169,9 +170,11 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		if n == 1 {
 			names = []string{skills.Entry("identity"), skills.Entry("core")}
 		}
+		// The gate this round runs under; its audit judges against it.
+		home := book.home
 		gate := identityOnlyRequirements
-		if book.home != "" {
-			gate = fmt.Sprintf(openRequirements, book.home)
+		if home != "" {
+			gate = fmt.Sprintf(openRequirements, home)
 		}
 		t := newTask(r, "investigator", s0.Ticket, names, roundRequirements, gate, fmt.Sprintf(budgetRequirements, policy.RoundTimeout), citationRequirements)
 		t.Round, t.Citable = n, slices.Clone(inputs)
@@ -238,7 +241,7 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		}
 		var findings Audit
 		var fails []RecoveryFailure
-		record.Audit, findings, fails, err = runAudit(ctx, r, skills, audit{Model: models.Validator, Ticket: s0.Ticket, Round: n, Ref: ref, Data: round, Observation: record.Observation, Record: observation.Data, Entries: entries, Home: book.home, Retries: policy.TimeoutRetries, Timeout: policy.CheckTimeout})
+		record.Audit, findings, fails, err = runAudit(ctx, r, skills, audit{Model: models.Validator, Ticket: s0.Ticket, Round: n, Ref: ref, Data: round, Observation: record.Observation, Record: observation.Data, Entries: entries, Home: home, Retries: policy.TimeoutRetries, Timeout: policy.AuditTimeout})
 		out.Recoveries = append(out.Recoveries, fails...)
 		if err != nil {
 			return out, err
@@ -270,14 +273,23 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 			}
 			return v, nil
 		}
-		if n == 1 {
-			if _, err := ask("T1"); err != nil {
+		// T1 runs after the identity round unless it ended the
+		// investigation; a T1 challenge goes to round 2 before any candidate
+		// of round 1 is gated.
+		t1Challenge := false
+		if n == 1 && round.Status != "blocked" {
+			v, err := ask("T1")
+			if err != nil {
 				return out, err
 			}
+			t1Challenge = v.Verdict == "challenge"
 		}
 		switch round.Status {
 		case "blocked":
 		case "candidate":
+			if t1Challenge {
+				break
+			}
 			if challenges >= policy.MaxChallenges {
 				out.Limit = LimitChallenges
 				break
@@ -290,8 +302,11 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 				out.Pass = out.Stewards[len(out.Stewards)-1].Ref
 			}
 		case "stuck":
-			if _, err := ask("T3"); err != nil {
-				return out, err
+			// No round would act on a redirection after the last one.
+			if n < policy.MaxRounds {
+				if _, err := ask("T3"); err != nil {
+					return out, err
+				}
 			}
 		}
 		if round.Status == "blocked" || out.Pass != (contract.Ref{}) || out.Limit != "" {
@@ -326,10 +341,11 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 const rerunNote = "The previous attempt of this round failed (%s) and its work was not committed; queries it started may still be running remotely, so reuse what the inputs already hold and narrow expensive queries. "
 
 // roundCost is the worst case of one round: its investigator Step, fact
-// check, audit and steward each retried after a timeout and repaired once,
-// plus the fact status and observation records.
+// check, audit and two stewards (T1 and T2a after the identity round) each
+// retried after a timeout and repaired once, plus the fact status and
+// observation records.
 func roundCost(p RoundPolicy) (sessions, attempts int) {
-	steps := 4 * (p.TimeoutRetries + 1)
+	steps := 5 * (p.TimeoutRetries + 1)
 	return steps, 2*steps + 2
 }
 
