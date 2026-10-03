@@ -179,13 +179,14 @@ func (ts TaskSession) Close(ctx context.Context, r *engine.Run, stage string, ou
 	}
 	closed, err := r.CloseSessionReport(ctx, ts.Handle)
 	if err != nil {
+		err = closeFailure(err, "triage-"+stage, ts.Identity.HandleID)
 		if recovery {
 			return &TaskFailure{Cause: err, Handle: ts.Handle, Identity: ts.Identity, Stage: stage, Attempt: out.AttemptID}
 		}
 		return err
 	}
 	if !closed.ConfirmsLocalClose(sessionID) || recovery && !SameIdentity(closed.Identity, ts.Identity) {
-		return &engine.Failure{Code: engine.CleanupFailed, Origin: engine.OriginProtocol, Phase: "triage-" + stage, Message: stage + " cleanup not confirmed", DispatchAccepted: engine.AcceptedNo, Cleanup: &closed}
+		return &engine.Failure{Code: engine.CleanupFailed, Origin: engine.OriginProtocol, Phase: "triage-" + stage, Message: stage + " cleanup not confirmed", DispatchAccepted: engine.AcceptedNo, HandleID: closed.Identity.HandleID, Cleanup: &closed}
 	}
 	return nil
 }

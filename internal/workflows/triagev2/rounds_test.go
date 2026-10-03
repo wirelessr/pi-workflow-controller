@@ -43,6 +43,9 @@ func TestRounds(t *testing.T) {
 		unknown bool
 		verdict func(id string) string
 		agent   func(t *testing.T, c investigatorCall) string
+		checker func(t *testing.T, call agentCall, n int) string
+		run     func(*engine.RunPolicy)
+		within  time.Duration
 		roles   string
 		check   func(t *testing.T, out Rounds, calls []investigatorCall, handles []string)
 	}{
@@ -129,7 +132,12 @@ func TestRounds(t *testing.T) {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
-		{name: "a conflict note beside the confirmation does not close runtime, in either order", verdict: allSupported,
+		{name: "a conflict note beside the confirmation does not close runtime, in either order", verdict: func(id string) string {
+			if id == "d-note" {
+				return "unsupported"
+			}
+			return "supported"
+		},
 			roles: "intake facts fact-check investigator fact-check investigator fact-check investigator",
 			agent: func(t *testing.T, c investigatorCall) string {
 				conflict := Decision{ID: "d-note", Fact: "home_pop", Value: ptr("pop-b"), Status: "conflict", Identifiers: []string{}, Reason: "the ticket says pop-b; the DB wins"}
@@ -151,6 +159,35 @@ func TestRounds(t *testing.T) {
 					if !strings.Contains(c.Task.Requirements, `home stack "pop-a"`) {
 						t.Errorf("round %d runtime is not open for pop-a", c.round)
 					}
+					if c.Request.Feedback != nil {
+						t.Errorf("round %d feedback = %q; the unconfirmed note must not be judged", c.round, c.Request.Feedback.Message)
+					}
+				}
+			}},
+		{name: "a timed-out fact check reruns within its own timeout", verdict: allSupported, policy: func(p *RoundPolicy) { p.CheckTimeout = time.Second }, within: 20 * time.Second,
+			roles: "intake facts fact-check investigator fact-check fact-check",
+			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, stuck); return "" },
+			checker: func(t *testing.T, call agentCall, n int) string {
+				if n == 1 {
+					return "hold"
+				}
+				if call.Request.Feedback == nil || call.Request.Feedback.SourceCode != string(engine.TimedOut) {
+					t.Errorf("fact check rerun feedback = %+v", call.Request.Feedback)
+				}
+				call.reply(t, checkFor(t, call, func(string) string { return "supported" }), nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if len(out.Recoveries) != 1 || out.Recoveries[0].Stage != "fact-check" || out.Recoveries[0].Code != engine.TimedOut || out.Records[0].Check == (contract.Ref{}) {
+					t.Errorf("recoveries = %+v", out.Recoveries)
+				}
+			}},
+		{name: "a run budget that cannot cover another round ends the rounds", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 17 },
+			roles: "intake facts fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, nil); return "" },
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if out.Limit != LimitRun || len(out.Records) != 1 || out.Last.Status != "continue" {
+					t.Errorf("rounds = %+v", out)
 				}
 			}},
 		{name: "a later unconfirmed home stack closes runtime again", verdict: allSupported,
@@ -212,7 +249,7 @@ func TestRounds(t *testing.T) {
 				if c.Request.Feedback == nil {
 					return "hold"
 				}
-				if c.Request.Feedback.SourceCode != string(engine.TimedOut) || !strings.HasPrefix(c.Request.Feedback.Message, rerunNote) {
+				if c.Request.Feedback.SourceCode != string(engine.TimedOut) || !strings.HasPrefix(c.Request.Feedback.Message, fmt.Sprintf(rerunNote, engine.TimedOut)) {
 					t.Errorf("rerun feedback = %+v, want the timeout diagnostic", c.Request.Feedback)
 				}
 				c.round0(t, stuck)
@@ -305,6 +342,10 @@ func TestRounds(t *testing.T) {
 			skills := newSkillFixture(t)
 			var out Rounds
 			var calls []investigatorCall
+			checks := 0
+			started := time.Now()
+			harnessPolicy = tc.run
+			defer func() { harnessPolicy = nil }()
 			res := runHarness(t, "CASE-17 pop=pop-a", func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
 				sk, err := PrepareSkills(ctx, r, r.Root(), skills.source)
 				if err != nil {
@@ -335,6 +376,12 @@ func TestRounds(t *testing.T) {
 				case "facts":
 					call.reply(t, factsFor(call), nil)
 				case "fact-check":
+					if call.Task.Round > 0 {
+						checks++
+					}
+					if tc.checker != nil && call.Task.Round > 0 {
+						return tc.checker(t, call, checks)
+					}
 					call.reply(t, checkFor(t, call, tc.verdict), nil)
 				case "investigator":
 					c := investigatorCall{agentCall: call, round: call.Task.Round, repair: call.Request.Feedback != nil && strings.HasPrefix(call.Request.Feedback.Message, "Previous contract")}
@@ -345,6 +392,9 @@ func TestRounds(t *testing.T) {
 			})
 			if res.Report.Outcome != engine.Succeeded {
 				t.Fatalf("outcome = %s: %v", res.Report.Outcome, res.Report.Failure)
+			}
+			if tc.within > 0 && time.Since(started) > tc.within {
+				t.Errorf("took %s, want under %s", time.Since(started), tc.within)
 			}
 			if got := strings.Join(res.Roles, " "); got != tc.roles {
 				t.Fatalf("dispatched roles = %q, want %q", got, tc.roles)

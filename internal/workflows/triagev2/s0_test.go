@@ -78,6 +78,9 @@ func (c agentCall) citable(label string) contract.Ref {
 // none. Tests that change it restore it.
 var harnessPercent = ptr(10.0)
 
+// harnessPolicy adjusts the run policy; nil keeps the default.
+var harnessPolicy func(*engine.RunPolicy)
+
 type harnessResult struct {
 	Report engine.Report
 	Run    *engine.Run
@@ -112,6 +115,9 @@ func runHarness(t *testing.T, prompt string, execute engine.Workflow, agent func
 		return nil
 	}, 8*time.Second, "fixture host close: ", "fixture run did not join")
 	policy := engine.DefaultRunPolicy()
+	if harnessPolicy != nil {
+		harnessPolicy(&policy)
+	}
 	policy.Runtime.StartupTimeout = 5 * time.Second
 	policy.Runtime.CleanupTimeout = 3 * time.Second
 	policy.Runtime.AbortGrace = 50 * time.Millisecond
@@ -247,7 +253,10 @@ func checkFor(t *testing.T, call agentCall, verdict func(id string) string) Fact
 	t.Helper()
 	intake := call.citable("intake")
 	out := FactCheck{Subject: call.citable("facts under review"), Items: []FactVerdict{}, Warnings: []Warning{}, Gaps: []Gap{}}
-	for _, id := range call.Task.Judge {
+	if call.Task.Judge == nil {
+		t.Fatal("fact check request has no judge list")
+	}
+	for _, id := range *call.Task.Judge {
 		out.Items = append(out.Items, FactVerdict{ID: id, Verdict: verdict(id), Reason: "checked against the cited source", Basis: []Evidence{cite(intake, "page-0")}})
 	}
 	return out
@@ -385,7 +394,7 @@ func TestS0(t *testing.T) {
 					if strings.Join(labels, ",") != "intake,caller prompt,facts under review" || len(call.Request.Inputs) != 3 || call.Request.Feedback != nil {
 						t.Errorf("validator sees %v, %d inputs, feedback %v; want only the evidence and the facts", labels, len(call.Request.Inputs), call.Request.Feedback)
 					}
-					if want := judgedIDs(decodeRef[Facts](t, nil, call.citable("facts under review"))); strings.Join(call.Task.Judge, ",") != strings.Join(want, ",") {
+					if want := judgedIDs(decodeRef[Facts](t, nil, call.citable("facts under review"))); call.Task.Judge == nil || strings.Join(*call.Task.Judge, ",") != strings.Join(want, ",") {
 						t.Errorf("validator is asked to judge %v, want %v", call.Task.Judge, want)
 					}
 				}

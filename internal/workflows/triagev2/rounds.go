@@ -33,8 +33,9 @@ type RoundPolicy struct {
 	// MaxRejections is Fmax: an item the check does not accept this many
 	// times across rounds is recorded absent with a gap.
 	MaxRejections int
-	// TimeoutRetries reruns a round or its fact check that timed out, in a
-	// fresh session from the same committed inputs.
+	// TimeoutRetries reruns a round or its fact check after a recoverable
+	// failure (attempt timeout or failed compaction), in a fresh session from
+	// the same committed inputs.
 	TimeoutRetries int
 	RoundTimeout   time.Duration
 	CheckTimeout   time.Duration
@@ -98,6 +99,10 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 	var feedback *engine.Feedback
 	var last engine.StepResult
 	for n := 1; ; n++ {
+		if !roundFits(r.Snapshot(), policy) {
+			out.Limit = LimitRun
+			break
+		}
 		names := []string{skills.Entry("investigator"), skills.Entry("core"), skills.Entry("identity")}
 		if n == 1 {
 			names = []string{skills.Entry("identity"), skills.Entry("core")}
@@ -124,7 +129,7 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 				ts = &opened
 			}
 			if retry != nil {
-				retry = &engine.Feedback{Message: rerunNote + retry.Message, SourceAttemptID: retry.SourceAttemptID, SourceCode: retry.SourceCode}
+				retry = &engine.Feedback{Message: fmt.Sprintf(rerunNote, retry.SourceCode) + retry.Message, SourceAttemptID: retry.SourceAttemptID, SourceCode: retry.SourceCode}
 			}
 			step.Scope, step.Feedback = s, joinFeedback(retry, feedback)
 			res, err := ts.Run(ctx, r, step)
@@ -170,10 +175,6 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 			out.Limit = LimitRounds
 			break
 		}
-		if !roundFits(r.Snapshot(), policy) {
-			out.Limit = LimitRun
-			break
-		}
 		if ts != nil {
 			handoff, note, err := capacityHandoff(ctx, r, *ts, last, policy.HandoffPercent)
 			if err != nil {
@@ -193,7 +194,7 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 	return out, nil
 }
 
-const rerunNote = "The previous attempt of this round timed out and its work was not committed; queries it started may still be running remotely, so reuse what the inputs already hold and narrow expensive queries. "
+const rerunNote = "The previous attempt of this round failed (%s) and its work was not committed; queries it started may still be running remotely, so reuse what the inputs already hold and narrow expensive queries. "
 
 // roundFits reports whether the run's session and attempt budgets still
 // cover one more round in the worst case: every Step of it retried after a
@@ -234,13 +235,18 @@ func judgeRound(ctx context.Context, r *engine.Run, skills Skills, s0 S0, model 
 	}
 	fs := FactStatus{Facts: ref, Check: check, Gaps: []Gap{}}
 	rejected := notSupported(fc)
+	keys := map[string]string{}
+	for _, j := range items {
+		keys[j.id] = j.key
+	}
+	counted := map[string]bool{}
 	for _, item := range rejected {
-		key := ""
-		for _, j := range items {
-			if j.id == item.ID {
-				key = j.key
-			}
+		// Items repeating a key count once per round.
+		key := keys[item.ID]
+		if counted[key] {
+			continue
 		}
+		counted[key] = true
 		if book.rejections[key]++; book.rejections[key] < policy.MaxRejections {
 			continue
 		}
@@ -261,9 +267,11 @@ func judgeRound(ctx context.Context, r *engine.Run, skills Skills, s0 S0, model 
 	return check, status, supported, &engine.Feedback{Message: message, Refs: []contract.Ref{ref, check, status}}, failures, nil
 }
 
-// updateHome opens runtime on a supported confirmed home stack decision
-// and closes it on any home stack decision that is not confirmed, which
-// needs no judgment; a rejected confirmation changes nothing.
+// updateHome applies a round's home stack decisions to the runtime gate. A
+// supported confirmed decision opens runtime, or keeps it open, even beside
+// an unconfirmed or conflict note. Without one, any unconfirmed or conflict
+// home stack decision closes runtime; that needs no judgment. A rejected
+// confirmation alone changes nothing.
 func updateHome(book *ledger, round Round, supported map[string]bool) {
 	if round.Identity == nil {
 		return

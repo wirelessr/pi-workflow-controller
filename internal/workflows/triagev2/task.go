@@ -41,8 +41,9 @@ type task struct {
 	Ticket       string       `json:"ticket"`
 	Round        int          `json:"round,omitempty"`
 	Citable      []LabeledRef `json:"citable_inputs"`
-	// Judge lists the item ids a fact check must give a verdict for.
-	Judge []string `json:"judge,omitempty"`
+	// Judge lists the item ids a fact check must give a verdict for; it is
+	// present, possibly empty, only on fact checks.
+	Judge *[]string `json:"judge,omitempty"`
 }
 
 func newTask(r *engine.Run, role, ticket string, skills []string, requirements ...string) task {

@@ -162,6 +162,9 @@ func checkFactCheck(ctx context.Context, r *engine.Run, ref, subject contract.Re
 	seen := map[string]bool{}
 	for i, item := range v.Items {
 		field := fmt.Sprintf("items[%d]", i)
+		if len(ids) == 0 {
+			return v, fmt.Errorf("%s: judge lists no ids; want items empty", field)
+		}
 		if !want[item.ID] {
 			return v, fmt.Errorf("%s.id: got %q; want one of the ids listed in judge: %s", field, item.ID, strings.Join(ids, ", "))
 		}
@@ -273,7 +276,8 @@ type factCheck struct {
 // lists the ids to judge and Go requires exactly one verdict for each.
 func runFactCheck(ctx context.Context, r *engine.Run, skills Skills, fc factCheck) (contract.Ref, FactCheck, error) {
 	vt := newTask(r, "fact-check", fc.Ticket, []string{skills.Entry("validator")}, factCheckRequirements, citationRequirements)
-	vt.Round, vt.Citable, vt.Judge = fc.Round, fc.Citable, fc.IDs
+	judge := append([]string{}, fc.IDs...)
+	vt.Round, vt.Citable, vt.Judge = fc.Round, fc.Citable, &judge
 	var check FactCheck
 	ref, err := RunTaskStep(ctx, r, TaskStep{Scope: fc.Scope, Model: fc.Model, Stage: "fact-check", Key: fc.Key, Task: vt, Schema: FactCheckSchema, Inputs: vt.inputs(), Recovery: fc.Recovery, Timeout: fc.Timeout, Feedback: fc.Feedback,
 		Validate: func(ctx context.Context, ref contract.Ref) error {

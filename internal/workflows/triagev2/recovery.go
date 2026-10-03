@@ -198,16 +198,10 @@ func ConfirmTaskRecovery(ctx context.Context, r *engine.Run, err error, sibling 
 	}
 	report, e := r.CloseSessionReport(ctx, task.Handle)
 	if e != nil {
-		// A close that fails, including one that runs out of cleanup time,
-		// is a cleanup failure, not a run deadline.
-		var f *engine.Failure
-		if !errors.As(e, &f) {
-			e = &engine.Failure{Code: engine.CleanupFailed, Origin: engine.OriginProtocol, Phase: "triage-recovery", Message: e.Error(), DispatchAccepted: engine.AcceptedNo, Cause: e}
-		}
-		return result, RecoveryError(e, err)
+		return result, RecoveryError(closeFailure(e, "triage-recovery", identity.HandleID), err)
 	}
 	if !SameIdentity(report.Identity, identity) || !report.ConfirmsLocalClose(identity.SessionID) {
-		return result, RecoveryError(&engine.Failure{Code: engine.CleanupFailed, Origin: engine.OriginProtocol, Phase: "triage-recovery", Message: "recovery cleanup not confirmed", Cleanup: &report}, err)
+		return result, RecoveryError(&engine.Failure{Code: engine.CleanupFailed, Origin: engine.OriginProtocol, Phase: "triage-recovery", Message: "recovery cleanup not confirmed", DispatchAccepted: engine.AcceptedNo, HandleID: identity.HandleID, Cleanup: &report}, err)
 	}
 	if committed {
 		return RecoveryFailure{}, nil
@@ -250,4 +244,20 @@ func RetryInputs(ctx context.Context, r *engine.Run, scope *engine.Scope, key, o
 		return contract.Ref{}, failures, RecoveryError(err, causes...)
 	}
 	return ref, failures, nil
+}
+
+// closeFailure classifies an error from closing a session: a classified
+// failure stays as it is, a cancellation is a cancellation, and anything
+// else, including running out of cleanup time, is a cleanup failure rather
+// than a run deadline.
+func closeFailure(err error, phase, handleID string) error {
+	var f *engine.Failure
+	var c *contract.Error
+	switch {
+	case errors.As(err, &f) || errors.As(err, &c):
+		return err
+	case errors.Is(err, context.Canceled):
+		return &engine.Failure{Code: engine.Cancelled, Origin: engine.OriginControllerUser, Phase: phase, Message: err.Error(), DispatchAccepted: engine.AcceptedNo, HandleID: handleID, Cause: err}
+	}
+	return &engine.Failure{Code: engine.CleanupFailed, Origin: engine.OriginProtocol, Phase: phase, Message: err.Error(), DispatchAccepted: engine.AcceptedNo, HandleID: handleID, Cause: err}
 }
