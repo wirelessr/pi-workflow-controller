@@ -1,6 +1,6 @@
-// Package triagev2 is the replacement Jira triage workflow. It is under
-// construction and not registered.
-package triagev2
+// Package triage is the Jira triage workflow: fixed stages from ticket
+// intake to report, with investigation rounds the Controller audits.
+package triage
 
 import (
 	"context"

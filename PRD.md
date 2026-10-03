@@ -19,6 +19,7 @@
 - 每個 Controller process 執行一個 run；不同 Controller 的 task、Refs 與 cleanup ownership 必須分離。共享 discovery 並不因此隔離。
 - 目標平台為 macOS arm64，Pi runtime 明確綁定支援版本；不自動宣稱其他平台／版本相容。Build 前提見 [README](README.md)。
 - Workflow、RoleSpec、timeouts 與防禦參數在程式碼定義，變更須同步設計及測試，不新增隱含 CLI 配置。
+- 環境路徑例外（不是流程配置）：`PWC_PI_CWD` 指定 Pi 預設工作目錄；`PWC_TRIAGE_SKILLS_DIR` 指定 `jira-triage` 的私有 skill 目錄（repo 外，內容不進 repo），未設定時該 workflow 的 run 立即失敗。兩者都只是部署路徑，不改變 workflow 的步驟、模型或限額。
 
 ## 3. Context 與模型隔離
 

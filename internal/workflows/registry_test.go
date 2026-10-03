@@ -21,24 +21,23 @@ import (
 	"pi-workflow-controller/internal/workflows"
 )
 
-func TestRegistryContainsSmokeAndCodeReview(t *testing.T) {
+func TestRegistryContainsSmokeCodeReviewAndTriage(t *testing.T) {
 	registry, err := engine.NewRegistry(workflows.Definitions())
 	if err != nil {
 		t.Fatal(err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 2 || definitions[0].Name != "code-review" || definitions[1].Name != "smoke-echo" {
+	if len(definitions) != 3 || definitions[0].Name != "code-review" || definitions[1].Name != "jira-triage" || definitions[2].Name != "smoke-echo" {
 		t.Fatalf("unexpected product workflows: %+v", definitions)
 	}
-	if _, err := registry.Lookup("smoke-echo"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := registry.Lookup("jira-triage"); err == nil {
-		t.Fatal("jira-triage is registered before its replacement is ready")
+	for _, name := range []string{"smoke-echo", "jira-triage"} {
+		if _, err := registry.Lookup(name); err != nil {
+			t.Fatal(err)
+		}
 	}
 	schemas, err := contract.NewRegistry(workflows.Resources(), workflows.Schemas())
-	if err != nil || !schemas.Has("smoke.echo.v1") || schemas.Has("triage.report.v1") {
-		t.Fatalf("smoke schemas unavailable or unregistered triage schemas present: %v", err)
+	if err != nil || !schemas.Has("smoke.echo.v1") || !schemas.Has("triage.report.v1") || !schemas.Has("triage.round.v1") {
+		t.Fatalf("product schemas unavailable: %v", err)
 	}
 }
 

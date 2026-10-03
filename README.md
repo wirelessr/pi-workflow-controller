@@ -13,7 +13,7 @@
 
 `code-review` 只讀 pinned code／來源，不執行被審 repository 的 tests/build/scripts，不發 comments 或其他外部寫入。合法 `limited` report 可以是執行成功，但不代表 PR 全面通過；必要 reviewer 失敗不能 exit 0。模型、來源及失敗語義見 [CODE-REVIEW](docs/CODE-REVIEW.md)。
 
-`jira-triage` 目前未註冊：原 Planner 版未通過 alpha，正以 v2（固定階段 intake／facts、身分確認、調查 rounds、稽核與對抗驗證）改寫，完成前 `list` 不列出、`run jira-triage` 視為未知 workflow。舊實作已刪除；新版本在 `internal/workflows/triagev2`，現況見 [JIRA-TRIAGE](docs/JIRA-TRIAGE.md)，不代表可執行能力。
+`jira-triage` 以固定階段調查一張 Jira 票（intake／facts、身分確認、調查 rounds、稽核、steward、對抗驗證、報告），程式在 `internal/workflows/triage`，設計與現況見 [JIRA-TRIAGE](docs/JIRA-TRIAGE.md)。執行需 `PWC_TRIAGE_SKILLS_DIR` 指向 repo 外的私有 skill 目錄，以及 `python3`（報告 renderer）。目前只有匿名結構驗收，尚未以真實票券做 live 驗證，不代表調查品質。
 
 ## CI 與 coverage
 

@@ -1,4 +1,4 @@
-package triagev2
+package triage
 
 import (
 	"context"
@@ -17,10 +17,10 @@ import (
 	"pi-workflow-controller/internal/testutil/protocol"
 )
 
-// TestTriageV2Subprocess is the fake Pi process: the real RPC protocol with
+// TestTriageSubprocess is the fake Pi process: the real RPC protocol with
 // candidates written by the test host, not by a model.
-func TestTriageV2Subprocess(t *testing.T) {
-	if os.Getenv("PWC_TRIAGEV2_PROTOCOL") != "1" {
+func TestTriageSubprocess(t *testing.T) {
+	if os.Getenv("PWC_TRIAGE_PROTOCOL") != "1" {
 		return
 	}
 	for _, arg := range os.Args {
@@ -126,8 +126,8 @@ func runHarness(t *testing.T, prompt string, execute engine.Workflow, agent func
 	if err != nil {
 		t.Fatal(err)
 	}
-	pi, err := runtime.New(runtime.Options{Executable: exe, Args: []string{"-test.run=^TestTriageV2Subprocess$", "--"},
-		Env:       []string{"PWC_TRIAGEV2_PROTOCOL=1", "PWC_ENGINE_MANUAL_CANDIDATE=1", "PWC_ENGINE_CONTROL_STATS=1", "PWC_ENGINE_CONTROL=" + host.Addr().String(), "GORACE=atexit_sleep_ms=0"},
+	pi, err := runtime.New(runtime.Options{Executable: exe, Args: []string{"-test.run=^TestTriageSubprocess$", "--"},
+		Env:       []string{"PWC_TRIAGE_PROTOCOL=1", "PWC_ENGINE_MANUAL_CANDIDATE=1", "PWC_ENGINE_CONTROL_STATS=1", "PWC_ENGINE_CONTROL=" + host.Addr().String(), "GORACE=atexit_sleep_ms=0"},
 		BridgeDir: bridge, Policy: policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return r.Observe(ctx, o) }})
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func runHarness(t *testing.T, prompt string, execute engine.Workflow, agent func
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err = engine.New(ctx, engine.Definition{Name: "triagev2-fixture", Version: "1", Policy: policy, Execute: execute},
+	r, err = engine.New(ctx, engine.Definition{Name: "triage-fixture", Version: "1", Policy: policy, Execute: execute},
 		engine.Input{Prompt: prompt, LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: registry, Runtime: pi, PiVersion: "0.84.3"})
 	if err != nil {
 		t.Fatal(err)

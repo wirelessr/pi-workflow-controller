@@ -5,26 +5,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
 	"pi-workflow-controller/internal/workflows/review"
+	"pi-workflow-controller/internal/workflows/triage"
 )
 
 const echoSchema = "smoke.echo.v1"
 const echoURI = "https://pi-workflow-controller.local/schemas/smoke-echo.v1.json"
 
 func Resources() []contract.Resource {
-	return append([]contract.Resource{{URI: echoURI, JSON: json.RawMessage(`{"type":"object","required":["echo"],"additionalProperties":false,"properties":{"echo":{"type":"string"}}}`)}}, review.Resources()...)
+	resources := append([]contract.Resource{{URI: echoURI, JSON: json.RawMessage(`{"type":"object","required":["echo"],"additionalProperties":false,"properties":{"echo":{"type":"string"}}}`)}}, review.Resources()...)
+	return append(resources, triage.Resources()...)
 }
 
 func Schemas() []contract.SchemaDefinition {
-	return append([]contract.SchemaDefinition{{ID: echoSchema, URI: echoURI}}, review.Schemas()...)
+	schemas := append([]contract.SchemaDefinition{{ID: echoSchema, URI: echoURI}}, review.Schemas()...)
+	return append(schemas, triage.Schemas()...)
 }
 
+// Definitions are the registered workflows. jira-triage reads its private
+// skill directory from triage.SkillsDirEnv when the CLI builds the list.
 func Definitions() []engine.Definition {
-	return []engine.Definition{{Name: "smoke-echo", Description: "Echo a one-line prompt through Pi and publish a verified contract", Version: "1", Policy: engine.DefaultRunPolicy(), Execute: smokeEcho}, review.Definition()}
+	return []engine.Definition{{Name: "smoke-echo", Description: "Echo a one-line prompt through Pi and publish a verified contract", Version: "1", Policy: engine.DefaultRunPolicy(), Execute: smokeEcho}, review.Definition(), triage.Definition(os.Getenv(triage.SkillsDirEnv))}
 }
 
 func smokeEcho(ctx context.Context, run *engine.Run, input engine.Input) (engine.Result, error) {

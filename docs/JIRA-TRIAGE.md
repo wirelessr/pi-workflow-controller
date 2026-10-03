@@ -1,10 +1,12 @@
 # Jira triage
 
-**現況：`jira-triage` 尚未註冊，不可執行。**原本以 Planner 自主派工的版本未通過 alpha，已刪除；設計與實作可從版本歷史取得。新版本在 `internal/workflows/triagev2` 逐步實作，完成並通過驗收後才註冊，屆時本文件以新設計完整重寫。
+`jira-triage` 已註冊（`internal/workflows/triage`）。原本以 Planner 自主派工的版本未通過 alpha，已刪除（可從版本歷史取得）；本文件描述的是取代它的固定階段版本。目前只有匿名結構驗收（真 engine／runtime／RPC protocol，fake Pi 代寫 candidate），尚未以真實票券、模型與私有 skill 做 live 驗證。
+
+執行：`PWC_TRIAGE_SKILLS_DIR=<私有 skill 目錄> pi-workflow-controller run jira-triage "<TICKET-KEY> 其他提示"`。Prompt 必須以票號開頭；其後的文字只是候選來源，不是授權。模型與限額在 `triage.DefaultConfig()` 與 `triage.RunPolicy()`，數值是保守起點，待 live 調整。
 
 以下遵循 repo 根目錄的 [專案憲法](../AGENTS.md)。該文件規範本專案的開發／review，不是另行注入 workflow nodes 的共通指令或工具限制。
 
-## 新版方向
+## 方向
 
 固定階段，而不是 Planner 決定下一步：
 
@@ -19,9 +21,9 @@ Controller 只負責階段邊界的前置條件、exact committed Refs、確定�
 
 - Controller artifact：`Scope.Attach`（見 [DESIGN](../DESIGN.md) §4.2）。
 - Step 稽核觀測：`StepSpec.Observe`（見 [DESIGN](../DESIGN.md) §6.3）。
-- 私有 skill 目錄的受限展開與過期偵測：`triagev2.PrepareSkills`（見 [WORKFLOW-REUSE](WORKFLOW-REUSE.md) §4）。
+- 私有 skill 目錄的受限展開與過期偵測：`triage.PrepareSkills`（見 [WORKFLOW-REUSE](WORKFLOW-REUSE.md) §4）。
 
-## 已落地的階段（尚未接成可執行的 workflow）
+## 階段
 
 - S0（`runS0`）：caller prompt 以 Attach 記錄；intake Step 取得整張票並由 Go 驗完整性；facts Step 只從文字來源宣告候選事實與時間錨點，每項附可解析的定位；獨立 fact-check Step 逐項判讀。未被接受的項目以 feedback 有限重試，之後由 Controller 記錄為缺口。
 - Rounds（`runRounds`）：每輪一個 round contract。Go 驗收 id、引用與定位、時間錨點重算、身分 decision 必須等於所引用 lookup 的 row（home stack 等於該 lookup 的 stack）、runtime 查詢收據的 UTC 窗口非零，以及 gap disposition 指向輸入中確實存在的 gap；不合格時同 session 修復一次。宣告的事實、錨點與 confirmed 身分 decision 交 fresh 的 fact-check 判讀（request 列出要判讀的 id）；同一項目累計被退回達上限即記為缺口，之後不得再宣告。Runtime 權限寫在每輪 request：home stack 的 confirmed decision 經判讀支持前為 identity-only（只做唯讀身分查詢），之後為 open（唯讀）。同一輪若沒有經判讀支持的 confirmed decision，任何 unconfirmed 或 conflict 的 home stack decision 會再關閉 runtime；被退回的 confirmed decision 不改變現狀。候選結論的程式碼引用須標明讀取的 revision 與其和部署版本的關係，讀部署版本時須指向 deployed build，程式碼片段須在 allowed evidence 內。這是 Agent 操作規則，不是阻擋；跨 stack 搜尋是否完整由 validator 判讀，不是 Controller 保證。

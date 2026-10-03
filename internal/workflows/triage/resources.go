@@ -1,4 +1,4 @@
-package triagev2
+package triage
 
 import (
 	"embed"
