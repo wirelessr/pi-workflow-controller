@@ -54,7 +54,7 @@ pi-workflow-controller run code-review "https://github.com/owner/repo/pull/123"
 
 不從 stdin 讀 Prompt，不接受 task naming、input-file 或 config flags。未知 workflow、空／多行／非法 UTF-8／超限 Prompt 在建立 task 或啟動 Pi 前拒絕。每個 Controller 執行一個 run，資料路徑由 Controller 自動產生並顯示：`~/WIP/<task-id>/runs/<run-id>/`。
 
-可用單次環境設定 `PWC_PI_CWD=/absolute/path/to/service pi-workflow-controller run ...` 指定 Pi 預設工作目錄。CLI 只在 `run` 讀此值並傳入 `engine.Options.PiDefaultCWD`；不新增 flags 或全域設定。優先序為 workflow 明設的 `Role.CWD` → 預設目錄 → 啟動 Controller 時的 `Input.LaunchCWD`。相對值在建立 Run 時依 LaunchCWD 固定；unset／空字串停用，不 trim 空白、不展開 `~`。僅選用的 default 含 NUL 時提前拒絕，explicit Role.CWD／fallback LaunchCWD 保留原 runtime 驗證與會計；不存在或非目錄在實際 spawn 時失敗，未使用的壞 default 不阻擋 explicit role，`list` 不使用此設定。
+`jira-triage` 另需 `PWC_TRIAGE_SKILLS_DIR` 指向私有 skill 目錄（CLI 啟動時讀取並交給 workflow 定義；未設定時 run 在任何 Step 之前失敗）。可用單次環境設定 `PWC_PI_CWD=/absolute/path/to/service pi-workflow-controller run ...` 指定 Pi 預設工作目錄。CLI 只在 `run` 讀此值並傳入 `engine.Options.PiDefaultCWD`；不新增 flags 或全域設定。優先序為 workflow 明設的 `Role.CWD` → 預設目錄 → 啟動 Controller 時的 `Input.LaunchCWD`。相對值在建立 Run 時依 LaunchCWD 固定；unset／空字串停用，不 trim 空白、不展開 `~`。僅選用的 default 含 NUL 時提前拒絕，explicit Role.CWD／fallback LaunchCWD 保留原 runtime 驗證與會計；不存在或非目錄在實際 spawn 時失敗，未使用的壞 default 不阻擋 explicit role，`list` 不使用此設定。
 
 Review 保留 explicit `review-work` 與 pinned `task.Worktree`，smoke 使用一般 fallback。這是 cwd／任務接線，不是阻止 Agent 寫入來源的 sandbox；也不改變 Input、discovery anchor 或 session ownership。
 
@@ -117,7 +117,7 @@ NODE_TLS_REJECT_UNAUTHORIZED=1 pi --session "$SESSION"
 | [IMPLEMENTATION](IMPLEMENTATION.md) | 開發維護路線、責任分工與 source/tests 入口 |
 | [ADDING-A-WORKFLOW](docs/ADDING-A-WORKFLOW.md) | Workflow authoring、registry／skills／交付與清理 |
 | [CODE-REVIEW](docs/CODE-REVIEW.md) | 固定靜態 review 的業務設計 |
-| [JIRA-TRIAGE](docs/JIRA-TRIAGE.md) | 未註冊的調查 workflow：新版方向與已落地的共用能力 |
+| [JIRA-TRIAGE](docs/JIRA-TRIAGE.md) | `jira-triage` 的階段、驗收與限制；目前只有匿名結構驗收 |
 | [FINAL-DELIVERY](docs/FINAL-DELIVERY.md) | FinalSelection／FinalDelivery／result.json.final |
 | [VERIFICATION](docs/VERIFICATION.md) | 分組測試 gates、共享環境安全與發布 scan 方法 |
 

@@ -43,6 +43,7 @@ func TestRounds(t *testing.T) {
 	model := runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}
 	policy := RoundPolicy{MaxRounds: 3, MaxRejections: 2, MaxChallenges: 2, TimeoutRetries: 1, RoundTimeout: 30 * time.Second, CheckTimeout: 30 * time.Second, AuditTimeout: 30 * time.Second, StewardTimeout: 30 * time.Second, HandoffPercent: 80,
 		Verification: VerificationPolicy{Pro: model, Con: model, Cross: model, Timeout: 30 * time.Second, MaxRuns: 2},
+		Report:       ReportPolicy{Model: model, Timeout: 30 * time.Second},
 		Vision:       VisionPolicy{Model: model, MaxSteps: 2, Parallel: 2, Timeout: 30 * time.Second}}
 	allSupported := func(string) string { return "supported" }
 	for _, tc := range []struct {
@@ -1110,7 +1111,7 @@ func TestRounds(t *testing.T) {
 func TestRoundFits(t *testing.T) {
 	p := RoundPolicy{TimeoutRetries: 1}
 	snapshot := func(sessions, attempts int) engine.Snapshot {
-		s := engine.Snapshot{Policy: engine.RunPolicy{MaxTotalSessions: 14, MaxTotalAttempts: 28}, Sessions: map[string]engine.SessionStatus{}, Attempts: map[string]engine.AttemptState{}}
+		s := engine.Snapshot{CreatedAt: time.Now(), Policy: engine.RunPolicy{MaxTotalSessions: 14, MaxTotalAttempts: 28, RunTimeout: time.Hour}, Sessions: map[string]engine.SessionStatus{}, Attempts: map[string]engine.AttemptState{}}
 		for i := range sessions {
 			s.Sessions[fmt.Sprint(i)] = engine.SessionStatus{}
 		}
@@ -1126,6 +1127,16 @@ func TestRoundFits(t *testing.T) {
 		if got := roundFits(snapshot(tc.sessions, tc.attempts), p); got != tc.fits {
 			t.Errorf("roundFits(%d sessions, %d attempts) = %v, want %v", tc.sessions, tc.attempts, got, tc.fits)
 		}
+	}
+	// A round's worst case must also fit before the run deadline.
+	late := snapshot(0, 0)
+	p.RoundTimeout = time.Hour
+	if roundFits(late, p) {
+		t.Error("a round that cannot finish before the deadline fits")
+	}
+	late.Policy.DisableRunTimeout = true
+	if !roundFits(late, p) {
+		t.Error("a run without a deadline refused a round")
 	}
 }
 

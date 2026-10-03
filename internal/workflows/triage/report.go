@@ -287,8 +287,8 @@ func renderReport(ctx context.Context, projection reportProjection) ([]byte, err
 // runReport extracts the renderer into the run and has a fresh report
 // Step write the report over every committed result of the investigation;
 // a timed-out report reruns.
-func runReport(ctx context.Context, r *engine.Run, s0 S0, skills Skills, out Rounds, policy ReportPolicy, retries int) (contract.Ref, []RecoveryFailure, error) {
-	// retries must be the rounds' TimeoutRetries, which the budget checks reserve for.
+func runReport(ctx context.Context, r *engine.Run, s0 S0, skills Skills, out Rounds, rounds RoundPolicy) (contract.Ref, []RecoveryFailure, error) {
+	policy, retries := rounds.Report, rounds.TimeoutRetries
 	if err := policy.check(); err != nil {
 		return contract.Ref{}, nil, err
 	}

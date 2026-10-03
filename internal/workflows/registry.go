@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
@@ -27,10 +26,11 @@ func Schemas() []contract.SchemaDefinition {
 	return append(schemas, triage.Schemas()...)
 }
 
-// Definitions are the registered workflows. jira-triage reads its private
-// skill directory from triage.SkillsDirEnv when the CLI builds the list.
-func Definitions() []engine.Definition {
-	return []engine.Definition{{Name: "smoke-echo", Description: "Echo a one-line prompt through Pi and publish a verified contract", Version: "1", Policy: engine.DefaultRunPolicy(), Execute: smokeEcho}, review.Definition(), triage.Definition(os.Getenv(triage.SkillsDirEnv))}
+// Definitions are the registered workflows; triageSkillsDir is the
+// jira-triage private skill directory, which the CLI reads from
+// triage.SkillsDirEnv.
+func Definitions(triageSkillsDir string) []engine.Definition {
+	return []engine.Definition{{Name: "smoke-echo", Description: "Echo a one-line prompt through Pi and publish a verified contract", Version: "1", Policy: engine.DefaultRunPolicy(), Execute: smokeEcho}, review.Definition(), triage.Definition(triageSkillsDir)}
 }
 
 func smokeEcho(ctx context.Context, run *engine.Run, input engine.Input) (engine.Result, error) {

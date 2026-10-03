@@ -11,6 +11,14 @@ import (
 // TestExecute runs the whole workflow with its default configuration over
 // the real engine, runtime and RPC protocol.
 func TestExecute(t *testing.T) {
+	// Run with the shipped run limits; the harness keeps its own runtime
+	// timeouts.
+	harnessPolicy = func(p *engine.RunPolicy) {
+		runtime := p.Runtime
+		*p = RunPolicy()
+		p.Runtime = runtime
+	}
+	defer func() { harnessPolicy = nil }()
 	skills := newSkillFixture(t)
 	res := runHarness(t, "CASE-17 pop=pop-a", func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
 		return execute(ctx, r, skills.source, DefaultConfig())
@@ -51,6 +59,21 @@ func TestExecute(t *testing.T) {
 	if got := strings.Join(res.Roles, " "); !strings.HasSuffix(got, " steward report") || !strings.Contains(got, "verify-pro") {
 		t.Errorf("roles = %s", got)
 	}
+	// Every role runs on the model its configuration names.
+	c := DefaultConfig()
+	want := map[string]string{"triage-intake": c.S0.Intake.ID, "triage-facts": c.S0.Facts.ID, "triage-fact-check": c.S0.Validator.ID, "triage-investigator": c.Rounds.Investigator.ID,
+		"triage-audit": c.Rounds.Validator.ID, "triage-steward": c.Rounds.Steward.ID, "triage-verify-pro": c.Policy.Verification.Pro.ID, "triage-verify-con": c.Policy.Verification.Con.ID,
+		"triage-verify-cross": c.Policy.Verification.Cross.ID, "triage-report": c.Policy.Report.Model.ID}
+	seen := map[string]bool{}
+	for _, s := range res.Report.Snapshot.Sessions {
+		if id, ok := want[s.Role.Name]; !ok || s.Role.Model.ID != id {
+			t.Errorf("session %s runs %s", s.Role.Name, s.Role.Model.ID)
+		}
+		seen[s.Role.Name] = true
+	}
+	if len(seen) != len(want) {
+		t.Errorf("roles run = %v, want all of %v", seen, want)
+	}
 }
 
 func TestExecuteNeedsTheSkillsDir(t *testing.T) {
@@ -71,14 +94,11 @@ func TestDefinition(t *testing.T) {
 		t.Fatalf("definition = %+v", d)
 	}
 	c := DefaultConfig()
-	if err := c.Policy.check(); err != nil {
+	if err := c.Policy.checkRun(RunPolicy()); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Report.check(); err != nil {
-		t.Fatal(err)
-	}
-	// The run budget covers every round and both verifications before the
-	// rounds' own budget checks have to end them.
+	// The run budget covers every round at its worst case; the rounds' own
+	// checks end them before the engine would refuse a Step.
 	sessions, attempts := roundCost(c.Policy)
 	if p := RunPolicy(); c.Policy.MaxRounds*sessions > p.MaxTotalSessions || c.Policy.MaxRounds*attempts > p.MaxTotalAttempts {
 		t.Errorf("run policy %d sessions %d attempts is below %d rounds of %d and %d", p.MaxTotalSessions, p.MaxTotalAttempts, c.Policy.MaxRounds, sessions, attempts)

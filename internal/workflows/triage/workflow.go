@@ -19,7 +19,6 @@ type Config struct {
 	FactRetries int
 	Rounds      RoundModels
 	Policy      RoundPolicy
-	Report      ReportPolicy
 }
 
 func fireworks(id, thinking string) runtime.ModelSpec {
@@ -37,17 +36,18 @@ func DefaultConfig() Config {
 		Policy: RoundPolicy{MaxRounds: 8, MaxRejections: 2, MaxChallenges: 3, TimeoutRetries: 1,
 			RoundTimeout: 30 * time.Minute, CheckTimeout: 15 * time.Minute, AuditTimeout: 15 * time.Minute, StewardTimeout: 20 * time.Minute, HandoffPercent: 80,
 			Vision:       VisionPolicy{Model: flash, MaxSteps: 6, Parallel: 2, Timeout: 10 * time.Minute},
-			Verification: VerificationPolicy{Pro: strong, Con: strong, Cross: strong, Timeout: 30 * time.Minute, MaxRuns: 2}},
-		Report: ReportPolicy{Model: strong, Timeout: 30 * time.Minute},
+			Verification: VerificationPolicy{Pro: strong, Con: strong, Cross: strong, Timeout: 30 * time.Minute, MaxRuns: 2},
+			Report:       ReportPolicy{Model: strong, Timeout: 30 * time.Minute}},
 	}
 }
 
-// RunPolicy covers the default limits with room: every round's worst case
-// within MaxTotalSessions and MaxTotalAttempts would end the rounds with a
-// budget limit before the engine refuses a Step.
+// RunPolicy gives the default limits room. The rounds check sessions,
+// attempts and remaining time against their worst case before each round
+// and verification, so a budget ends them with a report rather than the
+// engine refusing a Step or the deadline failing the run.
 func RunPolicy() engine.RunPolicy {
 	p := engine.DefaultRunPolicy()
-	p.RunTimeout = 8 * time.Hour
+	p.RunTimeout = 16 * time.Hour
 	p.MaxLiveSessions, p.MaxTotalSessions, p.MaxTotalAttempts = 6, 160, 400
 	return p
 }
@@ -66,6 +66,9 @@ func execute(ctx context.Context, r *engine.Run, skillsDir string, c Config) (en
 	if skillsDir == "" {
 		return engine.Result{}, fmt.Errorf("%s must name the private triage skill directory", SkillsDirEnv)
 	}
+	if err := c.Policy.checkRun(r.Snapshot().Policy); err != nil {
+		return engine.Result{}, err
+	}
 	skills, err := PrepareSkills(ctx, r, r.Root(), skillsDir)
 	if err != nil {
 		return engine.Result{}, err
@@ -78,7 +81,7 @@ func execute(ctx context.Context, r *engine.Run, skillsDir string, c Config) (en
 	if err != nil {
 		return engine.Result{}, err
 	}
-	report, _, err := runReport(ctx, r, s0, skills, rounds, c.Report, c.Policy.TimeoutRetries)
+	report, _, err := runReport(ctx, r, s0, skills, rounds, c.Policy)
 	if err != nil {
 		return engine.Result{}, err
 	}

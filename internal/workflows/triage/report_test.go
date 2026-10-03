@@ -43,7 +43,8 @@ func TestReport(t *testing.T) {
 	model := runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}
 	policy := RoundPolicy{MaxRounds: 2, MaxRejections: 2, MaxChallenges: 2, TimeoutRetries: 1, RoundTimeout: 30 * time.Second, CheckTimeout: 30 * time.Second, AuditTimeout: 30 * time.Second, StewardTimeout: 30 * time.Second, HandoffPercent: 80,
 		Vision:       VisionPolicy{Model: model, MaxSteps: 2, Parallel: 2, Timeout: 30 * time.Second},
-		Verification: VerificationPolicy{Pro: model, Con: model, Cross: model, Timeout: 30 * time.Second, MaxRuns: 2}}
+		Verification: VerificationPolicy{Pro: model, Con: model, Cross: model, Timeout: 30 * time.Second, MaxRuns: 2},
+		Report:       ReportPolicy{Model: model, Timeout: 30 * time.Second}}
 	for _, tc := range []struct {
 		name     string
 		blocked  bool
@@ -141,7 +142,7 @@ func TestReport(t *testing.T) {
 				if rounds, err = runRounds(ctx, r, sk, s0, RoundModels{Investigator: model, Validator: model, Steward: model}, policy); err != nil {
 					return engine.Result{}, err
 				}
-				if reportRef, _, err = runReport(ctx, r, s0, sk, rounds, ReportPolicy{Model: model, Timeout: reportTimeout(tc.timeout)}, 1); err != nil {
+				if reportRef, _, err = runReport(ctx, r, s0, sk, rounds, withReportTimeout(policy, reportTimeout(tc.timeout))); err != nil {
 					return engine.Result{}, err
 				}
 				return engine.Result{Outputs: map[string]contract.Ref{"report": reportRef}, Final: &engine.FinalSelection{Output: "report"}}, nil
@@ -236,4 +237,9 @@ func repairedReport(change func(*Report), want string) func(*testing.T, agentCal
 		}
 		writeReport(t, call, nil, true)
 	}
+}
+
+func withReportTimeout(p RoundPolicy, d time.Duration) RoundPolicy {
+	p.Report.Timeout = d
+	return p
 }

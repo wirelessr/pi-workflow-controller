@@ -22,7 +22,7 @@ import (
 )
 
 func TestRegistryContainsSmokeCodeReviewAndTriage(t *testing.T) {
-	registry, err := engine.NewRegistry(workflows.Definitions())
+	registry, err := engine.NewRegistry(workflows.Definitions(""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestSmokePreflightSubprocess(t *testing.T) {
 }
 
 func TestSmokeEchoSharedPreflight(t *testing.T) {
-	registry, err := engine.NewRegistry(workflows.Definitions())
+	registry, err := engine.NewRegistry(workflows.Definitions(""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestSmokeEchoBundledDefinition(t *testing.T) {
 				written <- produced{request, original}
 				return bundled.Reply{ToolName: "write", ToolArguments: map[string]any{"path": candidatePath, "content": string(original)}}
 			}})
-			registry, err := engine.NewRegistry(workflows.Definitions())
+			registry, err := engine.NewRegistry(workflows.Definitions(""))
 			if err != nil {
 				t.Fatal(err)
 			}

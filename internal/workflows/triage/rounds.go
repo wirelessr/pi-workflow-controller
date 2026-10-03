@@ -51,6 +51,8 @@ type RoundPolicy struct {
 	HandoffPercent float64
 	Vision         VisionPolicy
 	Verification   VerificationPolicy
+	// Report is kept in reserve by every budget check.
+	Report ReportPolicy
 }
 
 func (p RoundPolicy) check() error {
@@ -63,7 +65,24 @@ func (p RoundPolicy) check() error {
 	if err := p.Vision.check(); err != nil {
 		return err
 	}
+	if err := p.Report.check(); err != nil {
+		return err
+	}
 	return p.Verification.check()
+}
+
+// checkRun checks the policy against the run's limits before any work.
+func (p RoundPolicy) checkRun(run engine.RunPolicy) error {
+	if err := p.check(); err != nil {
+		return err
+	}
+	if run.MaxLiveSessions < len(verifierRoles)+1 {
+		return fmt.Errorf("verification needs %d live sessions beside the investigator's: the run allows %d", len(verifierRoles), run.MaxLiveSessions)
+	}
+	if p.Vision.MaxSteps > 0 && p.Vision.Parallel > run.MaxLiveSessions-1 {
+		return fmt.Errorf("vision Parallel %d leaves no live session for the investigator: the run allows %d live sessions", p.Vision.Parallel, run.MaxLiveSessions)
+	}
+	return nil
 }
 
 // RoundRecord is one accepted round with its check, fact status, session
@@ -131,7 +150,7 @@ type ledger struct {
 // reused while its context usage stays below the handoff threshold; a
 // timed-out round reruns in a fresh session from the same inputs.
 func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models RoundModels, policy RoundPolicy) (out Rounds, err error) {
-	if err := policy.check(); err != nil {
+	if err := policy.checkRun(r.Snapshot().Policy); err != nil {
 		return out, err
 	}
 	root := r.Root()
@@ -172,12 +191,6 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 			inputs = append(inputs, LabeledRef{fmt.Sprintf("vision %s of %s", res.ID, label), res.Vision})
 		}
 		return nil
-	}
-	if live := r.Snapshot().Policy.MaxLiveSessions; live < len(verifierRoles)+1 {
-		return out, fmt.Errorf("verification needs %d live sessions beside the investigator's: the run allows %d", len(verifierRoles), live)
-	}
-	if live := r.Snapshot().Policy.MaxLiveSessions; policy.Vision.MaxSteps > 0 && policy.Vision.Parallel > live-1 {
-		return out, fmt.Errorf("vision Parallel %d leaves no live session for the investigator: the run allows %d live sessions", policy.Vision.Parallel, live)
 	}
 	facts, err := readAccepted[Facts](ctx, r, s0.Facts, FactsSchema)
 	if err != nil {
@@ -414,7 +427,15 @@ func roundCost(p RoundPolicy) (sessions, attempts int) {
 // roundFits reports whether the run's budget still covers one more round.
 func roundFits(s engine.Snapshot, p RoundPolicy) bool {
 	sessions, attempts := roundCost(p)
-	return s.Policy.MaxTotalSessions-len(s.Sessions) >= sessions && s.Policy.MaxTotalAttempts-len(s.Attempts) >= attempts
+	tries := time.Duration(p.TimeoutRetries + 1)
+	return s.Policy.MaxTotalSessions-len(s.Sessions) >= sessions && s.Policy.MaxTotalAttempts-len(s.Attempts) >= attempts &&
+		timeFits(s, tries*(p.RoundTimeout+p.CheckTimeout+p.AuditTimeout+2*p.StewardTimeout+p.Report.Timeout))
+}
+
+// timeFits reports whether the run deadline leaves d; running out of time
+// would fail the run without a report, while a budget limit still reports.
+func timeFits(s engine.Snapshot, d time.Duration) bool {
+	return s.Policy.DisableRunTimeout || time.Until(s.CreatedAt.Add(s.Policy.RunTimeout)) >= d
 }
 
 // verificationFits reports whether three verifiers and the T2b steward,
@@ -422,7 +443,9 @@ func roundFits(s engine.Snapshot, p RoundPolicy) bool {
 // repaired once, plus the claim and delivery records, fit the run budget.
 func verificationFits(s engine.Snapshot, p RoundPolicy) bool {
 	steps := 5 * (p.TimeoutRetries + 1)
-	return s.Policy.MaxTotalSessions-len(s.Sessions) >= steps && s.Policy.MaxTotalAttempts-len(s.Attempts) >= 2*steps+2
+	tries := time.Duration(p.TimeoutRetries + 1)
+	return s.Policy.MaxTotalSessions-len(s.Sessions) >= steps && s.Policy.MaxTotalAttempts-len(s.Attempts) >= 2*steps+2 &&
+		timeFits(s, tries*(p.Verification.Timeout+p.StewardTimeout+p.Report.Timeout))
 }
 
 // batchAttach is the attempt the vision batch record takes.
