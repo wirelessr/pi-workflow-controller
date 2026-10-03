@@ -597,18 +597,21 @@ func TestRounds(t *testing.T) {
 					t.Errorf("round 2 feedback = %+v", fb)
 				}
 			}},
-		{name: "a finding on an unknown receipt is repaired with a recorded entry", verdict: allSupported,
+		{name: "a finding on an unknown receipt is repaired with an identity lookup", verdict: allSupported,
 			roles: "intake facts fact-check investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, ends); return "" },
 			auditor: func(t *testing.T, call agentCall) string {
-				finding := Finding{Category: "delegation", Receipt: ptr("q9"), Evidence: []Evidence{}, Reason: "a subagent call", Effect: "note"}
+				// The round's identity lookups are receipts too, and the
+				// first finding names one; the second names an unknown id.
+				findings := []Finding{{Category: "delegation", Receipt: ptr("l-b"), Evidence: []Evidence{}, Reason: "a subagent call", Effect: "note"},
+					{Category: "delegation", Receipt: ptr("q9"), Evidence: []Evidence{}, Reason: "a subagent call", Effect: "note"}}
 				if call.Request.Feedback != nil {
-					if !strings.Contains(call.Request.Feedback.Message, `findings[0].receipt: got "q9"`) {
+					if !strings.Contains(call.Request.Feedback.Message, `findings[1].receipt: got "q9"; want the id of one of the round's receipts or identity lookups: one of q1, l-a, l-b`) {
 						t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
 					}
-					finding.Receipt, finding.Entry = nil, ptr(firstEntryID(t, call.citable("session observation")))
+					findings[1].Receipt, findings[1].Entry = nil, ptr(firstEntryID(t, call.citable("session observation")))
 				}
-				call.reply(t, Audit{Round: call.citable("round under audit"), Findings: []Finding{finding}, Gaps: []Gap{}}, nil)
+				call.reply(t, Audit{Round: call.citable("round under audit"), Findings: findings, Gaps: []Gap{}}, nil)
 				return ""
 			}},
 		{name: "a steward verdict for another trigger is repaired", verdict: allSupported,

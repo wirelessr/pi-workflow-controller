@@ -185,7 +185,7 @@ func coverageNote(record ObservationRecord) string {
 // checkAudit requires the exact round and a resolvable locator on every
 // finding: a recorded entry, a receipt of the round, or cited evidence.
 // What the findings mean is for the steward.
-func checkAudit(ctx context.Context, r *engine.Run, ref, round, observation contract.Ref, receipts []Receipt, entries map[string]bool) error {
+func checkAudit(ctx context.Context, r *engine.Run, ref, round, observation contract.Ref, receipts []string, entries map[string]bool) error {
 	p, err := readAccepted[Audit](ctx, r, ref, AuditSchema)
 	if err != nil {
 		return err
@@ -207,8 +207,12 @@ func checkAudit(ctx context.Context, r *engine.Run, ref, round, observation cont
 		if f.Entry != nil && !entries[*f.Entry] {
 			return fmt.Errorf("%s.entry: got %q; want the id of an entry recorded in the session observation", field, *f.Entry)
 		}
-		if f.Receipt != nil && !slices.ContainsFunc(receipts, func(q Receipt) bool { return q.ID == *f.Receipt }) {
-			return fmt.Errorf("%s.receipt: got %q; want the id of a receipt of the round", field, *f.Receipt)
+		if f.Receipt != nil && !slices.Contains(receipts, *f.Receipt) {
+			want := "the round has none, so use entry or evidence"
+			if len(receipts) > 0 {
+				want = "one of " + strings.Join(receipts, ", ")
+			}
+			return fmt.Errorf("%s.receipt: got %q; want the id of one of the round's receipts or identity lookups: %s", field, *f.Receipt, want)
 		}
 		if err := citeAll(cite, field+".evidence", f.Evidence); err != nil {
 			return err
@@ -247,7 +251,7 @@ func runAudit(ctx context.Context, r *engine.Run, skills Skills, a audit) (contr
 	ref, failures, err := RetryInputs(ctx, r, r.Root(), fmt.Sprintf("round-%d-audit", a.Round), "audit", a.Retries, func(ctx context.Context, s *engine.Scope, retry *engine.Feedback) (contract.Ref, error) {
 		return RunTaskStep(ctx, r, TaskStep{Scope: s, Model: a.Model, Stage: "audit", Key: "audit", Task: t, Schema: AuditSchema, Inputs: t.inputs(), Recovery: true, Timeout: a.Timeout, Feedback: retry,
 			Validate: func(ctx context.Context, ref contract.Ref) error {
-				return checkAudit(ctx, r, ref, a.Ref, a.Observation, a.Data.Receipts, a.Entries)
+				return checkAudit(ctx, r, ref, a.Ref, a.Observation, receiptIDs(a.Data), a.Entries)
 			}})
 	}, nil)
 	if err != nil {
@@ -255,4 +259,19 @@ func runAudit(ctx context.Context, r *engine.Run, skills Skills, a audit) (contr
 	}
 	p, err := readAccepted[Audit](ctx, r, ref, AuditSchema)
 	return ref, p.Data, failures, err
+}
+
+// receiptIDs are what an audit finding may name as its receipt: the
+// round's query receipts and, in an identity round, its per-stack lookups.
+func receiptIDs(v Round) []string {
+	var ids []string
+	for _, q := range v.Receipts {
+		ids = append(ids, q.ID)
+	}
+	if v.Identity != nil {
+		for _, l := range v.Identity.Lookups {
+			ids = append(ids, l.ID)
+		}
+	}
+	return ids
 }

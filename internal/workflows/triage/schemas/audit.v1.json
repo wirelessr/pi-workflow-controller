@@ -27,7 +27,7 @@
           "reason",
           "effect"
         ],
-        "description": "One finding, located by a session entry id, a receipt id of the round, or evidence; at least one",
+        "description": "One finding, located by a session entry id, the id of a receipt or identity lookup of the round, or evidence; at least one",
         "properties": {
           "category": {
             "enum": [
