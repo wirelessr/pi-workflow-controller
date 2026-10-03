@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/vision.v1.json",
+  "description": "A transcription of one image, answering one request; evidence only, no analysis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "request",
+    "image",
+    "transcript",
+    "answer",
+    "gaps"
+  ],
+  "properties": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "id"
+      ],
+      "description": "The request answered: the input that made it and its id, copied from the request",
+      "properties": {
+        "ref": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+        },
+        "id": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+        }
+      }
+    },
+    "image": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
+      "description": "The image read, copied from the request"
+    },
+    "transcript": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
+      "description": "This contract's own evidence file (ref null) holding the transcription of the visible text"
+    },
+    "answer": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "The answer to the question from what is visible only"
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"
+      },
+      "description": "For example text that is cut off or unreadable"
+    }
+  }
+}

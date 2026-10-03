@@ -44,6 +44,8 @@ type task struct {
 	// Judge lists the item ids a fact check must give a verdict for; it is
 	// present, possibly empty, only on fact checks.
 	Judge *[]string `json:"judge,omitempty"`
+	// Vision is the request a vision Step answers.
+	Vision *visionTask `json:"vision,omitempty"`
 }
 
 func newTask(r *engine.Run, role, ticket string, skills []string, requirements ...string) task {

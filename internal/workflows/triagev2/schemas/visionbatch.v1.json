@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/visionbatch.v1.json",
+  "description": "The Controller's record of the vision requests of one contract: each request's transcription, or a gap when it was not run",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "owner",
+    "results",
+    "gaps"
+  ],
+  "properties": {
+    "owner": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "vision"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+          },
+          "vision": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+          }
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"
+      }
+    }
+  }
+}

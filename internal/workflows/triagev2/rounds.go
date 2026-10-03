@@ -42,6 +42,7 @@ type RoundPolicy struct {
 	// HandoffPercent is the context usage at which the session is strictly
 	// closed and the next round starts fresh.
 	HandoffPercent float64
+	Vision         VisionPolicy
 }
 
 func (p RoundPolicy) check() error {
@@ -51,7 +52,7 @@ func (p RoundPolicy) check() error {
 	if math.IsNaN(p.HandoffPercent) || p.HandoffPercent <= 0 || p.HandoffPercent > 100 {
 		return fmt.Errorf("round policy needs a HandoffPercent in (0,100]")
 	}
-	return nil
+	return p.Vision.check()
 }
 
 // RoundRecord is one accepted round with its check and fact status; Check
@@ -99,6 +100,37 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 	var ts *TaskSession
 	var feedback *engine.Feedback
 	var last engine.StepResult
+	visionUsed := 0
+	// vision runs one contract's vision requests and makes the results
+	// inputs of the next round.
+	vision := func(key, label string, owner contract.Ref, requests []VisionRequest) error {
+		if len(requests) == 0 {
+			return nil
+		}
+		allowed := visionAllowed(r.Snapshot(), policy, visionUsed)
+		ref, fails, err := runVision(ctx, r, s0, policy.Vision, policy.TimeoutRetries, key, owner, requests, allowed)
+		out.Recoveries = append(out.Recoveries, fails...)
+		if err != nil {
+			return err
+		}
+		batch, err := readAccepted[VisionBatch](ctx, r, ref, VisionBatchSchema)
+		if err != nil {
+			return err
+		}
+		visionUsed += len(batch.Data.Results)
+		inputs = append(inputs, LabeledRef{"vision status of " + label, ref})
+		for _, res := range batch.Data.Results {
+			inputs = append(inputs, LabeledRef{fmt.Sprintf("vision %s of %s", res.ID, label), res.Vision})
+		}
+		return nil
+	}
+	facts, err := readAccepted[Facts](ctx, r, s0.Facts, FactsSchema)
+	if err != nil {
+		return out, err
+	}
+	if err := vision("vision-facts", "facts", s0.Facts, facts.Data.VisionRequests); err != nil {
+		return out, err
+	}
 	for n := 1; ; n++ {
 		if !roundFits(r.Snapshot(), policy) {
 			out.Limit = LimitRun
@@ -175,6 +207,9 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		if n == policy.MaxRounds {
 			out.Limit = LimitRounds
 			break
+		}
+		if err := vision(fmt.Sprintf("vision-round-%d", n), fmt.Sprintf("round %d", n), ref, round.VisionRequests); err != nil {
+			return out, err
 		}
 		if ts != nil {
 			handoff, note, err := capacityHandoff(ctx, r, *ts, last, policy.HandoffPercent)

@@ -35,7 +35,8 @@ func stuck(v *Round) { v.Status = "stuck" }
 
 func TestRounds(t *testing.T) {
 	model := runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}
-	policy := RoundPolicy{MaxRounds: 3, MaxRejections: 2, TimeoutRetries: 1, RoundTimeout: 30 * time.Second, CheckTimeout: 30 * time.Second, HandoffPercent: 80}
+	policy := RoundPolicy{MaxRounds: 3, MaxRejections: 2, TimeoutRetries: 1, RoundTimeout: 30 * time.Second, CheckTimeout: 30 * time.Second, HandoffPercent: 80,
+		Vision: VisionPolicy{Model: model, MaxSteps: 2, Parallel: 2, Timeout: 30 * time.Second}}
 	allSupported := func(string) string { return "supported" }
 	for _, tc := range []struct {
 		name    string
@@ -45,10 +46,13 @@ func TestRounds(t *testing.T) {
 		verdict func(id string) string
 		agent   func(t *testing.T, c investigatorCall) string
 		checker func(t *testing.T, call agentCall, n int) string
+		facts   func(*Facts, agentCall)
+		vision  func(t *testing.T, call agentCall) string
 		run     func(*engine.RunPolicy)
 		within  time.Duration
 		roles   string
 		check   func(t *testing.T, out Rounds, calls []investigatorCall, handles []string)
+		visions func(t *testing.T, out Rounds, calls []investigatorCall, visions []agentCall)
 	}{
 		{name: "a confirmed home stack opens runtime and a candidate ends the rounds", verdict: allSupported,
 			roles: "intake facts fact-check investigator fact-check investigator",
@@ -274,6 +278,66 @@ func TestRounds(t *testing.T) {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
+		{name: "an image the facts ask about is read before the identity round", verdict: allSupported,
+			roles: "intake facts fact-check vision investigator fact-check",
+			facts: func(f *Facts, call agentCall) {
+				f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: ptr(call.citable("intake")), FileID: "bundle"}, Question: "which host does the screenshot show"}}
+			},
+			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, stuck); return "" },
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {},
+			visions: func(t *testing.T, out Rounds, calls []investigatorCall, visions []agentCall) {
+				v := visions[0].Task
+				if v.Vision == nil || v.Vision.Question != "which host does the screenshot show" || v.Vision.Image.FileID != "bundle" || len(v.Skills) != 0 || !strings.Contains(v.Requirements, visionRequirements) || !strings.HasPrefix(v.Requirements, baselineRequirements) {
+					t.Errorf("vision task = %+v", v)
+				}
+				if labels := labelsOf(calls[0].Task); !strings.Contains(labels, "vision status of facts,vision shot of facts") {
+					t.Errorf("identity round inputs = %s", labels)
+				}
+			}},
+		{name: "vision requests beyond the budget become gaps", verdict: allSupported,
+			roles: "intake facts fact-check investigator fact-check vision vision investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					if c.round == 1 {
+						for _, id := range []string{"a", "b", "c"} {
+							v.VisionRequests = append(v.VisionRequests, VisionRequest{ID: "shot-" + id, Attachment: Evidence{Ref: ptr(c.citable("intake")), FileID: "bundle"}, Question: "what does it show"})
+						}
+						return
+					}
+					stuck(v)
+				})
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
+				var status contract.Ref
+				for _, in := range calls[1].Task.Citable {
+					if in.Label == "vision status of round 1" {
+						status = in.Ref
+					}
+				}
+				batch := decodeRef[VisionBatch](t, nil, status)
+				if len(batch.Results) != 2 || len(batch.Gaps) != 1 || batch.Gaps[0].ID != "vision-not-run-shot-c" || batch.Owner != out.Records[0].Round {
+					t.Errorf("vision batch = %+v", batch)
+				}
+			}},
+		{name: "a vision transcript that is not its own file is repaired", verdict: allSupported,
+			roles: "intake facts fact-check vision vision investigator fact-check",
+			facts: func(f *Facts, call agentCall) {
+				f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: ptr(call.citable("intake")), FileID: "bundle"}, Question: "what does it show"}}
+			},
+			vision: func(t *testing.T, call agentCall) string {
+				if call.Request.Feedback == nil {
+					transcribe(t, call, func(v *Vision) { v.Transcript.Ref = ptr(call.citable("request owner")) })
+					return ""
+				}
+				if !strings.Contains(call.Request.Feedback.Message, "transcript.ref") {
+					t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
+				}
+				transcribe(t, call, nil)
+				return ""
+			},
+			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, stuck); return "" },
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {}},
 		{name: "a timed-out round reruns in a fresh session from the same inputs", verdict: allSupported, policy: func(p *RoundPolicy) { p.RoundTimeout = time.Second },
 			roles: "intake facts fact-check investigator investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
@@ -374,6 +438,7 @@ func TestRounds(t *testing.T) {
 			var out Rounds
 			var calls []investigatorCall
 			checks := 0
+			var visions []agentCall
 			started := time.Now()
 			harnessPolicy = tc.run
 			defer func() { harnessPolicy = nil }()
@@ -408,7 +473,17 @@ func TestRounds(t *testing.T) {
 					v, files := intakeFiles()
 					call.reply(t, v, files)
 				case "facts":
-					call.reply(t, factsFor(call), nil)
+					f := factsFor(call)
+					if tc.facts != nil {
+						tc.facts(&f, call)
+					}
+					call.reply(t, f, nil)
+				case "vision":
+					visions = append(visions, call)
+					if tc.vision != nil {
+						return tc.vision(t, call)
+					}
+					transcribe(t, call, nil)
 				case "fact-check":
 					if call.Task.Round > 0 {
 						checks++
@@ -450,6 +525,9 @@ func TestRounds(t *testing.T) {
 				}
 			}
 			tc.check(t, out, calls, handles)
+			if tc.visions != nil {
+				tc.visions(t, out, calls, visions)
+			}
 		})
 	}
 }
@@ -494,4 +572,22 @@ func TestCloseFailure(t *testing.T) {
 			t.Errorf("%s: closeFailure = %+v", tc.name, f)
 		}
 	}
+}
+
+// transcribe is the fake vision agent: it answers the request it was given.
+func transcribe(t *testing.T, call agentCall, change func(*Vision)) {
+	t.Helper()
+	v := Vision{Request: call.Task.Vision.Request, Image: call.Task.Vision.Image, Transcript: Evidence{FileID: "transcript"}, Answer: "a host name", Gaps: []Gap{}}
+	if change != nil {
+		change(&v)
+	}
+	call.reply(t, v, map[string][]byte{"transcript": []byte("host acme.example.invalid\n")})
+}
+
+func labelsOf(t task) string {
+	var labels []string
+	for _, in := range t.Citable {
+		labels = append(labels, in.Label)
+	}
+	return strings.Join(labels, ",")
 }
