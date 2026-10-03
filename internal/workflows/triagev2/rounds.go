@@ -106,11 +106,12 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 	// vision runs one contract's vision requests and makes the results
 	// inputs of the next round.
 	// With dispatch false, as after the last round, every request gets a
-	// gap. When not even the batch record and one more round fit the run
-	// budget, nothing is recorded and the next budget check ends the rounds.
+	// gap; requests the budget cannot cover get one too. Only when not even
+	// the batch record fits is nothing recorded; the run is then out of
+	// attempts and the budget check ends the rounds.
 	vision := func(key, label string, owner contract.Ref, requests []VisionRequest, dispatch bool) error {
 		snapshot := r.Snapshot()
-		if len(requests) == 0 || !batchFits(snapshot, policy) {
+		if len(requests) == 0 || snapshot.Policy.MaxTotalAttempts-len(snapshot.Attempts) < batchAttach {
 			return nil
 		}
 		allowed := 0
@@ -130,7 +131,7 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		}
 		return nil
 	}
-	if live := r.Snapshot().Policy.MaxLiveSessions; policy.Vision.Parallel > live-1 {
+	if live := r.Snapshot().Policy.MaxLiveSessions; policy.Vision.MaxSteps > 0 && policy.Vision.Parallel > live-1 {
 		return out, fmt.Errorf("vision Parallel %d leaves no live session for the investigator: the run allows %d live sessions", policy.Vision.Parallel, live)
 	}
 	facts, err := readAccepted[Facts](ctx, r, s0.Facts, FactsSchema)
@@ -257,12 +258,6 @@ func roundFits(s engine.Snapshot, p RoundPolicy) bool {
 
 // batchAttach is the attempt the vision batch record takes.
 const batchAttach = 1
-
-// batchFits reports whether a vision batch record and one more round fit.
-func batchFits(s engine.Snapshot, p RoundPolicy) bool {
-	sessions, attempts := roundCost(p)
-	return s.Policy.MaxTotalSessions-len(s.Sessions) >= sessions && s.Policy.MaxTotalAttempts-len(s.Attempts) >= attempts+batchAttach
-}
 
 // judgeRound has an independent check judge what a round declares, counts
 // rejections per item across rounds and records an item absent with a gap

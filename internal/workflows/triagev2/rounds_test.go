@@ -408,6 +408,36 @@ func TestRounds(t *testing.T) {
 					t.Errorf("recoveries = %+v", out.Recoveries)
 				}
 			}},
+		{name: "vision requests beside an exactly covered round become gaps", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 15 },
+			roles: "intake facts fact-check",
+			facts: func(f *Facts, call agentCall) {
+				f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: ptr(call.citable("intake")), FileID: "bundle"}, Question: "what does it show"}}
+			},
+			agent: func(t *testing.T, c investigatorCall) string {
+				t.Error("dispatched a round past the budget")
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if len(out.Vision) != 1 || out.Limit != LimitRun {
+					t.Fatalf("rounds = %+v", out)
+				}
+				if batch := decodeRef[VisionBatch](t, nil, out.Vision[0]); len(batch.Results) != 0 || len(batch.Gaps) != 1 {
+					t.Errorf("vision batch = %+v", batch)
+				}
+			}},
+		{name: "vision requests of a last round with little budget left become gaps", verdict: allSupported, policy: func(p *RoundPolicy) { p.MaxRounds = 1 }, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 16 },
+			roles: "intake facts fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.VisionRequests = []VisionRequest{{ID: "late", Attachment: Evidence{Ref: ptr(c.citable("intake")), FileID: "bundle"}, Question: "what does it show"}}
+				})
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if len(out.Vision) != 1 || out.Limit != LimitRounds {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
 		{name: "vision requests the run budget cannot cover leave the rounds to the budget check", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 6 },
 			roles: "intake facts fact-check",
 			facts: func(f *Facts, call agentCall) {
@@ -705,10 +735,69 @@ func TestVisionAllowed(t *testing.T) {
 		{0, 22, 0, 2},
 		{0, 26, 0, 1},
 		{0, 31, 0, 0},
+		{0, 27, 0, 0},
 		{16, 0, 0, 0},
 	} {
 		if got := visionAllowed(snapshot(tc.sessions, tc.attempts), p, tc.used); got != tc.want {
 			t.Errorf("visionAllowed(%d sessions, %d attempts, %d used) = %d, want %d", tc.sessions, tc.attempts, tc.used, got, tc.want)
+		}
+	}
+}
+
+func TestSameEvidence(t *testing.T) {
+	owner, other := contract.Ref{AttemptID: "owner"}, contract.Ref{AttemptID: "other"}
+	whole := ""
+	want := Evidence{Ref: &owner, FileID: "bundle", Locator: &Locator{Pointer: &whole}}
+	for _, tc := range []struct {
+		name string
+		got  Evidence
+		err  string
+	}{
+		{"same", Evidence{Ref: &owner, FileID: "bundle", Locator: &Locator{Pointer: &whole}}, ""},
+		{"null ref", Evidence{FileID: "bundle", Locator: want.Locator}, "image.ref: got null"},
+		{"other ref", Evidence{Ref: &other, FileID: "bundle", Locator: want.Locator}, "image.ref: got attempt other"},
+		{"other file", Evidence{Ref: &owner, FileID: "shot", Locator: want.Locator}, `image.file_id: got "shot"; want "bundle"`},
+		{"other locator", Evidence{Ref: &owner, FileID: "bundle"}, "image.locator"},
+	} {
+		if got := errText(sameEvidence("image", tc.got, want)); tc.err == "" && got != "" || tc.err != "" && !strings.Contains(got, tc.err) {
+			t.Errorf("%s: sameEvidence = %q, want %q", tc.name, got, tc.err)
+		}
+	}
+}
+
+func TestAbsentGapID(t *testing.T) {
+	long := strings.Repeat("x", 127)
+	for _, tc := range []struct {
+		name string
+		id   string
+		gaps []Gap
+		want string
+	}{
+		{"short id", "pop", nil, "p-pop"},
+		{"long id falls back to a position", long, []Gap{{ID: "p-a"}}, "p-2"},
+		{"a fallback colliding with a short id gets a suffix", long, []Gap{{ID: "p-2"}}, "p-2-2"},
+		{"suffixes chain", long, []Gap{{ID: "p-3"}, {ID: "p-3-2"}}, "p-3-3"},
+	} {
+		if got := absentGapID("p-", tc.id, tc.gaps); got != tc.want {
+			t.Errorf("%s: absentGapID = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestVisionPolicyCheck(t *testing.T) {
+	model := runtime.ModelSpec{Provider: "fixture", ID: "model"}
+	for _, tc := range []struct {
+		name string
+		p    VisionPolicy
+		ok   bool
+	}{
+		{"valid", VisionPolicy{Model: model, MaxSteps: 1, Parallel: 1, Timeout: time.Second}, true},
+		{"no model", VisionPolicy{MaxSteps: 1, Parallel: 1, Timeout: time.Second}, false},
+		{"no parallelism", VisionPolicy{Model: model, MaxSteps: 1, Timeout: time.Second}, false},
+		{"no timeout", VisionPolicy{Model: model, MaxSteps: 1, Parallel: 1}, false},
+	} {
+		if err := tc.p.check(); (err == nil) != tc.ok {
+			t.Errorf("%s: check = %v", tc.name, err)
 		}
 	}
 }
