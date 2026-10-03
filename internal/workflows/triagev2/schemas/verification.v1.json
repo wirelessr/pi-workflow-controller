@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/verification.v1.json",
+  "description": "One independent verifier's assessment of a claim from its allowed evidence only",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "claim",
+    "role",
+    "allowed_evidence",
+    "assessment"
+  ],
+  "properties": {
+    "claim": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+    },
+    "role": {
+      "enum": [
+        "pro",
+        "con",
+        "cross"
+      ]
+    },
+    "allowed_evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+      },
+      "description": "The claim's allowed evidence, copied in order"
+    },
+    "assessment": {
+      "description": "Your declarations with evidence and limitations; strings are not proof or a vote. State missing measurement conditions explicitly, never invent them.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "support",
+        "reason",
+        "basis",
+        "runtime_basis",
+        "measurement",
+        "window",
+        "filter",
+        "environment",
+        "release",
+        "counterexamples",
+        "gaps"
+      ],
+      "properties": {
+        "support": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "reason": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "basis": {
+          "type": "array",
+          "items": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+          }
+        },
+        "runtime_basis": {
+          "type": "array",
+          "items": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+          }
+        },
+        "measurement": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "window": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "filter": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "environment": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "release": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "counterexamples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "statement",
+              "disposition",
+              "reason",
+              "basis"
+            ],
+            "properties": {
+              "statement": {
+                "type": "string",
+                "pattern": "\\S"
+              },
+              "disposition": {
+                "type": "string",
+                "pattern": "\\S"
+              },
+              "reason": {
+                "type": "string",
+                "pattern": "\\S"
+              },
+              "basis": {
+                "type": "array",
+                "items": {
+                  "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+                }
+              }
+            }
+          }
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "\\S"
+          }
+        }
+      }
+    }
+  }
+}

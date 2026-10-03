@@ -46,6 +46,8 @@ type task struct {
 	Judge *[]string `json:"judge,omitempty"`
 	// Trigger is the steward trigger a steward Step serves.
 	Trigger string `json:"trigger,omitempty"`
+	// Verify is the claim a verifier checks.
+	Verify *verifyTask `json:"verify,omitempty"`
 	// Vision is the request a vision Step answers.
 	Vision *visionTask `json:"vision,omitempty"`
 }

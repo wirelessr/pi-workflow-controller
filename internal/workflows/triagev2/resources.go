@@ -14,7 +14,7 @@ const schemaURI = "https://pi-workflow-controller.local/schemas/triage/"
 
 // schemaNames lists every resource; all but common are contract schemas
 // with ID triage.<name>.v1.
-var schemaNames = []string{"common", "skills", "prompt", "intake", "facts", "factcheck", "factstatus", "round", "vision", "visionbatch", "observation", "audit", "steward"}
+var schemaNames = []string{"common", "skills", "prompt", "intake", "facts", "factcheck", "factstatus", "round", "vision", "visionbatch", "observation", "audit", "steward", "claim", "verification", "delivery"}
 
 func Resources() []contract.Resource {
 	var out []contract.Resource

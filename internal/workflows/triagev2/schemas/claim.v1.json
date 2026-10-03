@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/claim.v1.json",
+  "description": "The Controller's claim for verification: a round's candidate, unchanged except that its own evidence is cited through the round's Ref, bound to the round and the steward's T2a pass",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "round",
+    "steward",
+    "candidate"
+  ],
+  "properties": {
+    "round": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+    },
+    "steward": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+    },
+    "candidate": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/round.v1.json#/properties/candidate/anyOf/1"
+    }
+  }
+}

@@ -42,29 +42,31 @@ func ends(v *Round) { v.Status, v.Unblock = "blocked", ptr("a kubeconfig for pop
 func TestRounds(t *testing.T) {
 	model := runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}
 	policy := RoundPolicy{MaxRounds: 3, MaxRejections: 2, MaxChallenges: 2, TimeoutRetries: 1, RoundTimeout: 30 * time.Second, CheckTimeout: 30 * time.Second, AuditTimeout: 30 * time.Second, StewardTimeout: 30 * time.Second, HandoffPercent: 80,
-		Vision: VisionPolicy{Model: model, MaxSteps: 2, Parallel: 2, Timeout: 30 * time.Second}}
+		Verification: VerificationPolicy{Pro: model, Con: model, Cross: model, Timeout: 30 * time.Second, MaxRuns: 2},
+		Vision:       VisionPolicy{Model: model, MaxSteps: 2, Parallel: 2, Timeout: 30 * time.Second}}
 	allSupported := func(string) string { return "supported" }
 	for _, tc := range []struct {
-		name    string
-		policy  func(*RoundPolicy)
-		percent *float64
-		unknown bool
-		verdict func(id string) string
-		agent   func(t *testing.T, c investigatorCall) string
-		checker func(t *testing.T, call agentCall, n int) string
-		auditor func(t *testing.T, call agentCall) string
-		steward func(t *testing.T, call agentCall) string
-		facts   func(*Facts, agentCall)
-		vision  func(t *testing.T, call agentCall) string
-		run     func(*engine.RunPolicy)
-		within  time.Duration
-		fails   string
-		roles   string
+		name     string
+		policy   func(*RoundPolicy)
+		percent  *float64
+		unknown  bool
+		verdict  func(id string) string
+		agent    func(t *testing.T, c investigatorCall) string
+		checker  func(t *testing.T, call agentCall, n int) string
+		auditor  func(t *testing.T, call agentCall) string
+		verifier func(t *testing.T, call agentCall) string
+		steward  func(t *testing.T, call agentCall) string
+		facts    func(*Facts, agentCall)
+		vision   func(t *testing.T, call agentCall) string
+		run      func(*engine.RunPolicy)
+		within   time.Duration
+		fails    string
+		roles    string
 		// stewards lists the steward triggers in order; empty means T1.
 		stewards string
 		check    func(t *testing.T, out Rounds, calls []investigatorCall, handles []string)
 	}{
-		{name: "a confirmed home stack opens runtime and a candidate the steward passes ends the rounds", verdict: allSupported, stewards: "T1 T2a",
+		{name: "a confirmed home stack opens runtime and a verified candidate the steward passes ends the rounds", verdict: allSupported, stewards: "T1 T2a T2b",
 			roles: "intake facts fact-check investigator fact-check investigator",
 			agent: func(t *testing.T, c investigatorCall) string {
 				if c.round == 1 {
@@ -100,6 +102,20 @@ func TestRounds(t *testing.T) {
 				}
 				if len(handles) != 2 || handles[0] != handles[1] {
 					t.Errorf("round sessions = %v, want one reused session below the threshold", handles)
+				}
+				if len(out.Claims) != 1 || !out.Claims[0].Passed || out.Claims[0].T2a != out.Stewards[1].Ref {
+					t.Fatalf("claims = %+v", out.Claims)
+				}
+				claim := decodeRef[Claim](t, nil, out.Claims[0].Claim)
+				round := out.Records[1].Round
+				if claim.Round != round || *claim.Candidate.AllowedEvidence[0].Ref != round || *claim.Candidate.CodeRefs[0].Basis.Ref != round {
+					t.Errorf("claim does not cite the round's own evidence through its Ref: %+v", claim)
+				}
+				delivery := decodeRef[Delivery](t, nil, out.Claims[0].Delivery)
+				for i, role := range delivery.Roles {
+					if role.Role != verifierRoles[i] || role.Result == nil || role.Unavailable {
+						t.Errorf("delivery role %d = %+v", i, role)
+					}
 				}
 			}},
 		{name: "a rejected home stack keeps runtime closed until it is recorded absent", verdict: func(id string) string {
@@ -520,11 +536,11 @@ func TestRounds(t *testing.T) {
 				return ""
 			},
 			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
-				if out.Limit != LimitChallenges || out.Pass != (contract.Ref{}) || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T2a) challenged") {
+				if out.Limit != LimitChallenges || out.Passed() || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T2a) challenged") {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
-		{name: "a stuck round gets a T3 redirection that does not count as a challenge", verdict: allSupported, stewards: "T1 T3 T2a",
+		{name: "a stuck round gets a T3 redirection that does not count as a challenge", verdict: allSupported, stewards: "T1 T3 T2a T2b",
 			policy: func(p *RoundPolicy) { p.MaxChallenges = 1 },
 			roles:  "intake facts fact-check investigator investigator",
 			agent: func(t *testing.T, c investigatorCall) string {
@@ -538,7 +554,7 @@ func TestRounds(t *testing.T) {
 				return ""
 			},
 			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
-				if out.Pass == (contract.Ref{}) || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T3) challenged") {
+				if !out.Passed() || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T3) challenged") {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
@@ -627,7 +643,7 @@ func TestRounds(t *testing.T) {
 				call.reply(t, v, map[string][]byte{"page": []byte("a prior investigation\n")})
 				return ""
 			}},
-		{name: "a T1 challenge on a round 1 candidate reaches round 2 before T2a", verdict: allSupported, stewards: "T1 T2a",
+		{name: "a T1 challenge on a round 1 candidate reaches round 2 before T2a", verdict: allSupported, stewards: "T1 T2a T2b",
 			roles: "intake facts fact-check investigator investigator",
 			agent: func(t *testing.T, c investigatorCall) string {
 				c.round0(t, func(v *Round) {
@@ -645,11 +661,11 @@ func TestRounds(t *testing.T) {
 				return ""
 			},
 			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
-				if out.Pass == (contract.Ref{}) || out.Stewards[1].Round != 2 || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T1) challenged") {
+				if !out.Passed() || out.Stewards[1].Round != 2 || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T1) challenged") {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
-		{name: "a T1 challenge with no round left still lets T2a gate the candidate", verdict: allSupported, stewards: "T1 T2a",
+		{name: "a T1 challenge with no round left still lets T2a gate the candidate", verdict: allSupported, stewards: "T1 T2a T2b",
 			policy: func(p *RoundPolicy) { p.MaxRounds = 1 },
 			roles:  "intake facts fact-check investigator",
 			agent: func(t *testing.T, c investigatorCall) string {
@@ -668,7 +684,7 @@ func TestRounds(t *testing.T) {
 				return ""
 			},
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
-				if out.Pass == (contract.Ref{}) {
+				if !out.Passed() {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
@@ -680,6 +696,79 @@ func TestRounds(t *testing.T) {
 			},
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
 				if out.Limit != LimitRounds || out.Last.Status != "stuck" {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
+		{name: "verifiers see only the claim and its evidence and a basis outside it is repaired", verdict: allSupported, stewards: "T1 T2a T2b",
+			roles: "intake facts fact-check investigator",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
+					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
+				})
+				return ""
+			},
+			verifier: func(t *testing.T, call agentCall) string {
+				if labels := labelsOf(call.Task); labels != "claim,allowed evidence owner" || len(call.Task.Skills) != 0 || !strings.Contains(call.Task.Requirements, verifierRequirements) {
+					t.Errorf("verifier sees %s with skills %v", labels, call.Task.Skills)
+				}
+				if call.Task.Verify.Role != "con" {
+					call.reply(t, verdictFor(call, nil), nil)
+					return ""
+				}
+				v := verdictFor(call, nil)
+				if call.Request.Feedback == nil {
+					v.Assessment.Basis = []Evidence{{Ref: ptr(call.citable("claim")), FileID: "elsewhere"}}
+				} else if !strings.Contains(call.Request.Feedback.Message, `assessment.basis[0]: file "elsewhere" is not cited exactly`) {
+					t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
+				}
+				call.reply(t, v, nil)
+				return ""
+			}},
+		{name: "a verifier that keeps timing out is recorded unavailable", verdict: allSupported, stewards: "T1 T2a T2b",
+			roles:  "intake facts fact-check investigator",
+			policy: func(p *RoundPolicy) { p.Verification.Timeout = time.Second },
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
+					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
+				})
+				return ""
+			},
+			verifier: func(t *testing.T, call agentCall) string {
+				if call.Task.Verify.Role == "cross" {
+					return "hold"
+				}
+				call.reply(t, verdictFor(call, nil), nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				delivery := decodeRef[Delivery](t, nil, out.Claims[0].Delivery)
+				cross := delivery.Roles[2]
+				if !cross.Unavailable || cross.Result != nil || len(cross.Failures) != 2 || cross.Failures[0].Code != string(engine.TimedOut) || delivery.Roles[0].Result == nil {
+					t.Errorf("delivery = %+v", delivery)
+				}
+			}},
+		{name: "a T2b challenge reopens the rounds and the verification limit ends them", verdict: allSupported, stewards: "T1 T2a T2b T2a",
+			roles:  "intake facts fact-check investigator investigator",
+			policy: func(p *RoundPolicy) { p.Verification.MaxRuns = 1; p.MaxChallenges = 3 },
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
+					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
+				})
+				return ""
+			},
+			steward: func(t *testing.T, call agentCall) string {
+				verdict := "pass"
+				if call.Task.Trigger == "T2b" {
+					verdict = "challenge"
+				}
+				call.reply(t, stewardVerdict(call, verdict), nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
+				if out.Limit != LimitVerifications || out.Passed() || len(out.Claims) != 1 || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T2b) challenged") {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
@@ -844,6 +933,11 @@ func TestRounds(t *testing.T) {
 						return tc.checker(t, call, checks)
 					}
 					call.reply(t, checkFor(t, call, tc.verdict), nil)
+				case "verify-pro", "verify-con", "verify-cross":
+					if tc.verifier != nil {
+						return tc.verifier(t, call)
+					}
+					call.reply(t, verdictFor(call, nil), nil)
 				case "audit":
 					if tc.auditor != nil {
 						return tc.auditor(t, call)
@@ -880,7 +974,7 @@ func TestRounds(t *testing.T) {
 				switch role {
 				case "audit":
 					audits++
-				case "steward":
+				case "steward", "verify-pro", "verify-con", "verify-cross":
 				default:
 					roles = append(roles, role)
 				}
@@ -1219,4 +1313,17 @@ func TestAttachObservationsWithinAttemptLimits(t *testing.T) {
 	if !ids["c1"] || !ids["c2"] || !ids["e0"] || ids["e1"] {
 		t.Errorf("entry ids = %v; want only committed entries", ids)
 	}
+}
+
+// verdictFor is the fake verifier: it supports the claim from its first
+// allowed evidence file.
+func verdictFor(call agentCall, change func(*Verification)) Verification {
+	v := call.Task.Verify
+	out := Verification{Claim: v.Claim, Role: v.Role, AllowedEvidence: v.AllowedEvidence, Assessment: VerificationAssessment{
+		Support: "supported", Reason: "the query result shows it", Basis: []Evidence{v.AllowedEvidence[0]}, RuntimeBasis: []Evidence{},
+		Measurement: "valid", Window: "unavailable", Filter: "unavailable", Environment: "pop-a", Release: "unavailable", Counterexamples: []VerificationIssue{}, Gaps: []string{}}}
+	if change != nil {
+		change(&out)
+	}
+	return out
 }

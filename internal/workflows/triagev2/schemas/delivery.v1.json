@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/delivery.v1.json",
+  "description": "The Controller's record of one verification: each role's result, or why it is unavailable",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "claim",
+    "roles"
+  ],
+  "properties": {
+    "claim": {
+      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+    },
+    "roles": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "role",
+          "result",
+          "unavailable",
+          "failures"
+        ],
+        "properties": {
+          "role": {
+            "enum": [
+              "pro",
+              "con",
+              "cross"
+            ]
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unavailable": {
+            "type": "boolean"
+          },
+          "failures": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "attempt_id",
+                "code",
+                "origin",
+                "diagnostic"
+              ],
+              "properties": {
+                "attempt_id": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "origin": {
+                  "type": "string"
+                },
+                "diagnostic": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

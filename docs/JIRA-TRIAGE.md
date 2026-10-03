@@ -29,6 +29,8 @@ Controller 只負責階段邊界的前置條件、exact committed Refs、確定�
 - Vision：facts 與 continue 的 round 可列出圖片請求；Controller 在下一輪之前派發 vision Step（不載入私有 skill，requirements 明寫自己用 read 讀圖、不委派），每個請求一個 fresh session，同時至多設定的數量，總數受 run 的上限與剩餘 session／attempt 額度限制。Vision 產物只是轉錄證據（自己的 evidence 檔），由引用它的 Agent 判斷；未執行的請求（額度用盡或已是最後一輪）在 Controller 的 batch 紀錄中列為缺口；vision 並行數必須留一個 live session 給 investigator。
 - 稽核（V1）：每輪的 Step 開啟稽核觀測；輪末 Controller 以 Attach 固定該輪所有 attempt（含逾時失敗的）的原始 entries 與 tool call 索引，交 fresh 的 validator 對照 receipts 稽核。每個 finding 須有可解析的定位（記錄中的 entry id、該輪的 receipt 或證據）；findings 是回饋，不要求重做已提交的輪次。覆蓋不完整時 request 會明說。
 - Steward：身分輪後 T1、candidate 時 T2a、stuck 時 T3（只有 redirect），各為 fresh session；challenge 作為下一輪的 feedback，T1 與 T2a 的 challenge 計入上限，T3 不計。T2a pass 或 blocked 結束 rounds（對抗驗證落地前）；challenge 額度用盡時 candidate 也結束 rounds 並標明原因。
-- 在對抗驗證落地前，T2a pass 的 candidate 與 blocked 結束 rounds；round 上限用盡也結束。
+- 對抗驗證（S2）：T2a pass 後，Controller 以 Attach 記錄 claim（round 的 candidate 原樣複製，自己的證據改以 round 的 Ref 引用，綁定 round 與 T2a），三個 verifier（pro／con／cross）各在 fresh session 平行判讀，只拿 claim 與其 allowed evidence 的 owners，不拿 steward notes、不載私有 skill。驗收沿用舊版：claim／role／allowed evidence 回聲、assessment 必填、basis 只能是 exact allowed evidence、結果來自該角色與模型的 closed fresh session。某角色的可恢復失敗用盡重試時記為 unavailable，其他失敗即 run 失敗。Controller 記錄 delivery 後由 steward T2b 判讀：pass 結束調查，challenge 回到 rounds；S2 次數有上限，用完後的 candidate 結束並標明原因。
+- Verifier 的 inputs 含 allowed evidence 所在的 contract（例如 round 本身），因此能讀到其中的敘述；隔離靠 requirements，不是硬保證。
+- 結束條件：T2b pass、blocked，或任一上限（round 數、run 額度、steward challenge、S2 次數）。
 
 匿名測試只證明結構與流程；真 Pi／provider／skills／live 能力尚未驗證。

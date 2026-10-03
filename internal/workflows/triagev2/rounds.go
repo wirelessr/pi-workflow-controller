@@ -50,6 +50,7 @@ type RoundPolicy struct {
 	// closed and the next round starts fresh.
 	HandoffPercent float64
 	Vision         VisionPolicy
+	Verification   VerificationPolicy
 }
 
 func (p RoundPolicy) check() error {
@@ -59,7 +60,10 @@ func (p RoundPolicy) check() error {
 	if math.IsNaN(p.HandoffPercent) || p.HandoffPercent <= 0 || p.HandoffPercent > 100 {
 		return fmt.Errorf("round policy needs a HandoffPercent in (0,100]")
 	}
-	return p.Vision.check()
+	if err := p.Vision.check(); err != nil {
+		return err
+	}
+	return p.Verification.check()
 }
 
 // RoundRecord is one accepted round with its check, fact status, session
@@ -77,15 +81,22 @@ type StewardRecord struct {
 	Verdict string
 }
 
-// Rounds is the outcome of the round loop. Until verification exists, a
-// candidate the steward passes at T2a, or a blocked round, ends it; Pass
-// is that T2a verdict. Limit says what ended rounds that still wanted to
-// continue; with LimitRun and no Records, the budget could not cover even
-// the first round.
+// ClaimRecord is one verification of a candidate: the claim, the role
+// delivery and the steward's T2b verdict on it.
+type ClaimRecord struct {
+	Round                     int
+	Claim, Delivery, T2a, T2b contract.Ref
+	Passed                    bool
+}
+
+// Rounds is the outcome of the investigation: it ends when the steward
+// passes a verified claim at T2b, at a blocked round, or at a limit, which
+// Limit names; with LimitRun and no Records, the budget could not cover
+// even the first round.
 type Rounds struct {
 	Records  []RoundRecord
 	Stewards []StewardRecord
-	Pass     contract.Ref
+	Claims   []ClaimRecord
 	// Vision holds the vision batch records, with their gaps.
 	Vision     []contract.Ref
 	Last       Round
@@ -95,10 +106,15 @@ type Rounds struct {
 }
 
 const (
-	LimitRounds     = "rounds"
-	LimitRun        = "run budget"
-	LimitChallenges = "steward challenges"
+	LimitRounds        = "rounds"
+	LimitRun           = "run budget"
+	LimitChallenges    = "steward challenges"
+	LimitVerifications = "verifications"
 )
+
+// Passed reports whether the investigation ended with a claim the steward
+// passed after verification.
+func (r Rounds) Passed() bool { return len(r.Claims) > 0 && r.Claims[len(r.Claims)-1].Passed }
 
 // ledger is the state the rounds carry: rejections per item key, items
 // recorded absent with their gap, and the confirmed home stack.
@@ -299,9 +315,42 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 			if err != nil {
 				return out, err
 			}
-			if v.Verdict == "pass" {
-				out.Pass = out.Stewards[len(out.Stewards)-1].Ref
+			if v.Verdict != "pass" {
+				break
 			}
+			if len(out.Claims) >= policy.Verification.MaxRuns {
+				out.Limit = LimitVerifications
+				break
+			}
+			if !verificationFits(r.Snapshot(), policy) {
+				out.Limit = LimitRun
+				break
+			}
+			t2a := out.Stewards[len(out.Stewards)-1].Ref
+			claim := claimFor(ref, *round.Candidate, t2a)
+			claimRef, err := root.Attach(ctx, engine.AttachSpec{Key: fmt.Sprintf("claim-round-%d", n), Output: contract.Spec{SchemaID: ClaimSchema}, Data: claim})
+			if err != nil {
+				return out, err
+			}
+			deliveryRef, delivery, fails, err := runVerification(ctx, r, s0.Ticket, policy.Verification, policy.TimeoutRetries, len(out.Claims)+1, claimRef, claim)
+			out.Recoveries = append(out.Recoveries, fails...)
+			if err != nil {
+				return out, err
+			}
+			label := fmt.Sprintf("verification %d", len(out.Claims)+1)
+			inputs = append(inputs, LabeledRef{label + " claim", claimRef}, LabeledRef{label + " delivery", deliveryRef})
+			for _, role := range delivery.Roles {
+				if role.Result != nil {
+					inputs = append(inputs, LabeledRef{label + " " + role.Role, *role.Result})
+				}
+			}
+			record := ClaimRecord{Round: n, Claim: claimRef, Delivery: deliveryRef, T2a: t2a}
+			v, err = ask("T2b")
+			if err != nil {
+				return out, err
+			}
+			record.T2b, record.Passed = out.Stewards[len(out.Stewards)-1].Ref, v.Verdict == "pass"
+			out.Claims = append(out.Claims, record)
 		case "stuck":
 			// No round would act on a redirection after the last one.
 			if n < policy.MaxRounds {
@@ -310,7 +359,7 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 				}
 			}
 		}
-		if round.Status == "blocked" || out.Pass != (contract.Ref{}) || out.Limit != "" {
+		if round.Status == "blocked" || out.Passed() || out.Limit != "" {
 			break
 		}
 		if err := vision(fmt.Sprintf("vision-round-%d", n), fmt.Sprintf("round %d", n), ref, round.VisionRequests, n < policy.MaxRounds); err != nil {
@@ -354,6 +403,14 @@ func roundCost(p RoundPolicy) (sessions, attempts int) {
 func roundFits(s engine.Snapshot, p RoundPolicy) bool {
 	sessions, attempts := roundCost(p)
 	return s.Policy.MaxTotalSessions-len(s.Sessions) >= sessions && s.Policy.MaxTotalAttempts-len(s.Attempts) >= attempts
+}
+
+// verificationFits reports whether three verifiers and the T2b steward,
+// each retried after a timeout and repaired once, plus the claim and
+// delivery records, fit the run budget.
+func verificationFits(s engine.Snapshot, p RoundPolicy) bool {
+	steps := 4 * (p.TimeoutRetries + 1)
+	return s.Policy.MaxTotalSessions-len(s.Sessions) >= steps && s.Policy.MaxTotalAttempts-len(s.Attempts) >= 2*steps+2
 }
 
 // batchAttach is the attempt the vision batch record takes.
