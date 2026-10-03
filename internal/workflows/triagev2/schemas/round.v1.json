@@ -1,0 +1,626 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/round.v1.json",
+  "description": "One investigation round's results",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "facts_update",
+    "time_anchors",
+    "identity",
+    "receipts",
+    "deployed_builds",
+    "vision_requests",
+    "candidate",
+    "unblock",
+    "gaps",
+    "gap_dispositions"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "continue",
+        "candidate",
+        "stuck",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "What this round established, ruled out and left open"
+    },
+    "facts_update": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/fact"
+      },
+      "description": "New or corrected facts; they are judged before use"
+    },
+    "time_anchors": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/anchor"
+      },
+      "description": "Time anchors this round introduces"
+    },
+    "identity": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "lookups",
+            "decisions"
+          ],
+          "properties": {
+            "lookups": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "stack",
+                  "kubeconfig",
+                  "context",
+                  "status",
+                  "rows",
+                  "evidence",
+                  "note"
+                ],
+                "description": "One read-only identity lookup on one stack",
+                "properties": {
+                  "id": {
+                    "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+                  },
+                  "stack": {
+                    "type": "string",
+                    "pattern": "\\S"
+                  },
+                  "kubeconfig": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "pattern": "\\S",
+                    "description": "The kubeconfig used; null when none exists for this stack"
+                  },
+                  "context": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "pattern": "\\S",
+                    "description": "The cluster context the query actually ran against"
+                  },
+                  "status": {
+                    "enum": [
+                      "ok",
+                      "failed",
+                      "unavailable"
+                    ],
+                    "description": "unavailable: the stack cannot be queried (no kubeconfig); ok: the query ran, even with no rows"
+                  },
+                  "rows": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "tenant_id",
+                        "orgkey",
+                        "ui_hostname",
+                        "name"
+                      ],
+                      "description": "One identity row as the lookup returned it; null for a column it did not return",
+                      "properties": {
+                        "tenant_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "pattern": "\\S"
+                        },
+                        "orgkey": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "pattern": "\\S"
+                        },
+                        "ui_hostname": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "pattern": "\\S"
+                        },
+                        "name": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "pattern": "\\S"
+                        }
+                      }
+                    }
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence"
+                    },
+                    "description": "The raw output of this lookup"
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "status": {
+                          "const": "ok"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "kubeconfig": {
+                          "type": "string",
+                          "pattern": "\\S"
+                        },
+                        "context": {
+                          "type": "string",
+                          "pattern": "\\S"
+                        },
+                        "evidence": {
+                          "minItems": 1
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "decisions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "fact",
+                  "value",
+                  "status",
+                  "lookup",
+                  "row",
+                  "identifiers",
+                  "reason"
+                ],
+                "description": "An identity decision; confirmed values must equal the cited row (home_pop equals the lookup's stack)",
+                "properties": {
+                  "id": {
+                    "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+                  },
+                  "fact": {
+                    "enum": [
+                      "tenant_id",
+                      "orgkey",
+                      "home_pop"
+                    ]
+                  },
+                  "value": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "pattern": "\\S"
+                  },
+                  "status": {
+                    "enum": [
+                      "confirmed",
+                      "unconfirmed",
+                      "conflict"
+                    ]
+                  },
+                  "lookup": {
+                    "anyOf": [
+                      {
+                        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Id of the lookup in this contract whose row the decision rests on"
+                  },
+                  "row": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Index into that lookup's rows"
+                  },
+                  "identifiers": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "enum": [
+                        "tenant_id",
+                        "orgkey",
+                        "ui_hostname",
+                        "name"
+                      ]
+                    },
+                    "description": "The row columns that matched independent candidate identifiers"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "pattern": "\\S"
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "status": {
+                          "const": "confirmed"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "value": {
+                          "type": "string",
+                          "pattern": "\\S"
+                        },
+                        "lookup": {
+                          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+                        },
+                        "row": {
+                          "type": "integer"
+                        },
+                        "identifiers": {
+                          "minItems": 1
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "description": "Identity lookups and decisions; null when this round ran none"
+    },
+    "receipts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "target",
+          "target_basis",
+          "source",
+          "condition",
+          "from",
+          "to",
+          "time_basis",
+          "status",
+          "outcome",
+          "evidence"
+        ],
+        "description": "One runtime query this round ran (identity lookups are recorded under identity)",
+        "properties": {
+          "id": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+          },
+          "target": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "What was queried: stack, cluster, service or global"
+          },
+          "target_basis": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "\\S",
+            "description": "Why this target, when it is not the confirmed home stack or the query is global"
+          },
+          "source": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "The system queried"
+          },
+          "condition": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "The query, filter or command as run"
+          },
+          "from": {
+            "type": "string",
+            "pattern": "Z$",
+            "description": "Explicit UTC RFC 3339 ending in Z"
+          },
+          "to": {
+            "type": "string",
+            "pattern": "Z$",
+            "description": "Explicit UTC RFC 3339 ending in Z"
+          },
+          "time_basis": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            },
+            "description": "Evidence the UTC window was taken from"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "partial",
+              "failed",
+              "timeout"
+            ],
+            "description": "partial, failed and timeout are not evidence of absence"
+          },
+          "outcome": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            },
+            "description": "The raw result or failure output"
+          }
+        }
+      }
+    },
+    "deployed_builds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "stack",
+          "component",
+          "build",
+          "evidence"
+        ],
+        "description": "A build observed deployed on a stack",
+        "properties": {
+          "id": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+          },
+          "stack": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "component": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "build": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence"
+            }
+          }
+        }
+      }
+    },
+    "vision_requests": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/vision_request"
+      }
+    },
+    "candidate": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "statement",
+            "premises",
+            "allowed_evidence",
+            "code_refs",
+            "basis"
+          ],
+          "description": "A claim checkable by a reader with no investigation history",
+          "properties": {
+            "statement": {
+              "type": "string",
+              "pattern": "\\S"
+            },
+            "premises": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "\\S"
+              }
+            },
+            "allowed_evidence": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+              },
+              "description": "The only evidence files a verifier may use; evidence files only, not analysis"
+            },
+            "code_refs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "repo",
+                  "commit",
+                  "path"
+                ],
+                "description": "Code the claim relies on, at the exact revision it was read",
+                "properties": {
+                  "repo": {
+                    "type": "string",
+                    "pattern": "\\S"
+                  },
+                  "commit": {
+                    "type": "string",
+                    "pattern": "\\S"
+                  },
+                  "path": {
+                    "type": "string",
+                    "pattern": "\\S"
+                  }
+                }
+              }
+            },
+            "basis": {
+              "enum": [
+                "runtime-verified",
+                "inference"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "unblock": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "\\S",
+      "description": "For blocked: exactly what would unblock the investigation"
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"
+      }
+    },
+    "gap_dispositions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "gap",
+          "disposition",
+          "reason",
+          "evidence"
+        ],
+        "properties": {
+          "gap": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap_ref"
+          },
+          "disposition": {
+            "enum": [
+              "resolved",
+              "not-applicable"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            }
+          }
+        }
+      },
+      "description": "Earlier gaps this round resolved or found not applicable"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "continue"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "vision_requests": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "candidate"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "candidate": {
+            "type": "object"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "candidate": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "blocked"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "unblock": {
+            "type": "string"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "unblock": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

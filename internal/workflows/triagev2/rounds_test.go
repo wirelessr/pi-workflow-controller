@@ -1,0 +1,312 @@
+package triagev2
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"pi-workflow-controller/internal/contract"
+	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/runtime"
+)
+
+// roundCheckFor judges every item of the round under review.
+func roundCheckFor(t *testing.T, call agentCall, verdict func(id string) string) FactCheck {
+	t.Helper()
+	ref := call.citable("facts under review")
+	raw, err := os.ReadFile(ref.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env struct {
+		Data Round `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	intake := call.citable("intake")
+	out := FactCheck{Subject: ref, Items: []FactVerdict{}, Warnings: []Warning{}, Gaps: []Gap{}}
+	for _, id := range roundJudged(env.Data) {
+		out.Items = append(out.Items, FactVerdict{ID: id, Verdict: verdict(id), Reason: "checked against the lookup", Basis: []Evidence{cite(intake, "page-0")}})
+	}
+	return out
+}
+
+// investigatorCall is one investigator dispatch: the round it serves and
+// whether it repairs a rejected contract.
+type investigatorCall struct {
+	agentCall
+	round  int
+	repair bool
+}
+
+func (c investigatorCall) round0(t *testing.T, change func(*Round)) {
+	t.Helper()
+	v := baseRound(c.citable("intake"))
+	if change != nil {
+		change(&v)
+	}
+	c.reply(t, v, roundFiles())
+}
+
+func stuck(v *Round) { v.Status = "stuck" }
+
+func TestRounds(t *testing.T) {
+	model := runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}
+	policy := RoundPolicy{MaxRounds: 3, MaxRejections: 2, TimeoutRetries: 1, RoundTimeout: 30 * time.Second, HandoffPercent: 80}
+	allSupported := func(string) string { return "supported" }
+	for _, tc := range []struct {
+		name    string
+		policy  func(*RoundPolicy)
+		percent *float64
+		unknown bool
+		verdict func(id string) string
+		agent   func(t *testing.T, c investigatorCall) string
+		roles   string
+		check   func(t *testing.T, out Rounds, calls []investigatorCall, handles []string)
+	}{
+		{name: "a confirmed home stack opens runtime and a candidate ends the rounds", verdict: allSupported,
+			roles: "intake facts fact-check investigator fact-check investigator",
+			agent: func(t *testing.T, c investigatorCall) string {
+				if c.round == 1 {
+					c.round0(t, nil)
+					return ""
+				}
+				c.round0(t, func(v *Round) {
+					v.Status, v.FactsUpdate, v.Identity, v.Receipts = "candidate", []Fact{}, nil, []Receipt{}
+					v.Candidate = &Candidate{Statement: "the error comes from svc", Premises: []string{}, AllowedEvidence: []Evidence{{FileID: "query-1"}}, CodeRefs: []CodeRef{{Repo: "svc", Commit: "abc123", Path: "main.go"}}, Basis: "runtime-verified"}
+				})
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, handles []string) {
+				first, second := calls[0].Task, calls[1].Task
+				if first.Runtime != "identity-only" || !strings.Contains(first.Requirements, identityOnlyRequirements) || len(first.Skills) != 2 || !strings.HasSuffix(first.Skills[0], "identity/SKILL.md") || first.Round != 1 {
+					t.Errorf("identity round task = runtime %q skills %v", first.Runtime, first.Skills)
+				}
+				if second.Runtime != "open" || !strings.Contains(second.Requirements, `home stack "pop-a"`) || !strings.HasSuffix(second.Skills[0], "investigator/SKILL.md") || second.Round != 2 {
+					t.Errorf("second round task = runtime %q skills %v round %d", second.Runtime, second.Skills, second.Round)
+				}
+				var labels []string
+				for _, in := range second.Citable {
+					labels = append(labels, in.Label)
+				}
+				if strings.Join(labels, ",") != "caller prompt,intake,facts,fact check,fact status,round 1,round 1 fact check,round 1 fact status" {
+					t.Errorf("second round inputs = %v", labels)
+				}
+				if calls[1].Request.Feedback != nil {
+					t.Errorf("second round feedback = %+v, want none", calls[1].Request.Feedback)
+				}
+				if out.HomeStack != "pop-a" || len(out.Records) != 2 || out.Records[1].Check != (contract.Ref{}) || out.Last.Status != "candidate" || out.Exhausted {
+					t.Errorf("rounds = %+v", out)
+				}
+				if len(handles) != 2 || handles[0] != handles[1] {
+					t.Errorf("round sessions = %v, want one reused session below the threshold", handles)
+				}
+			}},
+		{name: "a rejected home stack keeps runtime closed until it is recorded absent", verdict: func(id string) string {
+			if id == "d-pop" {
+				return "unsupported"
+			}
+			return "supported"
+		}, roles: "intake facts fact-check investigator fact-check investigator fact-check investigator investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				switch {
+				case c.round == 3 && c.repair:
+					if !strings.Contains(c.Request.Feedback.Message, "this home_pop decision was not accepted too often") {
+						t.Errorf("repair feedback = %q", c.Request.Feedback.Message)
+					}
+					c.round0(t, func(v *Round) {
+						stuck(v)
+						v.Identity.Decisions = v.Identity.Decisions[1:]
+						v.FactsUpdate = []Fact{}
+					})
+				default:
+					c.round0(t, nil)
+				}
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, handles []string) {
+				for _, c := range calls[1:] {
+					if c.Task.Runtime != "identity-only" {
+						t.Errorf("round %d runtime = %q", c.round, c.Task.Runtime)
+					}
+				}
+				if fb := calls[1].Request.Feedback; fb == nil || !strings.Contains(fb.Message, "d-pop (unsupported)") || len(fb.Refs) != 3 || fb.Refs[0] != out.Records[0].Round || fb.Refs[1] != out.Records[0].Check {
+					t.Errorf("round 2 feedback = %+v", fb)
+				}
+				if fb := calls[2].Request.Feedback; fb == nil || !strings.Contains(fb.Message, "recorded absent in the round 2 fact status") {
+					t.Errorf("round 3 feedback = %+v", fb)
+				}
+				status := decodeRef[FactStatus](t, nil, out.Records[1].Status)
+				if len(status.Gaps) != 1 || status.Gaps[0].ID != "not-accepted-r2-d-pop" || !strings.Contains(status.Gaps[0].Text, "2 times") {
+					t.Errorf("round 2 status gaps = %+v", status.Gaps)
+				}
+				if first := decodeRef[FactStatus](t, nil, out.Records[0].Status); len(first.Gaps) != 0 || first.Facts != out.Records[0].Round {
+					t.Errorf("round 1 status = %+v", first)
+				}
+				if out.HomeStack != "" || len(out.Records) != 3 || out.Last.Status != "stuck" {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
+		{name: "a timed-out round reruns in a fresh session from the same inputs", verdict: allSupported, policy: func(p *RoundPolicy) { p.RoundTimeout = time.Second },
+			roles: "intake facts fact-check investigator investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				if c.Request.Feedback == nil {
+					return "hold"
+				}
+				if c.Request.Feedback.SourceCode != string(engine.TimedOut) {
+					t.Errorf("rerun feedback = %+v, want the timeout diagnostic", c.Request.Feedback)
+				}
+				c.round0(t, stuck)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, handles []string) {
+				if len(out.Recoveries) != 1 || out.Recoveries[0].Code != engine.TimedOut || len(handles) != 2 || handles[0] == handles[1] {
+					t.Errorf("recoveries = %+v handles = %v", out.Recoveries, handles)
+				}
+				if a, b := calls[0].Task.Citable, calls[1].Task.Citable; len(a) != len(b) || a[len(a)-1] != b[len(b)-1] {
+					t.Errorf("rerun inputs differ: %v vs %v", a, b)
+				}
+			}},
+		{name: "context usage at the threshold hands off to a fresh session", verdict: allSupported, percent: ptr(95.0),
+			roles: "intake facts fact-check investigator fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				if c.round == 2 {
+					c.round0(t, stuck)
+					return ""
+				}
+				c.round0(t, nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, handles []string) {
+				if fb := calls[1].Request.Feedback; fb == nil || !strings.Contains(fb.Message, "reached 95% context usage") {
+					t.Errorf("round 2 feedback = %+v", fb)
+				}
+				if len(handles) != 2 || handles[0] == handles[1] {
+					t.Errorf("round sessions = %v, want a fresh session after the handoff", handles)
+				}
+			}},
+		{name: "unknown context usage keeps the session and says so", verdict: allSupported, unknown: true,
+			roles: "intake facts fact-check investigator fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				if c.round == 2 {
+					c.round0(t, stuck)
+					return ""
+				}
+				c.round0(t, nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, handles []string) {
+				if fb := calls[1].Request.Feedback; fb == nil || !strings.Contains(fb.Message, "Context usage is unknown") {
+					t.Errorf("round 2 feedback = %+v", fb)
+				}
+				if len(handles) != 2 || handles[0] != handles[1] {
+					t.Errorf("round sessions = %v", handles)
+				}
+			}},
+		{name: "the round limit ends a continuing investigation", verdict: allSupported, policy: func(p *RoundPolicy) { p.MaxRounds = 1 },
+			roles: "intake facts fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, nil); return "" },
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if !out.Exhausted || len(out.Records) != 1 || out.Last.Status != "continue" {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
+		{name: "an identity value that does not echo its row is repaired in the same session", verdict: allSupported,
+			roles: "intake facts fact-check investigator investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				if !c.repair {
+					c.round0(t, func(v *Round) { stuck(v); v.Identity.Decisions[0].Value = ptr("pop-b") })
+					return ""
+				}
+				if !strings.Contains(c.Request.Feedback.Message, `want "pop-a", the stack of lookup "l-a" row 0`) {
+					t.Errorf("repair feedback = %q", c.Request.Feedback.Message)
+				}
+				c.round0(t, stuck)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, handles []string) {
+				if len(handles) != 2 || handles[0] != handles[1] || out.HomeStack != "pop-a" {
+					t.Errorf("handles = %v home = %q", handles, out.HomeStack)
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saved := harnessPercent
+			defer func() { harnessPercent = saved }()
+			if tc.percent != nil {
+				harnessPercent = tc.percent
+			}
+			if tc.unknown {
+				harnessPercent = nil
+			}
+			p := policy
+			if tc.policy != nil {
+				tc.policy(&p)
+			}
+			skills := newSkillFixture(t)
+			var out Rounds
+			var calls []investigatorCall
+			res := runHarness(t, "CASE-17 pop=pop-a", func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
+				sk, err := PrepareSkills(ctx, r, r.Root(), skills.source)
+				if err != nil {
+					return engine.Result{}, err
+				}
+				s0, err := runS0(ctx, r, sk, S0Models{Intake: model, Facts: model, Validator: model}, 0)
+				if err != nil {
+					return engine.Result{}, err
+				}
+				out, err = runRounds(ctx, r, sk, s0, RoundModels{Investigator: model, Validator: model}, p)
+				if err != nil {
+					return engine.Result{}, err
+				}
+				last := out.Records[len(out.Records)-1].Round
+				return engine.Result{Outputs: map[string]contract.Ref{"round": last}, Final: &engine.FinalSelection{Output: "round"}}, nil
+			}, func(t *testing.T, call agentCall) string {
+				switch {
+				case call.Role == "intake":
+					v, files := intakeFiles()
+					call.reply(t, v, files)
+				case call.Role == "facts":
+					call.reply(t, factsFor(call), nil)
+				case call.Role == "fact-check" && call.citable("facts under review").SchemaID == FactsSchema:
+					call.reply(t, checkFor(t, call, allSupported), nil)
+				case call.Role == "fact-check":
+					call.reply(t, roundCheckFor(t, call, tc.verdict), nil)
+				case call.Role == "investigator":
+					c := investigatorCall{agentCall: call, round: call.Task.Round, repair: call.Request.Feedback != nil && strings.HasPrefix(call.Request.Feedback.Message, "Previous contract")}
+					calls = append(calls, c)
+					return tc.agent(t, c)
+				}
+				return ""
+			})
+			if res.Report.Outcome != engine.Succeeded {
+				t.Fatalf("outcome = %s: %v", res.Report.Outcome, res.Report.Failure)
+			}
+			if got := strings.Join(res.Roles, " "); got != tc.roles {
+				t.Fatalf("dispatched roles = %q, want %q", got, tc.roles)
+			}
+			var handles []string
+			var rounds []engine.AttemptState
+			for _, a := range res.Report.Snapshot.Attempts {
+				if a.Key == "round" {
+					rounds = append(rounds, a)
+				}
+			}
+			slices.SortFunc(rounds, func(a, b engine.AttemptState) int { return a.StartedAt.Compare(b.StartedAt) })
+			for _, a := range rounds {
+				handles = append(handles, a.HandleID)
+			}
+			for _, s := range res.Report.Snapshot.Sessions {
+				if s.State != "Closed" {
+					t.Errorf("session %s left %s", s.ID, s.State)
+				}
+			}
+			tc.check(t, out, calls, handles)
+		})
+	}
+}

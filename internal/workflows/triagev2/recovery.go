@@ -210,17 +210,18 @@ func ConfirmTaskRecovery(ctx context.Context, r *engine.Run, err error, sibling 
 	return result, nil
 }
 
-// RetryInputs is only for supplied-input work. Recovery never authorizes a
-// remote operation, and RetryState feedback is not an input to the next task.
-// A RunTaskStep inside run must set NoRepair, or the same session is
-// repaired twice per retry.
-func RetryInputs(ctx context.Context, r *engine.Run, scope *engine.Scope, key, output string, retries int, run func(context.Context, *engine.Scope) (contract.Ref, error), recovered func(context.Context, RecoveryFailure, error, bool) error) (contract.Ref, []RecoveryFailure, error) {
+// RetryInputs is only for supplied-input work: it reruns run from the same
+// committed inputs after a confirmed recoverable failure, passing the
+// failure diagnostic as feedback. Recovery never authorizes a remote
+// operation. It retries only execution failures, never a rejected contract,
+// so a Step inside run keeps its own contract repair.
+func RetryInputs(ctx context.Context, r *engine.Run, scope *engine.Scope, key, output string, retries int, run func(context.Context, *engine.Scope, *engine.Feedback) (contract.Ref, error), recovered func(context.Context, RecoveryFailure, error, bool) error) (contract.Ref, []RecoveryFailure, error) {
 	var ref contract.Ref
 	var failures []RecoveryFailure
 	var causes []error
 	_, err := scope.Retry(ctx, key, retries, func(ctx context.Context, s *engine.Scope, state engine.RetryState) (engine.RetryAction, error) {
 		var err error
-		ref, err = run(ctx, s)
+		ref, err = run(ctx, s, state.Feedback)
 		if err == nil {
 			return engine.RetryAction{Result: engine.Result{Outputs: map[string]contract.Ref{output: ref}}}, nil
 		}

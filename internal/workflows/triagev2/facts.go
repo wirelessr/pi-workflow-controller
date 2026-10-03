@@ -129,48 +129,9 @@ func checkFacts(ctx context.Context, r *engine.Run, ref contract.Ref, intake, pr
 		return v, err
 	}
 	cite := citations{ctx, in, ref, p.Files}.check
-	ids := map[string]string{}
-	unique := func(field, id string) error {
-		if prior, ok := ids[id]; ok {
-			return fmt.Errorf("%s.id: %q is already used at %s; ids must be unique across facts, time_anchors and vision_requests", field, id, prior)
-		}
-		ids[id] = field
-		return nil
-	}
-	for i, f := range v.Facts {
-		field := fmt.Sprintf("facts[%d]", i)
-		if err := unique(field, f.ID); err != nil {
-			return v, err
-		}
-		for j, e := range f.Evidence {
-			if err := cite(fmt.Sprintf("%s.evidence[%d]", field, j), e); err != nil {
-				return v, err
-			}
-		}
-	}
-	for i, a := range v.TimeAnchors {
-		field := fmt.Sprintf("time_anchors[%d]", i)
-		if err := unique(field, a.ID); err != nil {
-			return v, err
-		}
-		if !nonblank(a.Event) || !nonblank(a.SourceTZ) {
-			return v, fmt.Errorf("%s: event and source_tz must not be blank", field)
-		}
-		if err := checkAnchor(field, a, cite); err != nil {
-			return v, err
-		}
-	}
-	for i, q := range v.VisionRequests {
-		field := fmt.Sprintf("vision_requests[%d]", i)
-		if err := unique(field, q.ID); err != nil {
-			return v, err
-		}
-		if q.Attachment.Ref != nil && *q.Attachment.Ref != intake {
-			return v, fmt.Errorf("%s.attachment.ref: want the intake input or null for an image this contract fetched itself", field)
-		}
-		if err := cite(field+".attachment", q.Attachment); err != nil {
-			return v, err
-		}
+	visionRef := func(r *contract.Ref) bool { return r == nil || *r == intake }
+	if err := checkDeclared(idSet{}, cite, "facts", v.Facts, v.TimeAnchors, v.VisionRequests, visionRef); err != nil {
+		return v, err
 	}
 	return v, checkGaps("gaps", v.Gaps)
 }
@@ -178,7 +139,7 @@ func checkFacts(ctx context.Context, r *engine.Run, ref contract.Ref, intake, pr
 // checkFactCheck requires exactly one verdict per fact and anchor of the
 // subject, each with resolvable basis citations. The verdicts are the
 // validator's judgment; Go does not second-guess them.
-func checkFactCheck(ctx context.Context, r *engine.Run, ref, subject contract.Ref, facts Facts) (FactCheck, error) {
+func checkFactCheck(ctx context.Context, r *engine.Run, ref, subject contract.Ref, inputs []contract.Ref, ids []string) (FactCheck, error) {
 	p, err := readAccepted[FactCheck](ctx, r, ref, FactCheckSchema)
 	if err != nil {
 		return FactCheck{}, err
@@ -187,12 +148,11 @@ func checkFactCheck(ctx context.Context, r *engine.Run, ref, subject contract.Re
 	if err := sameRef("subject", v.Subject, subject); err != nil {
 		return v, err
 	}
-	in, err := citable(ctx, r, facts.Intake, facts.Prompt, subject)
+	in, err := citable(ctx, r, inputs...)
 	if err != nil {
 		return v, err
 	}
 	cite := citations{ctx, in, ref, p.Files}.check
-	ids := judgedIDs(facts)
 	want := map[string]bool{}
 	for _, id := range ids {
 		want[id] = true
@@ -201,10 +161,10 @@ func checkFactCheck(ctx context.Context, r *engine.Run, ref, subject contract.Re
 	for i, item := range v.Items {
 		field := fmt.Sprintf("items[%d]", i)
 		if !want[item.ID] {
-			return v, fmt.Errorf("%s.id: got %q; want an id of a fact or time anchor of the subject", field, item.ID)
+			return v, fmt.Errorf("%s.id: got %q; want an id of an item the subject declares for judgment", field, item.ID)
 		}
 		if seen[item.ID] {
-			return v, fmt.Errorf("%s.id: %q already has a verdict; want exactly one per fact and time anchor", field, item.ID)
+			return v, fmt.Errorf("%s.id: %q already has a verdict; want exactly one per judged item", field, item.ID)
 		}
 		seen[item.ID] = true
 		for j, e := range item.Basis {
@@ -227,7 +187,7 @@ func checkFactCheck(ctx context.Context, r *engine.Run, ref, subject contract.Re
 		}
 	}
 	if len(missing) > 0 {
-		return v, fmt.Errorf("items: no verdict for %s; want exactly one per fact and time anchor", strings.Join(missing, ", "))
+		return v, fmt.Errorf("items: no verdict for %s; want exactly one per judged item", strings.Join(missing, ", "))
 	}
 	return v, checkGaps("gaps", v.Gaps)
 }
@@ -242,4 +202,58 @@ func judgedIDs(f Facts) []string {
 		ids = append(ids, a.ID)
 	}
 	return ids
+}
+
+// idSet tracks item ids across one contract, for a diagnostic naming the
+// first use.
+type idSet map[string]string
+
+func (s idSet) add(field, id string) error {
+	if prior, ok := s[id]; ok {
+		return fmt.Errorf("%s.id: %q is already used at %s; item ids must be unique within this contract", field, id, prior)
+	}
+	s[id] = field
+	return nil
+}
+
+// checkDeclared checks the facts, time anchors and vision requests a facts
+// or round contract declares: unique ids, resolvable citations, recomputed
+// anchors, and vision attachments from an allowed owner.
+func checkDeclared(ids idSet, cite func(string, Evidence) error, factsField string, facts []Fact, anchors []TimeAnchor, vision []VisionRequest, visionRef func(*contract.Ref) bool) error {
+	for i, f := range facts {
+		field := fmt.Sprintf("%s[%d]", factsField, i)
+		if err := ids.add(field, f.ID); err != nil {
+			return err
+		}
+		for j, e := range f.Evidence {
+			if err := cite(fmt.Sprintf("%s.evidence[%d]", field, j), e); err != nil {
+				return err
+			}
+		}
+	}
+	for i, a := range anchors {
+		field := fmt.Sprintf("time_anchors[%d]", i)
+		if err := ids.add(field, a.ID); err != nil {
+			return err
+		}
+		if !nonblank(a.Event) || !nonblank(a.SourceTZ) {
+			return fmt.Errorf("%s: event and source_tz must not be blank", field)
+		}
+		if err := checkAnchor(field, a, cite); err != nil {
+			return err
+		}
+	}
+	for i, q := range vision {
+		field := fmt.Sprintf("vision_requests[%d]", i)
+		if err := ids.add(field, q.ID); err != nil {
+			return err
+		}
+		if !visionRef(q.Attachment.Ref) {
+			return fmt.Errorf("%s.attachment.ref: got %s; want the intake or another input of this request holding the image, or null for an image this contract fetched itself", field, describeRef(*q.Attachment.Ref))
+		}
+		if err := cite(field+".attachment", q.Attachment); err != nil {
+			return err
+		}
+	}
+	return nil
 }

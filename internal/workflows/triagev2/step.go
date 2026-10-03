@@ -47,23 +47,50 @@ type TaskStep struct {
 // gates in full. Execution failures (timeout, cancellation, provider) are
 // never retried here.
 func RunTaskStep(ctx context.Context, r *engine.Run, t TaskStep) (contract.Ref, error) {
-	s, stage, key, recovery, validate, repairable := t.Scope, t.Stage, t.Key, t.Recovery, t.Validate, !t.NoRepair
-	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + stage, Model: t.Model})
+	ts, err := OpenTaskSession(ctx, r, t)
 	if err != nil {
 		return contract.Ref{}, err
 	}
-	var identity runtime.Identity
-	if recovery {
+	out, err := ts.Run(ctx, r, t)
+	if err != nil {
+		return out.Output, err
+	}
+	return CloseTaskStep(ctx, r, ts.Handle, ts.Identity, t.Stage, out, t.Recovery)
+}
+
+// TaskSession is a Step session that may serve more than one Step, such as
+// consecutive investigation rounds below the capacity threshold.
+type TaskSession struct {
+	Handle   *engine.SessionHandle
+	Identity runtime.Identity
+}
+
+// OpenTaskSession opens the session for t's role and model; with Recovery
+// it captures the owned identity before any dispatch.
+func OpenTaskSession(ctx context.Context, r *engine.Run, t TaskStep) (TaskSession, error) {
+	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: "triage-" + t.Stage, Model: t.Model})
+	if err != nil {
+		return TaskSession{}, err
+	}
+	ts := TaskSession{Handle: h}
+	if t.Recovery {
 		// A sibling may cancel after OpenSession. Capture this owned handle for
 		// parent-context cleanup without permitting a cancelled Step dispatch.
-		identity, err = r.SessionIdentity(context.WithoutCancel(ctx), h)
-		if err != nil {
-			return contract.Ref{}, err
+		if ts.Identity, err = r.SessionIdentity(context.WithoutCancel(ctx), h); err != nil {
+			return ts, err
 		}
 	}
+	return ts, nil
+}
+
+// Run dispatches t on the session with the single contract repair and
+// leaves the session open. A failure with Recovery is a *TaskFailure.
+func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engine.StepResult, error) {
+	s, stage, key, recovery, validate, repairable := t.Scope, t.Stage, t.Key, t.Recovery, t.Validate, !t.NoRepair
+	h, identity := ts.Handle, ts.Identity
 	prompt, err := json.Marshal(t.Task)
 	if err != nil {
-		return contract.Ref{}, err
+		return engine.StepResult{}, err
 	}
 	timeout := t.Timeout
 	if timeout == 0 {
@@ -139,13 +166,13 @@ func RunTaskStep(ctx context.Context, r *engine.Run, t TaskStep) (contract.Ref, 
 			attemptID := out.AttemptID
 			if cancelled && lastPublished != (contract.Ref{}) {
 				attemptID = lastPublished.AttemptID
-				return lastPublished, &TaskFailure{Cause: err, Handle: h, Identity: identity, Stage: stage, Attempt: attemptID}
+				return engine.StepResult{AttemptID: attemptID, Output: lastPublished}, &TaskFailure{Cause: err, Handle: h, Identity: identity, Stage: stage, Attempt: attemptID}
 			}
-			return contract.Ref{}, &TaskFailure{Cause: err, Handle: h, Identity: identity, Stage: stage, Attempt: attemptID}
+			return engine.StepResult{}, &TaskFailure{Cause: err, Handle: h, Identity: identity, Stage: stage, Attempt: attemptID}
 		}
-		return contract.Ref{}, err
+		return engine.StepResult{}, err
 	}
-	return CloseTaskStep(ctx, r, h, identity, stage, out, recovery)
+	return out, nil
 }
 
 func CloseTaskStep(ctx context.Context, r *engine.Run, h *engine.SessionHandle, identity runtime.Identity, stage string, out engine.StepResult, recovery bool) (contract.Ref, error) {

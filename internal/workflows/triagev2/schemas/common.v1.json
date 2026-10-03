@@ -318,6 +318,87 @@
         }
       ],
       "description": "Evidence with the place read: pointer \"\" cites a whole JSON document, offset 0 with the file size a whole other file"
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "value",
+        "evidence"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+        },
+        "kind": {
+          "enum": [
+            "tenant_id",
+            "orgkey",
+            "ui_hostname",
+            "home_pop",
+            "customer_name",
+            "user",
+            "other"
+          ],
+          "description": "home_pop is a candidate only; never derive it from a hostname or tenant name"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence"
+          }
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "description": "A fact with the evidence that states it"
+    },
+    "vision_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "attachment",
+        "question"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+        },
+        "attachment": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
+          "description": "The image file: an intake attachment, or one this contract fetched itself (ref null)"
+        },
+        "question": {
+          "type": "string",
+          "pattern": "\\S"
+        }
+      }
+    },
+    "gap_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "id"
+      ],
+      "description": "An earlier gap, named by the exact input that owns it and its id; never copy its text",
+      "properties": {
+        "ref": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+        },
+        "id": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+        }
+      }
     }
   }
 }

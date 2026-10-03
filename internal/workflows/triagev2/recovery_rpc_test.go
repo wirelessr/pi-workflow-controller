@@ -40,9 +40,9 @@ func TestRetryInputsRecovery(t *testing.T) {
 			model := runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}
 			calls := 0
 			res := runHarness(t, "CASE-17", func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
-				ref, failures, retryErr = RetryInputs(ctx, r, r.Root(), "seam", "out", tc.retries, func(ctx context.Context, s *engine.Scope) (contract.Ref, error) {
+				ref, failures, retryErr = RetryInputs(ctx, r, r.Root(), "seam", "out", tc.retries, func(ctx context.Context, s *engine.Scope, fb *engine.Feedback) (contract.Ref, error) {
 					tk := newTask(r, "probe", "CASE-17", nil)
-					return RunTaskStep(ctx, r, TaskStep{Scope: s, Model: model, Stage: "probe", Key: "probe", Task: tk, Schema: PromptSchema, Recovery: true, NoRepair: true, Timeout: time.Second})
+					return RunTaskStep(ctx, r, TaskStep{Scope: s, Model: model, Stage: "probe", Key: "probe", Task: tk, Schema: PromptSchema, Feedback: fb, Recovery: true, NoRepair: true, Timeout: time.Second})
 				}, func(_ context.Context, f RecoveryFailure, _ error, _ bool) error {
 					seen = append(seen, f)
 					return tc.recovered

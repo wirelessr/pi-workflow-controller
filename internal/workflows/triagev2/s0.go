@@ -83,7 +83,7 @@ func runS0(ctx context.Context, r *engine.Run, skills Skills, models S0Models, f
 		out.Check, err = RunTaskStep(ctx, r, TaskStep{Scope: s, Model: models.Validator, Stage: "fact-check", Key: "fact-check", Task: vt, Schema: FactCheckSchema, Inputs: vt.inputs(),
 			Validate: func(ctx context.Context, ref contract.Ref) error {
 				var err error
-				check, err = checkFactCheck(ctx, r, ref, out.Facts, facts)
+				check, err = checkFactCheck(ctx, r, ref, out.Facts, []contract.Ref{out.Intake, out.Prompt, out.Facts}, judgedIDs(facts))
 				return err
 			}})
 		if err != nil {

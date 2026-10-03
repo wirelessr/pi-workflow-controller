@@ -24,45 +24,7 @@
     "facts": {
       "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "id",
-          "kind",
-          "value",
-          "evidence"
-        ],
-        "properties": {
-          "id": {
-            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
-          },
-          "kind": {
-            "enum": [
-              "tenant_id",
-              "orgkey",
-              "ui_hostname",
-              "home_pop",
-              "customer_name",
-              "user",
-              "other"
-            ],
-            "description": "home_pop is a candidate only; never derive it from a hostname or tenant name"
-          },
-          "value": {
-            "type": "string",
-            "pattern": "\\S"
-          },
-          "evidence": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence"
-            }
-          },
-          "note": {
-            "type": "string"
-          }
-        }
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/fact"
       }
     },
     "time_anchors": {
@@ -75,26 +37,7 @@
       "type": "array",
       "description": "Image attachments whose content is needed, each with the question to answer from it",
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "id",
-          "attachment",
-          "question"
-        ],
-        "properties": {
-          "id": {
-            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
-          },
-          "attachment": {
-            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
-            "description": "The image file: an intake attachment, or one this contract fetched itself (ref null)"
-          },
-          "question": {
-            "type": "string",
-            "pattern": "\\S"
-          }
-        }
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/vision_request"
       }
     },
     "gaps": {

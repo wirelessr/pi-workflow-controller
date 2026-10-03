@@ -74,6 +74,10 @@ func (c agentCall) citable(label string) contract.Ref {
 	panic("no citable input " + label)
 }
 
+// harnessPercent is the context usage the fake Pi reports; nil reports
+// none. Tests that change it restore it.
+var harnessPercent = ptr(10.0)
+
 type harnessResult struct {
 	Report engine.Report
 	Run    *engine.Run
@@ -117,7 +121,7 @@ func runHarness(t *testing.T, prompt string, execute engine.Workflow, agent func
 		t.Fatal(err)
 	}
 	pi, err := runtime.New(runtime.Options{Executable: exe, Args: []string{"-test.run=^TestTriageV2Subprocess$", "--"},
-		Env:       []string{"PWC_TRIAGEV2_PROTOCOL=1", "PWC_ENGINE_MANUAL_CANDIDATE=1", "PWC_ENGINE_CONTROL=" + host.Addr().String(), "GORACE=atexit_sleep_ms=0"},
+		Env:       []string{"PWC_TRIAGEV2_PROTOCOL=1", "PWC_ENGINE_MANUAL_CANDIDATE=1", "PWC_ENGINE_CONTROL_STATS=1", "PWC_ENGINE_CONTROL=" + host.Addr().String(), "GORACE=atexit_sleep_ms=0"},
 		BridgeDir: bridge, Policy: policy.Runtime, Observe: func(ctx context.Context, o runtime.Observation) error { return r.Observe(ctx, o) }})
 	if err != nil {
 		t.Fatal(err)
@@ -147,6 +151,20 @@ func runHarness(t *testing.T, prompt string, execute engine.Workflow, agent func
 			}
 			if e.Err != nil {
 				t.Fatalf("fixture host event: %v", e.Err)
+			}
+			if e.Message.Type == "stats" {
+				usage := map[string]any{"tokens": nil, "contextWindow": 100000, "percent": nil}
+				if harnessPercent != nil {
+					usage["tokens"], usage["percent"] = 1000, *harnessPercent
+				}
+				data, err := json.Marshal(map[string]any{"sessionId": e.Message.SessionID, "sessionFile": e.Message.History, "contextUsage": usage})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := e.Reply(protocol.Control{Type: "stats", Data: data}); err != nil {
+					t.Fatal(err)
+				}
+				continue
 			}
 			if e.Message.Type != "prompt" {
 				continue

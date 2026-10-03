@@ -145,7 +145,7 @@ func TestCheckFactsAndFactCheck(t *testing.T) {
 				}
 				tc.change(&c)
 				ref := attach(ctx, r, "check", FactCheckSchema, c, nil)
-				_, err = checkFactCheck(ctx, r, ref, factsRef, f)
+				_, err = checkFactCheck(ctx, r, ref, factsRef, []contract.Ref{f.Intake, f.Prompt, factsRef}, judgedIDs(f))
 				return nil
 			})
 			if report.Outcome != engine.Succeeded {

@@ -39,6 +39,8 @@ type task struct {
 	Requirements string       `json:"requirements"`
 	Workspace    string       `json:"workspace"`
 	Ticket       string       `json:"ticket"`
+	Round        int          `json:"round,omitempty"`
+	Runtime      string       `json:"runtime,omitempty"`
 	Citable      []LabeledRef `json:"citable_inputs"`
 }
 

@@ -21,4 +21,11 @@ Controller 只負責階段邊界的前置條件、exact committed Refs、確定�
 - Step 稽核觀測：`StepSpec.Observe`（見 [DESIGN](../DESIGN.md) §6.3）。
 - 私有 skill 目錄的受限展開與過期偵測：`triagev2.PrepareSkills`（見 [WORKFLOW-REUSE](WORKFLOW-REUSE.md) §4）。
 
+## 已落地的階段（尚未接成可執行的 workflow）
+
+- S0（`runS0`）：caller prompt 以 Attach 記錄；intake Step 取得整張票並由 Go 驗完整性；facts Step 只從文字來源宣告候選事實與時間錨點，每項附可解析的定位；獨立 fact-check Step 逐項判讀。未被接受的項目以 feedback 有限重試，之後由 Controller 記錄為缺口。
+- Rounds（`runRounds`）：每輪一個 round contract。Go 驗收 id、引用與定位、時間錨點重算、身分 decision 必須等於所引用 lookup 的 row（home stack 等於該 lookup 的 stack）、runtime 查詢收據的 UTC 窗口非零，以及 gap disposition 指向輸入中確實存在的 gap；不合格時同 session 修復一次。宣告的事實、錨點與身分 decision 交 fresh 的 fact-check 判讀；同一項目累計被退回達上限即記為缺口，之後不得再宣告。Runtime 權限寫在每輪 request：home stack 經判讀確認前為 identity-only（只做唯讀身分查詢），之後為 open（唯讀）。這是 Agent 操作規則，不是阻擋；跨 stack 搜尋是否完整由 validator 判讀，不是 Controller 保證。
+- Session：容量低於門檻時下一輪沿用同一 session；達門檻或用量未知時的處理（strict close 後 fresh，或沿用並告知）寫在 feedback。逾時的一輪從相同 committed inputs 以 fresh session 重跑，有限次數，會計不重置；逾時 attempt 的落地檔不採用。
+- 在 Steward 與對抗驗證落地前，candidate／stuck／blocked 一律結束 rounds；round 上限用盡也結束。
+
 匿名測試只證明結構與流程；真 Pi／provider／skills／live 能力尚未驗證。
