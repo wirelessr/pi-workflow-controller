@@ -307,7 +307,7 @@ func TestEngineProtocolCWD(t *testing.T) {
 			case "space", "tilde", "null":
 				defaultCWD = map[string]string{"space": " service ", "tilde": "~", "null": "null"}[name]
 				// These names are literal, not configuration sentinels.
-				launch = t.TempDir()
+				launch = protocol.RealTempDir(t)
 				want = filepath.Join(launch, defaultCWD)
 				if err := os.Mkdir(want, 0700); err != nil {
 					t.Fatal(err)

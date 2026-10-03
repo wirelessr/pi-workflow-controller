@@ -277,9 +277,26 @@ func TestCLIPTYNewlineBoundary(t *testing.T) {
 				assertCLIPlain(t, input)
 				written := make(chan error, 1)
 				go func() {
-					n, err := unix.Write(int(pty.slave.Fd()), []byte(input))
-					if err == nil && n != len(input) {
-						err = fmt.Errorf("short PTY write: %d/%d", n, len(input))
+					// A blocking write returns short when a signal (such as Go's
+					// preemption SIGURG) interrupts it after a partial transfer.
+					buf := []byte(input)
+					var err error
+					for len(buf) > 0 {
+						var n int
+						n, err = unix.Write(int(pty.slave.Fd()), buf)
+						if n > 0 {
+							buf = buf[n:]
+						}
+						if errors.Is(err, unix.EINTR) {
+							err = nil
+							continue
+						}
+						if err != nil || n == 0 {
+							break
+						}
+					}
+					if err == nil && len(buf) > 0 {
+						err = fmt.Errorf("short PTY write: %d/%d", len(input)-len(buf), len(input))
 					}
 					written <- err
 				}()
@@ -318,9 +335,6 @@ func TestCLIPTYNewlineBoundary(t *testing.T) {
 				case <-time.After(3 * time.Second):
 					t.Fatal("PTY boundary write deadline")
 				}
-				pty.join(t)
-				pty.restored(t, false)
-				raw := pty.text()
 				onlcr := mode.name == "onlcr"
 				want := input
 				if onlcr {
@@ -329,6 +343,14 @@ func TestCLIPTYNewlineBoundary(t *testing.T) {
 						want = strings.Repeat("A", offset) + "\r\r\nEND\r\n"
 					}
 				}
+				// The reader drains nonblocking; under load the tail can reach the
+				// master after the writer returns, so wait for it before joining.
+				for drained := time.Now().Add(3 * time.Second); len(pty.text()) < len(want) && time.Now().Before(drained); {
+					time.Sleep(time.Millisecond)
+				}
+				pty.join(t)
+				pty.restored(t, false)
+				raw := pty.text()
 				t.Logf("pure LF syscall input=%d raw=%d boundary=%q CRCRLF=%d", len(input), len(raw), raw[max(0, len(raw)-10):], strings.Count(raw, "\r\r\n"))
 				t.Logf("raw PTY hex: %x", []byte(raw))
 				if raw != want {

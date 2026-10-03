@@ -32,10 +32,21 @@ type Control struct {
 	Data          json.RawMessage `json:",omitempty"`
 }
 
+// RealTempDir is t.TempDir with symlinks resolved, so it equals the path a
+// child process reports from getcwd (macOS TMPDIR is under the /var link).
+func RealTempDir(t testing.TB) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // SourceWorkspace checks plumbing only, not an Agent filesystem sandbox.
 func SourceWorkspace(t testing.TB) string {
 	t.Helper()
-	parent := t.TempDir()
+	parent := RealTempDir(t)
 	for _, name := range []string{"service", "sibling"} {
 		dir := filepath.Join(parent, name)
 		if err := os.Mkdir(dir, 0700); err != nil {
