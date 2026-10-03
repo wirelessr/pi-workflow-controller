@@ -48,6 +48,8 @@ type task struct {
 	Trigger string `json:"trigger,omitempty"`
 	// Verify is the claim a verifier checks.
 	Verify *verifyTask `json:"verify,omitempty"`
+	// Report is what the report Step must copy and cover.
+	Report *reportTask `json:"report,omitempty"`
 	// Vision is the request a vision Step answers.
 	Vision *visionTask `json:"vision,omitempty"`
 }

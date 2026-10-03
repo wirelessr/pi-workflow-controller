@@ -247,7 +247,7 @@ func TestRawFileBoundaries(t *testing.T) {
 }
 
 func TestSchemaIDs(t *testing.T) {
-	want := map[string]bool{SkillsSchema: true, PromptSchema: true, IntakeSchema: true, FactsSchema: true, FactCheckSchema: true, FactStatusSchema: true, RoundSchema: true, VisionSchema: true, VisionBatchSchema: true, ObservationSchema: true, AuditSchema: true, StewardSchema: true, ClaimSchema: true, VerificationSchema: true, DeliverySchema: true}
+	want := map[string]bool{SkillsSchema: true, PromptSchema: true, IntakeSchema: true, FactsSchema: true, FactCheckSchema: true, FactStatusSchema: true, RoundSchema: true, VisionSchema: true, VisionBatchSchema: true, ObservationSchema: true, AuditSchema: true, StewardSchema: true, ClaimSchema: true, VerificationSchema: true, DeliverySchema: true, ReportSchema: true}
 	registry, err := contract.NewRegistry(Resources(), Schemas())
 	if err != nil {
 		t.Fatal(err)

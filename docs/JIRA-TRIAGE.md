@@ -33,5 +33,6 @@ Controller 只負責階段邊界的前置條件、exact committed Refs、確定�
 - 相對舊版的放寬（已列）：verifier 允許同 session 修復一次（舊版不修復），owner 檢查改為「該 session 只服務這個 verifier 的 attempts，且在這次 verification 的 group 內」；delivery 由 Controller 在程序內產生，不再驗證 Agent 抄寫的失敗史。
 - Verifier 的 inputs 含 allowed evidence 所在的 contract（例如 round 本身），因此能讀到其中的敘述；隔離靠 requirements，不是硬保證。
 - 結束條件：T2b pass、blocked，或任一上限（round 數、run 額度、steward challenge、S2 次數）。
+- 報告（S3）：fresh 的 report Step（不載私有 skill）拿到所有已提交結果，必須原樣抄寫 caller prompt 與 Controller 給的 claim 物件（最後一次驗證的 claim、delivery、T2b 與 passed／not-passed／none），對 Controller 從已提交 contract 組出的每個 gap（以 Ref 與 id 指名）恰好給一次處置，並宣告完整性：上限結束、claim 未通過或有 open gap 時必須是 incomplete。報告檔由 run 內展開的 renderer 產生，Go 以內嵌的同一 renderer 對已提交 inputs 重算並逐 byte 比對；結果須來自 closed fresh report session。舊版報告的 M6 dispositions、budget、report failures 由 rounds 的 Limit 與 recovery 紀錄取代（已列放寬）。
 
 匿名測試只證明結構與流程；真 Pi／provider／skills／live 能力尚未驗證。

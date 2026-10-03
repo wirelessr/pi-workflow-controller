@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/triage/report.v1.json",
+  "description": "The report of the investigation over its committed results; it states no new claim or verdict",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "request",
+    "claim",
+    "conclusion",
+    "completeness",
+    "gaps",
+    "new_gaps",
+    "next_steps",
+    "report_file"
+  ],
+  "properties": {
+    "request": {
+      "type": "string",
+      "description": "The caller's prompt, copied exactly"
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim",
+        "delivery",
+        "t2b",
+        "outcome"
+      ],
+      "description": "The last verified claim as the request names it, copied exactly",
+      "properties": {
+        "claim": {
+          "anyOf": [
+            {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delivery": {
+          "anyOf": [
+            {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "t2b": {
+          "anyOf": [
+            {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "passed",
+            "not-passed",
+            "none"
+          ]
+        }
+      }
+    },
+    "conclusion": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "What the investigation established and how sure it is, from the committed results only"
+    },
+    "completeness": {
+      "enum": [
+        "complete",
+        "incomplete"
+      ]
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ref",
+          "id",
+          "disposition",
+          "note"
+        ],
+        "description": "Each gap the request lists, once",
+        "properties": {
+          "ref": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+          },
+          "id": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+          },
+          "disposition": {
+            "enum": [
+              "open",
+              "resolved",
+              "not-applicable"
+            ]
+          },
+          "note": {
+            "type": "string",
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    "new_gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"
+      }
+    },
+    "next_steps": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "\\S"
+      }
+    },
+    "report_file": {
+      "const": "triage-report"
+    }
+  }
+}

@@ -94,6 +94,9 @@ type ClaimRecord struct {
 // Limit names; with LimitRun and no Records, the budget could not cover
 // even the first round.
 type Rounds struct {
+	// Inputs are every committed result of the investigation, labeled,
+	// for the report.
+	Inputs   []LabeledRef
 	Records  []RoundRecord
 	Stewards []StewardRecord
 	Claims   []ClaimRecord
@@ -390,6 +393,7 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 			return out, err
 		}
 	}
+	out.Inputs = inputs
 	return out, nil
 }
 
