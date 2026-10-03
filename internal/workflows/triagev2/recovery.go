@@ -198,6 +198,12 @@ func ConfirmTaskRecovery(ctx context.Context, r *engine.Run, err error, sibling 
 	}
 	report, e := r.CloseSessionReport(ctx, task.Handle)
 	if e != nil {
+		// A close that fails, including one that runs out of cleanup time,
+		// is a cleanup failure, not a run deadline.
+		var f *engine.Failure
+		if !errors.As(e, &f) {
+			e = &engine.Failure{Code: engine.CleanupFailed, Origin: engine.OriginProtocol, Phase: "triage-recovery", Message: e.Error(), DispatchAccepted: engine.AcceptedNo, Cause: e}
+		}
 		return result, RecoveryError(e, err)
 	}
 	if !SameIdentity(report.Identity, identity) || !report.ConfirmsLocalClose(identity.SessionID) {
@@ -210,11 +216,11 @@ func ConfirmTaskRecovery(ctx context.Context, r *engine.Run, err error, sibling 
 	return result, nil
 }
 
-// RetryInputs is only for supplied-input work: it reruns run from the same
-// committed inputs after a confirmed recoverable failure, passing the
-// failure diagnostic as feedback. Recovery never authorizes a remote
-// operation. It retries only execution failures, never a rejected contract,
-// so a Step inside run keeps its own contract repair.
+// RetryInputs reruns run from the same committed inputs after a confirmed
+// recoverable failure, passing the failure diagnostic as feedback. Recovery
+// never authorizes a new remote operation beyond what the rerun Step is
+// already allowed. It retries only execution failures, never a rejected
+// contract, so a Step inside run keeps its own contract repair.
 func RetryInputs(ctx context.Context, r *engine.Run, scope *engine.Scope, key, output string, retries int, run func(context.Context, *engine.Scope, *engine.Feedback) (contract.Ref, error), recovered func(context.Context, RecoveryFailure, error, bool) error) (contract.Ref, []RecoveryFailure, error) {
 	var ref contract.Ref
 	var failures []RecoveryFailure

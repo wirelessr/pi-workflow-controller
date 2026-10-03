@@ -241,23 +241,14 @@ func factsFor(call agentCall) Facts {
 		Gaps:           []Gap{}}
 }
 
+// checkFor is the fake validator: one verdict per id the request lists in
+// judge, so the tests exercise the channel the real validator reads.
 func checkFor(t *testing.T, call agentCall, verdict func(id string) string) FactCheck {
 	t.Helper()
-	ref := call.citable("facts under review")
-	raw, err := os.ReadFile(ref.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var env struct {
-		Data Facts `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		t.Fatal(err)
-	}
 	intake := call.citable("intake")
-	out := FactCheck{Subject: ref, Items: []FactVerdict{}, Warnings: []Warning{}, Gaps: []Gap{}}
-	for _, id := range judgedIDs(env.Data) {
-		out.Items = append(out.Items, FactVerdict{ID: id, Verdict: verdict(id), Reason: "checked against the cited comment", Basis: []Evidence{cite(intake, "page-0")}})
+	out := FactCheck{Subject: call.citable("facts under review"), Items: []FactVerdict{}, Warnings: []Warning{}, Gaps: []Gap{}}
+	for _, id := range call.Task.Judge {
+		out.Items = append(out.Items, FactVerdict{ID: id, Verdict: verdict(id), Reason: "checked against the cited source", Basis: []Evidence{cite(intake, "page-0")}})
 	}
 	return out
 }
@@ -393,6 +384,9 @@ func TestS0(t *testing.T) {
 					}
 					if strings.Join(labels, ",") != "intake,caller prompt,facts under review" || len(call.Request.Inputs) != 3 || call.Request.Feedback != nil {
 						t.Errorf("validator sees %v, %d inputs, feedback %v; want only the evidence and the facts", labels, len(call.Request.Inputs), call.Request.Feedback)
+					}
+					if want := judgedIDs(decodeRef[Facts](t, nil, call.citable("facts under review"))); strings.Join(call.Task.Judge, ",") != strings.Join(want, ",") {
+						t.Errorf("validator is asked to judge %v, want %v", call.Task.Judge, want)
 					}
 				}
 				if call.Role == "fact-check" && rounds["fact-check"] == 1 {

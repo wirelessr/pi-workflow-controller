@@ -2,7 +2,9 @@ package triagev2
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"slices"
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
@@ -90,13 +92,25 @@ type Candidate struct {
 	Premises        []string   `json:"premises"`
 	AllowedEvidence []Evidence `json:"allowed_evidence"`
 	CodeRefs        []CodeRef  `json:"code_refs"`
-	Basis           string     `json:"basis"`
+	NoCodeBasis     bool       `json:"no_code_basis"`
+	Verification    string     `json:"verification"`
 }
 
+// CodeRef attributes code the claim relies on to the revision it was read
+// at; Evidence is the committed copy of the excerpt.
 type CodeRef struct {
-	Repo   string `json:"repo"`
-	Commit string `json:"commit"`
-	Path   string `json:"path"`
+	Repo     string     `json:"repo"`
+	Ref      string     `json:"ref"`
+	Path     string     `json:"path"`
+	Relation string     `json:"relation"`
+	Basis    *BuildRef  `json:"basis"`
+	Evidence []Evidence `json:"evidence"`
+}
+
+// BuildRef names a deployed build: in this round (nil Ref) or in an input.
+type BuildRef struct {
+	Ref *contract.Ref `json:"ref"`
+	ID  string        `json:"id"`
 }
 
 type GapRef struct {
@@ -152,7 +166,7 @@ func checkRound(ctx context.Context, r *engine.Run, ref contract.Ref, c roundChe
 		return ok
 	}
 	ids := idSet{}
-	if err := checkDeclared(ids, cite, "facts_update", v.FactsUpdate, v.TimeAnchors, v.VisionRequests, visionRef); err != nil {
+	if err := checkDeclared(ids, cite, "facts_update", v.FactsUpdate, v.TimeAnchors, v.VisionRequests, visionRef, "an input of this request holding the image, or null for an image this contract fetched itself"); err != nil {
 		return v, err
 	}
 	if v.Identity != nil {
@@ -179,14 +193,18 @@ func checkRound(ctx context.Context, r *engine.Run, ref contract.Ref, c roundChe
 		}
 	}
 	if v.Candidate != nil {
-		if err := citeAll(cite, "candidate.allowed_evidence", v.Candidate.AllowedEvidence); err != nil {
+		if err := checkCandidate(ctx, r, *v.Candidate, v.DeployedBuilds, in, cite); err != nil {
 			return v, err
 		}
 	}
 	for i, d := range v.GapDispositions {
 		field := fmt.Sprintf("gap_dispositions[%d]", i)
-		if err := checkGapRef(ctx, r, field+".gap", d.Gap, in); err != nil {
+		gaps, err := inputItems(ctx, r, field+".gap.ref", d.Gap.Ref, in, "gaps")
+		if err != nil {
 			return v, err
+		}
+		if !slices.Contains(gaps, d.Gap.ID) {
+			return v, fmt.Errorf("%s.gap.id: %s has no gap %q", field, describeRef(d.Gap.Ref), d.Gap.ID)
 		}
 		if err := citeAll(cite, field+".evidence", d.Evidence); err != nil {
 			return v, err
@@ -226,11 +244,11 @@ func checkIdentity(ids idSet, cite func(string, Evidence) error, v Identity, abs
 		if err := ids.add(field, d.ID); err != nil {
 			return err
 		}
-		if gap, ok := absent[decisionKey(d)]; ok {
-			return fmt.Errorf("%s: this %s decision was not accepted too often and is recorded absent (%s); do not declare it again", field, d.Fact, gap)
-		}
 		if d.Status != "confirmed" {
 			continue
+		}
+		if gap, ok := absent[decisionKey(d)]; ok {
+			return fmt.Errorf("%s: confirming %s %q was not accepted too often and is recorded absent (%s); do not declare it again", field, d.Fact, *d.Value, gap)
 		}
 		if prior, ok := confirmed[d.Fact]; ok {
 			return fmt.Errorf("%s: %s is already confirmed at %s; want at most one confirmed decision per fact", field, d.Fact, prior)
@@ -247,16 +265,16 @@ func checkIdentity(ids idSet, cite func(string, Evidence) error, v Identity, abs
 			return fmt.Errorf("%s.row: got %d; lookup %q has %d rows", field, *d.Row, l.ID, len(l.Rows))
 		}
 		row := l.Rows[*d.Row]
-		want := l.Stack
+		want, column := l.Stack, "stack"
 		if d.Fact != "home_pop" {
 			got := row.column(d.Fact)
 			if got == nil {
 				return fmt.Errorf("%s.value: lookup %q row %d has no %s; a confirmed value must equal the row", field, l.ID, *d.Row, d.Fact)
 			}
-			want = *got
+			want, column = *got, d.Fact
 		}
 		if *d.Value != want {
-			return fmt.Errorf("%s.value: got %q; want %q, the %s of lookup %q row %d", field, *d.Value, want, map[bool]string{true: "stack", false: d.Fact}[d.Fact == "home_pop"], l.ID, *d.Row)
+			return fmt.Errorf("%s.value: got %q; want %q, the %s of lookup %q row %d", field, *d.Value, want, column, l.ID, *d.Row)
 		}
 		for _, name := range d.Identifiers {
 			if row.column(name) == nil {
@@ -281,62 +299,128 @@ func checkReceipt(field string, q Receipt, cite func(string, Evidence) error) er
 	if !from.Before(to) {
 		return fmt.Errorf("%s: from %q is not strictly before to %q; want a nonzero UTC window", field, q.From, q.To)
 	}
+	if !nonblank(q.Source) || !nonblank(q.Condition) || !nonblank(q.Outcome) {
+		return fmt.Errorf("%s: source, condition and outcome must not be blank", field)
+	}
 	if err := citeAll(cite, field+".time_basis", q.TimeBasis); err != nil {
 		return err
 	}
 	return citeAll(cite, field+".evidence", q.Evidence)
 }
 
-// checkGapRef requires the named gap to exist in the named input.
-func checkGapRef(ctx context.Context, r *engine.Run, field string, g GapRef, in Inputs) error {
-	if _, ok := in.Citable[g.Ref]; !ok {
-		return fmt.Errorf("%s.ref: got %s; want an input of this request that owns the gap", field, describeRef(g.Ref))
-	}
-	raw, err := engine.ReadContract(ctx, r, g.Ref)
-	if err != nil {
+// checkCandidate keeps the claim checkable from evidence alone: allowed
+// evidence resolves, every code excerpt is allowed evidence, and code read
+// at the deployed revision names the deployed build it rests on.
+func checkCandidate(ctx context.Context, r *engine.Run, c Candidate, builds []Build, in Inputs, cite func(string, Evidence) error) error {
+	if err := citeAll(cite, "candidate.allowed_evidence", c.AllowedEvidence); err != nil {
 		return err
 	}
-	owner, err := contract.DecodePublication[struct {
-		Gaps []Gap `json:"gaps"`
-	}](raw)
-	if err != nil {
-		return err
+	allowed := map[citedFile]bool{}
+	for _, e := range c.AllowedEvidence {
+		allowed[fileOf(e)] = true
 	}
-	for _, gap := range owner.Data.Gaps {
-		if gap.ID == g.ID {
-			return nil
+	own := []string{}
+	for _, b := range builds {
+		own = append(own, b.ID)
+	}
+	for i, code := range c.CodeRefs {
+		field := fmt.Sprintf("candidate.code_refs[%d]", i)
+		for j, e := range code.Evidence {
+			if err := cite(fmt.Sprintf("%s.evidence[%d]", field, j), e); err != nil {
+				return err
+			}
+			if !allowed[fileOf(e)] {
+				return fmt.Errorf("%s.evidence[%d]: file %q is not in candidate.allowed_evidence; list every code excerpt there so a verifier may read it", field, j, e.FileID)
+			}
+		}
+		if code.Basis == nil {
+			continue
+		}
+		ids, where := own, "this round's deployed_builds"
+		if code.Basis.Ref != nil {
+			var err error
+			if ids, err = inputItems(ctx, r, field+".basis.ref", *code.Basis.Ref, in, "deployed_builds"); err != nil {
+				return err
+			}
+			where = "the deployed_builds of " + describeRef(*code.Basis.Ref)
+		}
+		if !slices.Contains(ids, code.Basis.ID) {
+			return fmt.Errorf("%s.basis.id: got %q; want the id of a build in %s", field, code.Basis.ID, where)
 		}
 	}
-	return fmt.Errorf("%s.id: %s has no gap %q", field, describeRef(g.Ref), g.ID)
+	return nil
 }
 
-// factKey and decisionKey identify a declared fact across rounds for the
-// rejection limit; item ids are only unique within one contract.
+type citedFile struct {
+	ref    contract.Ref
+	fileID string
+}
+
+func fileOf(e Evidence) citedFile {
+	f := citedFile{fileID: e.FileID}
+	if e.Ref != nil {
+		f.ref = *e.Ref
+	}
+	return f
+}
+
+// inputItems reads the ids of a list in an input of this request, such as
+// its gaps or deployed builds.
+func inputItems(ctx context.Context, r *engine.Run, field string, ref contract.Ref, in Inputs, list string) ([]string, error) {
+	if _, ok := in.Citable[ref]; !ok {
+		return nil, fmt.Errorf("%s: got %s; want an input of this request", field, describeRef(ref))
+	}
+	raw, err := engine.ReadContract(ctx, r, ref)
+	if err != nil {
+		return nil, err
+	}
+	p, err := contract.DecodePublication[map[string]json.RawMessage](raw)
+	if err != nil {
+		return nil, err
+	}
+	var items []struct {
+		ID string `json:"id"`
+	}
+	if data, ok := p.Data[list]; ok {
+		if err := json.Unmarshal(data, &items); err != nil {
+			return nil, fmt.Errorf("%s: %s: %w", field, list, err)
+		}
+	}
+	ids := []string{}
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids, nil
+}
+
+// factKey, decisionKey and anchorKey identify a declared item across
+// rounds for the rejection limit; item ids are only unique within one
+// contract.
 func factKey(f Fact) string { return "fact:" + f.Kind + "=" + f.Value }
 
-func decisionKey(d Decision) string {
-	value := ""
-	if d.Value != nil {
-		value = *d.Value
-	}
-	return "identity:" + d.Fact + "=" + value + ":" + d.Status
-}
+func decisionKey(d Decision) string { return "identity:" + d.Fact + "=" + *d.Value }
 
-func anchorKey(a TimeAnchor) string { return "anchor:" + a.UTC }
+func anchorKey(a TimeAnchor) string { return "anchor:" + a.Event + "@" + a.UTC }
 
-// roundJudged lists the items of a round the fact check must judge.
-func roundJudged(v Round) []string {
-	var ids []string
+// judged is an item of a round the fact check must judge, with its key.
+type judged struct{ id, key string }
+
+// roundJudged lists the declared facts, anchors and confirmed identity
+// decisions; an unconfirmed decision unlocks nothing and is not judged.
+func roundJudged(v Round) []judged {
+	var out []judged
 	for _, f := range v.FactsUpdate {
-		ids = append(ids, f.ID)
+		out = append(out, judged{f.ID, factKey(f)})
 	}
 	for _, a := range v.TimeAnchors {
-		ids = append(ids, a.ID)
+		out = append(out, judged{a.ID, anchorKey(a)})
 	}
 	if v.Identity != nil {
 		for _, d := range v.Identity.Decisions {
-			ids = append(ids, d.ID)
+			if d.Status == "confirmed" {
+				out = append(out, judged{d.ID, decisionKey(d)})
+			}
 		}
 	}
-	return ids
+	return out
 }

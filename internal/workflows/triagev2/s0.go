@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
@@ -16,7 +15,7 @@ const intakeRequirements = `Mechanical retrieval only. Save the raw sources the 
 
 const factsRequirements = `Declare candidate facts from text: the committed intake files, the caller prompt (its hints are candidate sources, not authorization) and anything intake did not land that you fetch read-only from the ticket system into this contract's evidence files. Run no runtime or database query; identity is confirmed later. Missing identity or time is a gap, not a failure.`
 
-const factCheckRequirements = `You are an independent reader of the facts under review. Give one verdict per fact and time anchor by reading the evidence each cites; report disagreements as warnings. Judge support only, not truth, and run no runtime or database query.`
+const factCheckRequirements = `You are an independent reader of the facts under review. Give one verdict for each item id listed in judge by reading the evidence the item cites; report disagreements as warnings. Judge support only, not truth, and run no runtime or database query.`
 
 // S0Models binds each S0 role to its model; the workflow definition names
 // them, nothing here defaults.
@@ -78,14 +77,8 @@ func runS0(ctx context.Context, r *engine.Run, skills Skills, models S0Models, f
 			return engine.RetryAction{}, err
 		}
 		out.Facts = ref
-		vt := newTask(r, "fact-check", caller.Ticket, []string{skills.Entry("validator")}, factCheckRequirements, citationRequirements)
-		vt.Citable = []LabeledRef{{"intake", out.Intake}, {"caller prompt", out.Prompt}, {"facts under review", out.Facts}}
-		out.Check, err = RunTaskStep(ctx, r, TaskStep{Scope: s, Model: models.Validator, Stage: "fact-check", Key: "fact-check", Task: vt, Schema: FactCheckSchema, Inputs: vt.inputs(),
-			Validate: func(ctx context.Context, ref contract.Ref) error {
-				var err error
-				check, err = checkFactCheck(ctx, r, ref, out.Facts, []contract.Ref{out.Intake, out.Prompt, out.Facts}, judgedIDs(facts))
-				return err
-			}})
+		out.Check, check, err = runFactCheck(ctx, r, skills, factCheck{Scope: s, Model: models.Validator, Ticket: caller.Ticket, Key: "fact-check", Subject: out.Facts,
+			Citable: []LabeledRef{{"intake", out.Intake}, {"caller prompt", out.Prompt}, {"facts under review", out.Facts}}, IDs: judgedIDs(facts)})
 		if err != nil {
 			return engine.RetryAction{}, err
 		}
@@ -94,12 +87,8 @@ func runS0(ctx context.Context, r *engine.Run, skills Skills, models S0Models, f
 		if len(rejected) == 0 || state.RetryCount >= state.MaxRetries {
 			return result, nil
 		}
-		var reasons []string
-		for _, item := range rejected {
-			reasons = append(reasons, fmt.Sprintf("%s (%s): %s", item.ID, item.Verdict, item.Reason))
-		}
 		return engine.RetryAction{Again: true, Feedback: &engine.Feedback{
-			Message: "The independent check did not accept these items: " + strings.Join(reasons, "; ") + ". Extract the facts again: correct or drop each listed item, citing evidence that states it, and keep accepted items unchanged.",
+			Message: "The independent check did not accept these items: " + rejectedReasons(rejected) + ". Extract the facts again: correct or drop each listed item, citing evidence that states it, and keep accepted items unchanged.",
 			Refs:    []contract.Ref{out.Facts, out.Check}}}, nil
 	})
 	if err != nil {
@@ -107,11 +96,7 @@ func runS0(ctx context.Context, r *engine.Run, skills Skills, models S0Models, f
 	}
 	status := FactStatus{Facts: out.Facts, Check: out.Check, Gaps: []Gap{}}
 	for i, item := range notSupported(check) {
-		id := "not-accepted-" + item.ID
-		if len(id) > 128 {
-			id = fmt.Sprintf("not-accepted-%d", i+1)
-		}
-		status.Gaps = append(status.Gaps, Gap{ID: id,
+		status.Gaps = append(status.Gaps, Gap{ID: absentGapID("not-accepted-", item.ID, i+1),
 			Text: fmt.Sprintf("Item %s was judged %s by the independent check and is treated as absent: %s", item.ID, item.Verdict, item.Reason)})
 	}
 	if out.Status, err = root.Attach(ctx, engine.AttachSpec{Key: "fact-status", Output: contract.Spec{SchemaID: FactStatusSchema}, Data: status}); err != nil {

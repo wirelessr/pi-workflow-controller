@@ -2,8 +2,7 @@ package triagev2
 
 import (
 	"context"
-	"encoding/json"
-	"os"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -13,28 +12,6 @@ import (
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
 )
-
-// roundCheckFor judges every item of the round under review.
-func roundCheckFor(t *testing.T, call agentCall, verdict func(id string) string) FactCheck {
-	t.Helper()
-	ref := call.citable("facts under review")
-	raw, err := os.ReadFile(ref.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var env struct {
-		Data Round `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		t.Fatal(err)
-	}
-	intake := call.citable("intake")
-	out := FactCheck{Subject: ref, Items: []FactVerdict{}, Warnings: []Warning{}, Gaps: []Gap{}}
-	for _, id := range roundJudged(env.Data) {
-		out.Items = append(out.Items, FactVerdict{ID: id, Verdict: verdict(id), Reason: "checked against the lookup", Basis: []Evidence{cite(intake, "page-0")}})
-	}
-	return out
-}
 
 // investigatorCall is one investigator dispatch: the round it serves and
 // whether it repairs a rejected contract.
@@ -57,7 +34,7 @@ func stuck(v *Round) { v.Status = "stuck" }
 
 func TestRounds(t *testing.T) {
 	model := runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}
-	policy := RoundPolicy{MaxRounds: 3, MaxRejections: 2, TimeoutRetries: 1, RoundTimeout: 30 * time.Second, HandoffPercent: 80}
+	policy := RoundPolicy{MaxRounds: 3, MaxRejections: 2, TimeoutRetries: 1, RoundTimeout: 30 * time.Second, CheckTimeout: 30 * time.Second, HandoffPercent: 80}
 	allSupported := func(string) string { return "supported" }
 	for _, tc := range []struct {
 		name    string
@@ -78,17 +55,17 @@ func TestRounds(t *testing.T) {
 				}
 				c.round0(t, func(v *Round) {
 					v.Status, v.FactsUpdate, v.Identity, v.Receipts = "candidate", []Fact{}, nil, []Receipt{}
-					v.Candidate = &Candidate{Statement: "the error comes from svc", Premises: []string{}, AllowedEvidence: []Evidence{{FileID: "query-1"}}, CodeRefs: []CodeRef{{Repo: "svc", Commit: "abc123", Path: "main.go"}}, Basis: "runtime-verified"}
+					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
 				})
 				return ""
 			},
 			check: func(t *testing.T, out Rounds, calls []investigatorCall, handles []string) {
 				first, second := calls[0].Task, calls[1].Task
-				if first.Runtime != "identity-only" || !strings.Contains(first.Requirements, identityOnlyRequirements) || len(first.Skills) != 2 || !strings.HasSuffix(first.Skills[0], "identity/SKILL.md") || first.Round != 1 {
-					t.Errorf("identity round task = runtime %q skills %v", first.Runtime, first.Skills)
+				if !strings.Contains(first.Requirements, identityOnlyRequirements) || len(first.Skills) != 2 || !strings.HasSuffix(first.Skills[0], "identity/SKILL.md") || first.Round != 1 {
+					t.Errorf("identity round task = skills %v round %d", first.Skills, first.Round)
 				}
-				if second.Runtime != "open" || !strings.Contains(second.Requirements, `home stack "pop-a"`) || !strings.HasSuffix(second.Skills[0], "investigator/SKILL.md") || second.Round != 2 {
-					t.Errorf("second round task = runtime %q skills %v round %d", second.Runtime, second.Skills, second.Round)
+				if strings.Contains(second.Requirements, identityOnlyRequirements) || !strings.Contains(second.Requirements, `home stack "pop-a"`) || !strings.HasSuffix(second.Skills[0], "investigator/SKILL.md") || second.Round != 2 {
+					t.Errorf("second round task = skills %v round %d", second.Skills, second.Round)
 				}
 				var labels []string
 				for _, in := range second.Citable {
@@ -100,7 +77,7 @@ func TestRounds(t *testing.T) {
 				if calls[1].Request.Feedback != nil {
 					t.Errorf("second round feedback = %+v, want none", calls[1].Request.Feedback)
 				}
-				if out.HomeStack != "pop-a" || len(out.Records) != 2 || out.Records[1].Check != (contract.Ref{}) || out.Last.Status != "candidate" || out.Exhausted {
+				if out.HomeStack != "pop-a" || len(out.Records) != 2 || out.Records[1].Check != (contract.Ref{}) || out.Last.Status != "candidate" || out.Limit != "" {
 					t.Errorf("rounds = %+v", out)
 				}
 				if len(handles) != 2 || handles[0] != handles[1] {
@@ -116,7 +93,7 @@ func TestRounds(t *testing.T) {
 			agent: func(t *testing.T, c investigatorCall) string {
 				switch {
 				case c.round == 3 && c.repair:
-					if !strings.Contains(c.Request.Feedback.Message, "this home_pop decision was not accepted too often") {
+					if !strings.Contains(c.Request.Feedback.Message, `confirming home_pop "pop-a" was not accepted too often`) {
 						t.Errorf("repair feedback = %q", c.Request.Feedback.Message)
 					}
 					c.round0(t, func(v *Round) {
@@ -131,8 +108,8 @@ func TestRounds(t *testing.T) {
 			},
 			check: func(t *testing.T, out Rounds, calls []investigatorCall, handles []string) {
 				for _, c := range calls[1:] {
-					if c.Task.Runtime != "identity-only" {
-						t.Errorf("round %d runtime = %q", c.round, c.Task.Runtime)
+					if !strings.Contains(c.Task.Requirements, identityOnlyRequirements) {
+						t.Errorf("round %d is not identity-only", c.round)
 					}
 				}
 				if fb := calls[1].Request.Feedback; fb == nil || !strings.Contains(fb.Message, "d-pop (unsupported)") || len(fb.Refs) != 3 || fb.Refs[0] != out.Records[0].Round || fb.Refs[1] != out.Records[0].Check {
@@ -152,13 +129,90 @@ func TestRounds(t *testing.T) {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
+		{name: "a conflict note beside the confirmation does not close runtime, in either order", verdict: allSupported,
+			roles: "intake facts fact-check investigator fact-check investigator fact-check investigator",
+			agent: func(t *testing.T, c investigatorCall) string {
+				conflict := Decision{ID: "d-note", Fact: "home_pop", Value: ptr("pop-b"), Status: "conflict", Identifiers: []string{}, Reason: "the ticket says pop-b; the DB wins"}
+				c.round0(t, func(v *Round) {
+					switch c.round {
+					case 1:
+						v.Identity.Decisions = append(v.Identity.Decisions, conflict)
+					case 2:
+						v.Identity.Decisions = append([]Decision{conflict}, v.Identity.Decisions...)
+					default:
+						stuck(v)
+						v.Identity, v.FactsUpdate = nil, []Fact{}
+					}
+				})
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
+				for _, c := range calls[1:] {
+					if !strings.Contains(c.Task.Requirements, `home stack "pop-a"`) {
+						t.Errorf("round %d runtime is not open for pop-a", c.round)
+					}
+				}
+			}},
+		{name: "a later unconfirmed home stack closes runtime again", verdict: allSupported,
+			roles: "intake facts fact-check investigator fact-check investigator fact-check investigator",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					switch c.round {
+					case 2:
+						v.Identity.Decisions[0] = Decision{ID: "d-pop", Fact: "home_pop", Status: "unconfirmed", Identifiers: []string{}, Reason: "a second stack now has the same row"}
+					case 3:
+						stuck(v)
+						v.Identity, v.FactsUpdate = nil, []Fact{}
+					}
+				})
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
+				if !strings.Contains(calls[1].Task.Requirements, `home stack "pop-a"`) || !strings.Contains(calls[2].Task.Requirements, identityOnlyRequirements) || out.HomeStack != "" {
+					t.Errorf("runtime did not close after the unconfirmed decision: home %q", out.HomeStack)
+				}
+			}},
+		{name: "a rejected confirmation keeps the earlier home stack", verdict: func(id string) string {
+			if id == "d-pop-b" {
+				return "unsupported"
+			}
+			return "supported"
+		}, roles: "intake facts fact-check investigator fact-check investigator fact-check investigator",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					switch c.round {
+					case 2:
+						v.Identity.Lookups[1].Rows = []Row{{TenantID: ptr("17"), Orgkey: ptr("org-17")}}
+						v.Identity.Decisions[0] = Decision{ID: "d-pop-b", Fact: "home_pop", Value: ptr("pop-b"), Status: "confirmed", Lookup: ptr("l-b"), Row: ptr(0), Identifiers: []string{"orgkey"}, Reason: "row on pop-b"}
+					case 3:
+						stuck(v)
+						v.Identity, v.FactsUpdate = nil, []Fact{}
+					}
+				})
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
+				if !strings.Contains(calls[2].Task.Requirements, `home stack "pop-a"`) || out.HomeStack != "pop-a" {
+					t.Errorf("home = %q after a rejected confirmation of another stack", out.HomeStack)
+				}
+			}},
+		{name: "a blocked round ends the rounds", verdict: allSupported, roles: "intake facts fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) { v.Status, v.Unblock = "blocked", ptr("a kubeconfig for pop-c") })
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if out.Last.Status != "blocked" || out.Limit != "" || len(out.Records) != 1 {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
 		{name: "a timed-out round reruns in a fresh session from the same inputs", verdict: allSupported, policy: func(p *RoundPolicy) { p.RoundTimeout = time.Second },
 			roles: "intake facts fact-check investigator investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
 				if c.Request.Feedback == nil {
 					return "hold"
 				}
-				if c.Request.Feedback.SourceCode != string(engine.TimedOut) {
+				if c.Request.Feedback.SourceCode != string(engine.TimedOut) || !strings.HasPrefix(c.Request.Feedback.Message, rerunNote) {
 					t.Errorf("rerun feedback = %+v, want the timeout diagnostic", c.Request.Feedback)
 				}
 				c.round0(t, stuck)
@@ -212,7 +266,7 @@ func TestRounds(t *testing.T) {
 			roles: "intake facts fact-check investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, nil); return "" },
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
-				if !out.Exhausted || len(out.Records) != 1 || out.Last.Status != "continue" {
+				if out.Limit != LimitRounds || len(out.Records) != 1 || out.Last.Status != "continue" {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
@@ -264,20 +318,25 @@ func TestRounds(t *testing.T) {
 				if err != nil {
 					return engine.Result{}, err
 				}
+				// Every session is closed by the rounds themselves, not
+				// by the run's final cleanup.
+				for id, s := range r.Snapshot().Sessions {
+					if s.State != "Closed" {
+						t.Errorf("session %s is %s when the rounds return", id, s.State)
+					}
+				}
 				last := out.Records[len(out.Records)-1].Round
 				return engine.Result{Outputs: map[string]contract.Ref{"round": last}, Final: &engine.FinalSelection{Output: "round"}}, nil
 			}, func(t *testing.T, call agentCall) string {
-				switch {
-				case call.Role == "intake":
+				switch call.Role {
+				case "intake":
 					v, files := intakeFiles()
 					call.reply(t, v, files)
-				case call.Role == "facts":
+				case "facts":
 					call.reply(t, factsFor(call), nil)
-				case call.Role == "fact-check" && call.citable("facts under review").SchemaID == FactsSchema:
-					call.reply(t, checkFor(t, call, allSupported), nil)
-				case call.Role == "fact-check":
-					call.reply(t, roundCheckFor(t, call, tc.verdict), nil)
-				case call.Role == "investigator":
+				case "fact-check":
+					call.reply(t, checkFor(t, call, tc.verdict), nil)
+				case "investigator":
 					c := investigatorCall{agentCall: call, round: call.Task.Round, repair: call.Request.Feedback != nil && strings.HasPrefix(call.Request.Feedback.Message, "Previous contract")}
 					calls = append(calls, c)
 					return tc.agent(t, c)
@@ -308,5 +367,27 @@ func TestRounds(t *testing.T) {
 			}
 			tc.check(t, out, calls, handles)
 		})
+	}
+}
+
+func TestRoundFits(t *testing.T) {
+	p := RoundPolicy{TimeoutRetries: 1}
+	snapshot := func(sessions, attempts int) engine.Snapshot {
+		s := engine.Snapshot{Policy: engine.RunPolicy{MaxTotalSessions: 10, MaxTotalAttempts: 20}, Sessions: map[string]engine.SessionStatus{}, Attempts: map[string]engine.AttemptState{}}
+		for i := range sessions {
+			s.Sessions[fmt.Sprint(i)] = engine.SessionStatus{}
+		}
+		for i := range attempts {
+			s.Attempts[fmt.Sprint(i)] = engine.AttemptState{}
+		}
+		return s
+	}
+	for _, tc := range []struct {
+		sessions, attempts int
+		fits               bool
+	}{{6, 11, true}, {7, 11, false}, {6, 12, false}} {
+		if got := roundFits(snapshot(tc.sessions, tc.attempts), p); got != tc.fits {
+			t.Errorf("roundFits(%d sessions, %d attempts) = %v, want %v", tc.sessions, tc.attempts, got, tc.fits)
+		}
 	}
 }

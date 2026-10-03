@@ -31,13 +31,9 @@ type TaskStep struct {
 	// Feedback is given to the first attempt, for example a business retry's
 	// reason; a contract repair re-attempt replaces it with the rejection.
 	Feedback *engine.Feedback
-	// Timeout bounds each attempt; zero means 30 minutes.
+	// Timeout bounds each attempt; zero means the run policy's attempt
+	// timeout.
 	Timeout time.Duration
-	// NoRepair is for a Step that already sits inside an outer retry layer
-	// (RetryInputs) with its own feedback loop: adding the contract repair
-	// there would double-retry the same session, corrupting the outer
-	// layer's failure accounting.
-	NoRepair bool
 }
 
 // RunTaskStep allows a single repair retry covering both contract-shape
@@ -55,7 +51,7 @@ func RunTaskStep(ctx context.Context, r *engine.Run, t TaskStep) (contract.Ref, 
 	if err != nil {
 		return out.Output, err
 	}
-	return CloseTaskStep(ctx, r, ts.Handle, ts.Identity, t.Stage, out, t.Recovery)
+	return out.Output, ts.Close(ctx, r, t.Stage, out, t.Recovery)
 }
 
 // TaskSession is a Step session that may serve more than one Step, such as
@@ -86,17 +82,13 @@ func OpenTaskSession(ctx context.Context, r *engine.Run, t TaskStep) (TaskSessio
 // Run dispatches t on the session with the single contract repair and
 // leaves the session open. A failure with Recovery is a *TaskFailure.
 func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engine.StepResult, error) {
-	s, stage, key, recovery, validate, repairable := t.Scope, t.Stage, t.Key, t.Recovery, t.Validate, !t.NoRepair
+	s, stage, key, recovery, validate := t.Scope, t.Stage, t.Key, t.Recovery, t.Validate
 	h, identity := ts.Handle, ts.Identity
 	prompt, err := json.Marshal(t.Task)
 	if err != nil {
 		return engine.StepResult{}, err
 	}
-	timeout := t.Timeout
-	if timeout == 0 {
-		timeout = 30 * time.Minute
-	}
-	spec := engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: t.Inputs, Feedback: t.Feedback, Output: contract.Spec{SchemaID: t.Schema}, Timeout: timeout}
+	spec := engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: t.Inputs, Feedback: t.Feedback, Output: contract.Spec{SchemaID: t.Schema}, Timeout: t.Timeout}
 	var out engine.StepResult
 	var lastFeedback *engine.Feedback
 	// Mechanical contract-shape repair, one budgeted re-attempt on the same
@@ -136,7 +128,7 @@ func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engin
 			}
 			if ve := validate(ctx, out.Output); ve == nil {
 				break
-			} else if repairable && repairCount < repairBudget {
+			} else if repairCount < repairBudget {
 				lastFeedback = &engine.Feedback{Message: "Previous contract was published but rejected by acceptance validation. Fix exactly the reported violation and republish the same contract; do not change substance: " + ve.Error()}
 				repairCount++
 				continue
@@ -146,7 +138,7 @@ func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engin
 			}
 		}
 		var failure *engine.Failure
-		if !repairable || !errors.As(e, &failure) || failure.Code != engine.ContractInvalid || repairCount >= repairBudget {
+		if !errors.As(e, &failure) || failure.Code != engine.ContractInvalid || repairCount >= repairBudget {
 			err = e
 			break
 		}
@@ -175,19 +167,25 @@ func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engin
 	return out, nil
 }
 
-func CloseTaskStep(ctx context.Context, r *engine.Run, h *engine.SessionHandle, identity runtime.Identity, stage string, out engine.StepResult, recovery bool) (contract.Ref, error) {
-	if recovery && out.Execution.SessionID != identity.SessionID {
-		return out.Output, fmt.Errorf("task execution identity mismatch")
+// Close strictly closes the session after out, the last Step it served:
+// the execution must have run in this session and the close must be
+// locally confirmed, or it is a cleanup failure.
+func (ts TaskSession) Close(ctx context.Context, r *engine.Run, stage string, out engine.StepResult, recovery bool) error {
+	sessionID := out.Execution.SessionID
+	if recovery {
+		if sessionID != ts.Identity.SessionID {
+			return fmt.Errorf("%s execution identity mismatch", stage)
+		}
 	}
-	closed, err := r.CloseSessionReport(ctx, h)
+	closed, err := r.CloseSessionReport(ctx, ts.Handle)
 	if err != nil {
 		if recovery {
-			return out.Output, &TaskFailure{Cause: err, Handle: h, Identity: identity, Stage: stage, Attempt: out.AttemptID}
+			return &TaskFailure{Cause: err, Handle: ts.Handle, Identity: ts.Identity, Stage: stage, Attempt: out.AttemptID}
 		}
-		return out.Output, err
+		return err
 	}
-	if !closed.ConfirmsLocalClose(out.Execution.SessionID) || recovery && closed.Identity != identity {
-		return out.Output, fmt.Errorf("%s cleanup not confirmed", stage)
+	if !closed.ConfirmsLocalClose(sessionID) || recovery && !SameIdentity(closed.Identity, ts.Identity) {
+		return &engine.Failure{Code: engine.CleanupFailed, Origin: engine.OriginProtocol, Phase: "triage-" + stage, Message: stage + " cleanup not confirmed", DispatchAccepted: engine.AcceptedNo, Cleanup: &closed}
 	}
-	return out.Output, nil
+	return nil
 }

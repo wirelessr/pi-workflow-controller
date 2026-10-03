@@ -449,7 +449,8 @@
             "premises",
             "allowed_evidence",
             "code_refs",
-            "basis"
+            "no_code_basis",
+            "verification"
           ],
           "description": "A claim checkable by a reader with no investigation history",
           "properties": {
@@ -479,33 +480,112 @@
                 "additionalProperties": false,
                 "required": [
                   "repo",
-                  "commit",
-                  "path"
+                  "ref",
+                  "path",
+                  "relation",
+                  "basis",
+                  "evidence"
                 ],
-                "description": "Code the claim relies on, at the exact revision it was read",
+                "description": "Code the claim relies on, at the revision it was read",
                 "properties": {
                   "repo": {
                     "type": "string",
                     "pattern": "\\S"
                   },
-                  "commit": {
+                  "ref": {
                     "type": "string",
-                    "pattern": "\\S"
+                    "pattern": "\\S",
+                    "description": "The revision read: commit, tag or branch"
                   },
                   "path": {
                     "type": "string",
                     "pattern": "\\S"
+                  },
+                  "relation": {
+                    "enum": [
+                      "deployed",
+                      "head",
+                      "other",
+                      "unknown"
+                    ],
+                    "description": "How the revision read relates to what runs"
+                  },
+                  "basis": {
+                    "anyOf": [
+                      {
+                        "$ref": "https://pi-workflow-controller.local/schemas/triage/round.v1.json#/$defs/build_ref"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "For deployed: the deployed build the revision was taken from"
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+                    },
+                    "description": "The committed copy of the excerpt, also listed in allowed_evidence"
                   }
-                }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "relation": {
+                          "const": "deployed"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "basis": {
+                          "type": "object"
+                        }
+                      }
+                    }
+                  }
+                ]
               }
             },
-            "basis": {
+            "verification": {
               "enum": [
                 "runtime-verified",
                 "inference"
               ]
+            },
+            "no_code_basis": {
+              "type": "boolean",
+              "description": "True only when the claim rests on no code; then code_refs is empty"
             }
-          }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "no_code_basis": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code_refs": {
+                    "maxItems": 0
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "code_refs": {
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          ]
         }
       ]
     },
@@ -536,7 +616,7 @@
         ],
         "properties": {
           "gap": {
-            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap_ref"
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/round.v1.json#/$defs/gap_ref"
           },
           "disposition": {
             "enum": [
@@ -622,5 +702,48 @@
         }
       }
     }
-  ]
+  ],
+  "$defs": {
+    "gap_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "id"
+      ],
+      "description": "An earlier gap, named by the exact input that owns it and its id; never copy its text",
+      "properties": {
+        "ref": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+        },
+        "id": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+        }
+      }
+    },
+    "build_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "id"
+      ],
+      "description": "A deployed build: null ref for this round's deployed_builds, or an input round's exact Ref",
+      "properties": {
+        "ref": {
+          "anyOf": [
+            {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
+        }
+      }
+    }
+  }
 }

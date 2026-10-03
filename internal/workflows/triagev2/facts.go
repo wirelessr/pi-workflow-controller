@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/runtime"
 )
 
 const (
@@ -130,7 +132,7 @@ func checkFacts(ctx context.Context, r *engine.Run, ref contract.Ref, intake, pr
 	}
 	cite := citations{ctx, in, ref, p.Files}.check
 	visionRef := func(r *contract.Ref) bool { return r == nil || *r == intake }
-	if err := checkDeclared(idSet{}, cite, "facts", v.Facts, v.TimeAnchors, v.VisionRequests, visionRef); err != nil {
+	if err := checkDeclared(idSet{}, cite, "facts", v.Facts, v.TimeAnchors, v.VisionRequests, visionRef, "the intake input or null for an image this contract fetched itself"); err != nil {
 		return v, err
 	}
 	return v, checkGaps("gaps", v.Gaps)
@@ -161,23 +163,19 @@ func checkFactCheck(ctx context.Context, r *engine.Run, ref, subject contract.Re
 	for i, item := range v.Items {
 		field := fmt.Sprintf("items[%d]", i)
 		if !want[item.ID] {
-			return v, fmt.Errorf("%s.id: got %q; want an id of an item the subject declares for judgment", field, item.ID)
+			return v, fmt.Errorf("%s.id: got %q; want one of the ids listed in judge: %s", field, item.ID, strings.Join(ids, ", "))
 		}
 		if seen[item.ID] {
-			return v, fmt.Errorf("%s.id: %q already has a verdict; want exactly one per judged item", field, item.ID)
+			return v, fmt.Errorf("%s.id: %q already has a verdict; want exactly one per id listed in judge", field, item.ID)
 		}
 		seen[item.ID] = true
-		for j, e := range item.Basis {
-			if err := cite(fmt.Sprintf("%s.basis[%d]", field, j), e); err != nil {
-				return v, err
-			}
+		if err := citeAll(cite, field+".basis", item.Basis); err != nil {
+			return v, err
 		}
 	}
 	for i, w := range v.Warnings {
-		for j, e := range w.Basis {
-			if err := cite(fmt.Sprintf("warnings[%d].basis[%d]", i, j), e); err != nil {
-				return v, err
-			}
+		if err := citeAll(cite, fmt.Sprintf("warnings[%d].basis", i), w.Basis); err != nil {
+			return v, err
 		}
 	}
 	var missing []string
@@ -187,7 +185,7 @@ func checkFactCheck(ctx context.Context, r *engine.Run, ref, subject contract.Re
 		}
 	}
 	if len(missing) > 0 {
-		return v, fmt.Errorf("items: no verdict for %s; want exactly one per judged item", strings.Join(missing, ", "))
+		return v, fmt.Errorf("items: no verdict for %s; want exactly one per id listed in judge", strings.Join(missing, ", "))
 	}
 	return v, checkGaps("gaps", v.Gaps)
 }
@@ -219,16 +217,14 @@ func (s idSet) add(field, id string) error {
 // checkDeclared checks the facts, time anchors and vision requests a facts
 // or round contract declares: unique ids, resolvable citations, recomputed
 // anchors, and vision attachments from an allowed owner.
-func checkDeclared(ids idSet, cite func(string, Evidence) error, factsField string, facts []Fact, anchors []TimeAnchor, vision []VisionRequest, visionRef func(*contract.Ref) bool) error {
+func checkDeclared(ids idSet, cite func(string, Evidence) error, factsField string, facts []Fact, anchors []TimeAnchor, vision []VisionRequest, visionRef func(*contract.Ref) bool, visionWant string) error {
 	for i, f := range facts {
 		field := fmt.Sprintf("%s[%d]", factsField, i)
 		if err := ids.add(field, f.ID); err != nil {
 			return err
 		}
-		for j, e := range f.Evidence {
-			if err := cite(fmt.Sprintf("%s.evidence[%d]", field, j), e); err != nil {
-				return err
-			}
+		if err := citeAll(cite, field+".evidence", f.Evidence); err != nil {
+			return err
 		}
 	}
 	for i, a := range anchors {
@@ -249,11 +245,59 @@ func checkDeclared(ids idSet, cite func(string, Evidence) error, factsField stri
 			return err
 		}
 		if !visionRef(q.Attachment.Ref) {
-			return fmt.Errorf("%s.attachment.ref: got %s; want the intake or another input of this request holding the image, or null for an image this contract fetched itself", field, describeRef(*q.Attachment.Ref))
+			return fmt.Errorf("%s.attachment.ref: got %s; want %s", field, describeRef(*q.Attachment.Ref), visionWant)
 		}
 		if err := cite(field+".attachment", q.Attachment); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// factCheck is one independent judgment of the items a subject declares.
+type factCheck struct {
+	Scope    *engine.Scope
+	Model    runtime.ModelSpec
+	Ticket   string
+	Key      string
+	Round    int
+	Subject  contract.Ref
+	Citable  []LabeledRef
+	IDs      []string
+	Recovery bool
+	Timeout  time.Duration
+	Feedback *engine.Feedback
+}
+
+// runFactCheck runs the fact-check Step in a fresh session; the request
+// lists the ids to judge and Go requires exactly one verdict for each.
+func runFactCheck(ctx context.Context, r *engine.Run, skills Skills, fc factCheck) (contract.Ref, FactCheck, error) {
+	vt := newTask(r, "fact-check", fc.Ticket, []string{skills.Entry("validator")}, factCheckRequirements, citationRequirements)
+	vt.Round, vt.Citable, vt.Judge = fc.Round, fc.Citable, fc.IDs
+	var check FactCheck
+	ref, err := RunTaskStep(ctx, r, TaskStep{Scope: fc.Scope, Model: fc.Model, Stage: "fact-check", Key: fc.Key, Task: vt, Schema: FactCheckSchema, Inputs: vt.inputs(), Recovery: fc.Recovery, Timeout: fc.Timeout, Feedback: fc.Feedback,
+		Validate: func(ctx context.Context, ref contract.Ref) error {
+			var err error
+			check, err = checkFactCheck(ctx, r, ref, fc.Subject, vt.inputs(), fc.IDs)
+			return err
+		}})
+	return ref, check, err
+}
+
+// rejectedReasons formats the items a check did not accept for feedback.
+func rejectedReasons(items []FactVerdict) string {
+	var reasons []string
+	for _, item := range items {
+		reasons = append(reasons, fmt.Sprintf("%s (%s): %s", item.ID, item.Verdict, item.Reason))
+	}
+	return strings.Join(reasons, "; ")
+}
+
+// absentGapID names the gap for an item recorded absent; ids longer than
+// the schema allows fall back to a position.
+func absentGapID(prefix, id string, position int) string {
+	if gap := prefix + id; len(gap) <= 128 {
+		return gap
+	}
+	return fmt.Sprintf("%s%d", prefix, position)
 }

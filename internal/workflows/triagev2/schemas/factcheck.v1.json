@@ -17,7 +17,7 @@
     },
     "items": {
       "type": "array",
-      "description": "Exactly one verdict per fact id and time anchor id of the subject",
+      "description": "Exactly one verdict per item id the request lists in judge",
       "items": {
         "type": "object",
         "additionalProperties": false,

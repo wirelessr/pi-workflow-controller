@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"strings"
 	"time"
 
 	"pi-workflow-controller/internal/contract"
@@ -32,20 +31,21 @@ type RoundPolicy struct {
 	// MaxRounds is Rmax and includes the identity round.
 	MaxRounds int
 	// MaxRejections is Fmax: an item the check does not accept this many
-	// times is recorded absent with a gap.
+	// times across rounds is recorded absent with a gap.
 	MaxRejections int
-	// TimeoutRetries reruns a round that timed out, in a fresh session from
-	// the same committed inputs.
+	// TimeoutRetries reruns a round or its fact check that timed out, in a
+	// fresh session from the same committed inputs.
 	TimeoutRetries int
 	RoundTimeout   time.Duration
+	CheckTimeout   time.Duration
 	// HandoffPercent is the context usage at which the session is strictly
 	// closed and the next round starts fresh.
 	HandoffPercent float64
 }
 
 func (p RoundPolicy) check() error {
-	if p.MaxRounds < 1 || p.MaxRejections < 1 || p.TimeoutRetries < 0 || p.RoundTimeout <= 0 {
-		return fmt.Errorf("round policy needs MaxRounds and MaxRejections of at least 1, TimeoutRetries of at least 0 and a positive RoundTimeout")
+	if p.MaxRounds < 1 || p.MaxRejections < 1 || p.TimeoutRetries < 0 || p.RoundTimeout <= 0 || p.CheckTimeout <= 0 {
+		return fmt.Errorf("round policy needs MaxRounds and MaxRejections of at least 1, TimeoutRetries of at least 0 and positive RoundTimeout and CheckTimeout")
 	}
 	if math.IsNaN(p.HandoffPercent) || p.HandoffPercent <= 0 || p.HandoffPercent > 100 {
 		return fmt.Errorf("round policy needs a HandoffPercent in (0,100]")
@@ -61,12 +61,26 @@ type RoundRecord struct {
 
 // Rounds is the outcome of the round loop. Until the steward and
 // verification stages exist, a candidate, stuck or blocked round ends it.
+// Limit says what ended a round that still wanted to continue.
 type Rounds struct {
 	Records    []RoundRecord
 	Last       Round
-	Exhausted  bool
+	Limit      string
 	HomeStack  string
 	Recoveries []RecoveryFailure
+}
+
+const (
+	LimitRounds = "rounds"
+	LimitRun    = "run budget"
+)
+
+// ledger is the state the rounds carry: rejections per item key, items
+// recorded absent with their gap, and the confirmed home stack.
+type ledger struct {
+	rejections map[string]int
+	absent     map[string]string
+	home       string
 }
 
 // runRounds runs investigation rounds from the S0 outputs. A session is
@@ -79,25 +93,26 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 	}
 	root := r.Root()
 	inputs := []LabeledRef{{"caller prompt", s0.Prompt}, {"intake", s0.Intake}, {"facts", s0.Facts}, {"fact check", s0.Check}, {"fact status", s0.Status}}
-	rejections, absent := map[string]int{}, map[string]string{}
+	book := &ledger{rejections: map[string]int{}, absent: map[string]string{}}
 	var ts *TaskSession
 	var feedback *engine.Feedback
-	for n := 1; n <= policy.MaxRounds; n++ {
+	var last engine.StepResult
+	for n := 1; ; n++ {
 		names := []string{skills.Entry("investigator"), skills.Entry("core"), skills.Entry("identity")}
 		if n == 1 {
 			names = []string{skills.Entry("identity"), skills.Entry("core")}
 		}
-		runtimeAccess, gate := "identity-only", identityOnlyRequirements
-		if out.HomeStack != "" {
-			runtimeAccess, gate = "open", fmt.Sprintf(openRequirements, out.HomeStack)
+		gate := identityOnlyRequirements
+		if book.home != "" {
+			gate = fmt.Sprintf(openRequirements, book.home)
 		}
 		t := newTask(r, "investigator", s0.Ticket, names, roundRequirements, gate, fmt.Sprintf(budgetRequirements, policy.RoundTimeout), citationRequirements)
-		t.Round, t.Runtime, t.Citable = n, runtimeAccess, slices.Clone(inputs)
+		t.Round, t.Citable = n, slices.Clone(inputs)
 		var round Round
 		step := TaskStep{Model: models.Investigator, Stage: "investigator", Key: "round", Task: t, Schema: RoundSchema, Inputs: t.inputs(), Recovery: true, Timeout: policy.RoundTimeout,
 			Validate: func(ctx context.Context, ref contract.Ref) error {
 				var err error
-				round, err = checkRound(ctx, r, ref, roundCheck{inputs: t.inputs(), absent: absent})
+				round, err = checkRound(ctx, r, ref, roundCheck{inputs: t.inputs(), absent: book.absent})
 				return err
 			}}
 		ref, failures, err := RetryInputs(ctx, r, root, fmt.Sprintf("round-%d", n), "round", policy.TimeoutRetries, func(ctx context.Context, s *engine.Scope, retry *engine.Feedback) (contract.Ref, error) {
@@ -108,13 +123,22 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 				}
 				ts = &opened
 			}
+			if retry != nil {
+				retry = &engine.Feedback{Message: rerunNote + retry.Message, SourceAttemptID: retry.SourceAttemptID, SourceCode: retry.SourceCode}
+			}
 			step.Scope, step.Feedback = s, joinFeedback(retry, feedback)
 			res, err := ts.Run(ctx, r, step)
 			var failure *TaskFailure
 			if errors.As(err, &failure) {
-				// Recovery closes this session; a retry opens a fresh one.
+				// Recovery closes this session before a retry; any other
+				// failure ends the run, whose cleanup closes it.
 				ts = nil
+				return res.Output, err
 			}
+			if err == nil && res.Execution.SessionID != ts.Identity.SessionID {
+				return res.Output, fmt.Errorf("investigator execution identity mismatch")
+			}
+			last = res
 			return res.Output, err
 		}, nil)
 		out.Recoveries = append(out.Recoveries, failures...)
@@ -124,18 +148,18 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		record := RoundRecord{Round: ref}
 		inputs = append(inputs, LabeledRef{fmt.Sprintf("round %d", n), ref})
 		feedback = nil
-		if ids := roundJudged(round); len(ids) > 0 {
-			var notes []string
-			record.Check, record.Status, notes, err = judgeRound(ctx, r, s0, skills, models.Validator, n, ref, round, ids, policy.MaxRejections, rejections, absent, &out.HomeStack)
+		var supported map[string]bool
+		if len(roundJudged(round)) > 0 {
+			var fails []RecoveryFailure
+			record.Check, record.Status, supported, feedback, fails, err = judgeRound(ctx, r, skills, s0, models.Validator, policy, n, ref, round, book)
+			out.Recoveries = append(out.Recoveries, fails...)
 			if err != nil {
 				return out, err
 			}
 			inputs = append(inputs, LabeledRef{fmt.Sprintf("round %d fact check", n), record.Check}, LabeledRef{fmt.Sprintf("round %d fact status", n), record.Status})
-			if len(notes) > 0 {
-				feedback = &engine.Feedback{Message: strings.Join(notes, " "), Refs: []contract.Ref{ref, record.Check, record.Status}}
-			}
 		}
-		out.Records, out.Last = append(out.Records, record), round
+		updateHome(book, round, supported)
+		out.Records, out.Last, out.HomeStack = append(out.Records, record), round, book.home
 		if err := root.Decision(ctx, fmt.Sprintf("round-%d-recorded", n), "Investigation round accepted with status "+round.Status+"; not a verified finding", []contract.Ref{ref}); err != nil {
 			return out, err
 		}
@@ -143,11 +167,15 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 			break
 		}
 		if n == policy.MaxRounds {
-			out.Exhausted = true
+			out.Limit = LimitRounds
+			break
+		}
+		if !roundFits(r.Snapshot(), policy) {
+			out.Limit = LimitRun
 			break
 		}
 		if ts != nil {
-			handoff, note, err := capacityHandoff(ctx, r, *ts, policy.HandoffPercent)
+			handoff, note, err := capacityHandoff(ctx, r, *ts, last, policy.HandoffPercent)
 			if err != nil {
 				return out, err
 			}
@@ -158,91 +186,104 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		}
 	}
 	if ts != nil {
-		if err := closeTaskSession(ctx, r, *ts, "investigator"); err != nil {
+		if err := ts.Close(ctx, r, "investigator", last, true); err != nil {
 			return out, err
 		}
 	}
 	return out, nil
 }
 
-// judgeRound has an independent check judge the items a round declares,
-// counts rejections per item across rounds and records an item absent with
-// a gap once it reaches the limit. A supported home-stack decision sets or
-// clears the runtime gate.
-func judgeRound(ctx context.Context, r *engine.Run, s0 S0, skills Skills, model runtime.ModelSpec, n int, ref contract.Ref, round Round, ids []string, limit int, rejections map[string]int, absent map[string]string, home *string) (check, status contract.Ref, notes []string, err error) {
-	inputs := []contract.Ref{s0.Intake, s0.Prompt, ref}
-	vt := newTask(r, "fact-check", s0.Ticket, []string{skills.Entry("validator")}, factCheckRequirements, citationRequirements)
-	vt.Round = n
-	vt.Citable = []LabeledRef{{"intake", s0.Intake}, {"caller prompt", s0.Prompt}, {"facts under review", ref}}
+const rerunNote = "The previous attempt of this round timed out and its work was not committed; queries it started may still be running remotely, so reuse what the inputs already hold and narrow expensive queries. "
+
+// roundFits reports whether the run's session and attempt budgets still
+// cover one more round in the worst case: every Step of it retried after a
+// timeout and repaired once, plus its fact status record.
+func roundFits(s engine.Snapshot, p RoundPolicy) bool {
+	steps := 2 * (p.TimeoutRetries + 1)
+	return s.Policy.MaxTotalSessions-len(s.Sessions) >= steps && s.Policy.MaxTotalAttempts-len(s.Attempts) >= 2*steps+1
+}
+
+// judgeRound has an independent check judge what a round declares, counts
+// rejections per item across rounds and records an item absent with a gap
+// once it reaches the limit. It returns feedback for the next round.
+func judgeRound(ctx context.Context, r *engine.Run, skills Skills, s0 S0, model runtime.ModelSpec, policy RoundPolicy, n int, ref contract.Ref, round Round, book *ledger) (check, status contract.Ref, supported map[string]bool, feedback *engine.Feedback, failures []RecoveryFailure, err error) {
+	items := roundJudged(round)
+	citable := []LabeledRef{{"intake", s0.Intake}, {"caller prompt", s0.Prompt}, {"facts under review", ref}}
 	for _, cited := range roundCitedInputs(round) {
-		if !slices.Contains(inputs, cited) {
-			inputs = append(inputs, cited)
-			vt.Citable = append(vt.Citable, LabeledRef{"cited by the facts under review", cited})
+		if !slices.Contains(task{Citable: citable}.inputs(), cited) {
+			citable = append(citable, LabeledRef{"cited by the facts under review", cited})
 		}
+	}
+	var ids []string
+	for _, item := range items {
+		ids = append(ids, item.id)
 	}
 	var fc FactCheck
-	check, err = RunTaskStep(ctx, r, TaskStep{Scope: r.Root(), Model: model, Stage: "fact-check", Key: fmt.Sprintf("round-%d-fact-check", n), Task: vt, Schema: FactCheckSchema, Inputs: vt.inputs(),
-		Validate: func(ctx context.Context, cref contract.Ref) error {
-			var err error
-			fc, err = checkFactCheck(ctx, r, cref, ref, inputs, ids)
-			return err
-		}})
+	check, failures, err = RetryInputs(ctx, r, r.Root(), fmt.Sprintf("round-%d-fact-check", n), "check", policy.TimeoutRetries, func(ctx context.Context, s *engine.Scope, retry *engine.Feedback) (contract.Ref, error) {
+		var cref contract.Ref
+		var err error
+		cref, fc, err = runFactCheck(ctx, r, skills, factCheck{Scope: s, Model: model, Ticket: s0.Ticket, Key: "fact-check", Round: n, Subject: ref, Citable: citable, IDs: ids, Recovery: true, Timeout: policy.CheckTimeout, Feedback: retry})
+		return cref, err
+	}, nil)
 	if err != nil {
-		return check, status, nil, err
+		return check, status, nil, nil, failures, err
 	}
-	verdicts := map[string]FactVerdict{}
+	supported = map[string]bool{}
 	for _, item := range fc.Items {
-		verdicts[item.ID] = item
-	}
-	keys := map[string]string{}
-	for _, f := range round.FactsUpdate {
-		keys[f.ID] = factKey(f)
-	}
-	for _, a := range round.TimeAnchors {
-		keys[a.ID] = anchorKey(a)
-	}
-	var decisions []Decision
-	if round.Identity != nil {
-		decisions = round.Identity.Decisions
-	}
-	for _, d := range decisions {
-		keys[d.ID] = decisionKey(d)
-		if d.Fact == "home_pop" && verdicts[d.ID].Verdict == "supported" {
-			*home = ""
-			if d.Status == "confirmed" {
-				*home = *d.Value
-			}
-		}
+		supported[item.ID] = item.Verdict == "supported"
 	}
 	fs := FactStatus{Facts: ref, Check: check, Gaps: []Gap{}}
-	var rejected []string
-	for _, id := range ids {
-		item := verdicts[id]
-		if item.Verdict == "supported" {
+	rejected := notSupported(fc)
+	for _, item := range rejected {
+		key := ""
+		for _, j := range items {
+			if j.id == item.ID {
+				key = j.key
+			}
+		}
+		if book.rejections[key]++; book.rejections[key] < policy.MaxRejections {
 			continue
 		}
-		rejected = append(rejected, fmt.Sprintf("%s (%s): %s", id, item.Verdict, item.Reason))
-		key := keys[id]
-		if rejections[key]++; rejections[key] < limit {
-			continue
-		}
-		gap := fmt.Sprintf("not-accepted-r%d-%s", n, id)
-		if len(gap) > 128 {
-			gap = fmt.Sprintf("not-accepted-r%d-%d", n, len(fs.Gaps)+1)
-		}
-		absent[key] = gap
-		fs.Gaps = append(fs.Gaps, Gap{ID: gap, Text: fmt.Sprintf("Item %s of round %d was not accepted by the independent check %d times and is treated as absent; last verdict %s: %s", id, n, rejections[key], item.Verdict, item.Reason)})
+		gap := absentGapID(fmt.Sprintf("not-accepted-r%d-", n), item.ID, len(fs.Gaps)+1)
+		book.absent[key] = gap
+		fs.Gaps = append(fs.Gaps, Gap{ID: gap, Text: fmt.Sprintf("Item %s of round %d was not accepted by the independent check %d times and is treated as absent; last verdict %s: %s", item.ID, n, book.rejections[key], item.Verdict, item.Reason)})
 	}
 	if status, err = r.Root().Attach(ctx, engine.AttachSpec{Key: fmt.Sprintf("round-%d-fact-status", n), Output: contract.Spec{SchemaID: FactStatusSchema}, Data: fs}); err != nil {
-		return check, status, nil, err
+		return check, status, supported, nil, failures, err
 	}
-	if len(rejected) > 0 {
-		notes = append(notes, "The independent check of round "+fmt.Sprint(n)+" did not accept: "+strings.Join(rejected, "; ")+". Do not rely on these items; correct them with evidence that states them, or leave them.")
+	if len(rejected) == 0 {
+		return check, status, supported, nil, failures, nil
 	}
+	message := fmt.Sprintf("The independent check of round %d did not accept: %s. Do not rely on these items; correct them with evidence that states them, or leave them.", n, rejectedReasons(rejected))
 	if len(fs.Gaps) > 0 {
-		notes = append(notes, fmt.Sprintf("%d of them reached the rejection limit and are recorded absent in the round %d fact status.", len(fs.Gaps), n))
+		message += fmt.Sprintf(" %d of them reached the rejection limit and are recorded absent in the round %d fact status.", len(fs.Gaps), n)
 	}
-	return check, status, notes, nil
+	return check, status, supported, &engine.Feedback{Message: message, Refs: []contract.Ref{ref, check, status}}, failures, nil
+}
+
+// updateHome opens runtime on a supported confirmed home stack decision
+// and closes it on any home stack decision that is not confirmed, which
+// needs no judgment; a rejected confirmation changes nothing.
+func updateHome(book *ledger, round Round, supported map[string]bool) {
+	if round.Identity == nil {
+		return
+	}
+	confirmed, other := "", false
+	for _, d := range round.Identity.Decisions {
+		switch {
+		case d.Fact != "home_pop":
+		case d.Status == "confirmed" && supported[d.ID]:
+			confirmed = *d.Value
+		case d.Status != "confirmed":
+			other = true
+		}
+	}
+	switch {
+	case confirmed != "":
+		book.home = confirmed
+	case other:
+		book.home = ""
+	}
 }
 
 // roundCitedInputs lists the inputs the judged items of a round cite, so
@@ -277,7 +318,7 @@ func roundCitedInputs(v Round) []contract.Ref {
 // above the threshold it closes the session strictly, so the next round
 // starts fresh from committed inputs; accounting is never reset. An unknown
 // usage keeps the session and says so.
-func capacityHandoff(ctx context.Context, r *engine.Run, ts TaskSession, percent float64) (bool, string, error) {
+func capacityHandoff(ctx context.Context, r *engine.Run, ts TaskSession, last engine.StepResult, percent float64) (bool, string, error) {
 	usage, err := r.SessionContextUsage(ctx, ts.Handle)
 	if err != nil {
 		// SessionContextUsage marks the handle unusable and closes it.
@@ -289,24 +330,13 @@ func capacityHandoff(ctx context.Context, r *engine.Run, ts TaskSession, percent
 	if *usage.Percent < percent {
 		return false, "", nil
 	}
-	if err := closeTaskSession(ctx, r, ts, "investigator"); err != nil {
+	if err := ts.Close(ctx, r, "investigator", last, true); err != nil {
 		return false, "", err
 	}
 	return true, fmt.Sprintf("The previous session reached %.0f%% context usage and was closed; this round starts in a fresh session with only the inputs.", *usage.Percent), nil
 }
 
-func closeTaskSession(ctx context.Context, r *engine.Run, ts TaskSession, stage string) error {
-	closed, err := r.CloseSessionReport(ctx, ts.Handle)
-	if err != nil {
-		return err
-	}
-	if !SameIdentity(closed.Identity, ts.Identity) || !closed.ConfirmsLocalClose(ts.Identity.SessionID) {
-		return fmt.Errorf("%s cleanup not confirmed", stage)
-	}
-	return nil
-}
-
-// joinFeedback puts the newest note first and keeps the earlier refs.
+// joinFeedback puts the newer note first and keeps both sets of refs.
 func joinFeedback(first, second *engine.Feedback) *engine.Feedback {
 	switch {
 	case first == nil || first.Message == "":
@@ -314,5 +344,5 @@ func joinFeedback(first, second *engine.Feedback) *engine.Feedback {
 	case second == nil:
 		return first
 	}
-	return &engine.Feedback{Message: first.Message + "\n\n" + second.Message, Refs: second.Refs, SourceAttemptID: first.SourceAttemptID, SourceCode: first.SourceCode}
+	return &engine.Feedback{Message: first.Message + "\n\n" + second.Message, Refs: append(slices.Clone(first.Refs), second.Refs...), SourceAttemptID: first.SourceAttemptID, SourceCode: first.SourceCode}
 }

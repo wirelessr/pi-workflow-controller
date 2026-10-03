@@ -382,23 +382,6 @@
           "pattern": "\\S"
         }
       }
-    },
-    "gap_ref": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "ref",
-        "id"
-      ],
-      "description": "An earlier gap, named by the exact input that owns it and its id; never copy its text",
-      "properties": {
-        "ref": {
-          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
-        },
-        "id": {
-          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
-        }
-      }
     }
   }
 }

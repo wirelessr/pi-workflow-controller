@@ -14,11 +14,7 @@ import (
 func TestCheckFactsAndFactCheck(t *testing.T) {
 	type refs struct{ intake, prompt contract.Ref }
 	attach := func(ctx context.Context, r *engine.Run, key, schema string, data any, files map[string][]byte) contract.Ref {
-		var cf []contract.ControllerFile
-		for id, b := range files {
-			cf = append(cf, contract.ControllerFile{ID: id, Path: "evidence/" + id + ".txt", Data: b})
-		}
-		ref, err := r.Root().Attach(ctx, engine.AttachSpec{Key: key, Output: contract.Spec{SchemaID: schema}, Data: data, Files: cf})
+		ref, err := attachFixture(ctx, r, key, schema, data, files)
 		if err != nil {
 			t.Fatal(err)
 		}

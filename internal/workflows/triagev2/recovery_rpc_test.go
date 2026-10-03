@@ -29,7 +29,7 @@ func TestRetryInputsRecovery(t *testing.T) {
 	}{
 		{name: "timeout then success", answers: []string{"hold", ""}, retries: 1, sessions: 2, failures: 1},
 		{name: "timeouts exhaust the retries", answers: []string{"hold", "hold"}, retries: 1, sessions: 2, failures: 2, code: engine.RetryExhausted},
-		{name: "an invalid contract is not retried or repaired", answers: []string{"invalid"}, retries: 1, sessions: 1, code: engine.ContractInvalid},
+		{name: "an invalid contract is repaired once in the same session, then not retried", answers: []string{"invalid", "invalid"}, retries: 1, sessions: 1, code: engine.ContractInvalid},
 		{name: "a failing recovered callback stops the retry", answers: []string{"hold"}, retries: 1, recovered: stop, sessions: 1, failures: 1, contains: stop.Error()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -42,7 +42,7 @@ func TestRetryInputsRecovery(t *testing.T) {
 			res := runHarness(t, "CASE-17", func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
 				ref, failures, retryErr = RetryInputs(ctx, r, r.Root(), "seam", "out", tc.retries, func(ctx context.Context, s *engine.Scope, fb *engine.Feedback) (contract.Ref, error) {
 					tk := newTask(r, "probe", "CASE-17", nil)
-					return RunTaskStep(ctx, r, TaskStep{Scope: s, Model: model, Stage: "probe", Key: "probe", Task: tk, Schema: PromptSchema, Feedback: fb, Recovery: true, NoRepair: true, Timeout: time.Second})
+					return RunTaskStep(ctx, r, TaskStep{Scope: s, Model: model, Stage: "probe", Key: "probe", Task: tk, Schema: PromptSchema, Feedback: fb, Recovery: true, Timeout: time.Second})
 				}, func(_ context.Context, f RecoveryFailure, _ error, _ bool) error {
 					seen = append(seen, f)
 					return tc.recovered

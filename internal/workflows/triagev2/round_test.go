@@ -26,6 +26,7 @@ func roundFiles() map[string][]byte {
 		"lookup-a": []byte(`[{"tenant_id":"17","orgkey":"org-17","ui_hostname":"acme.example.invalid"}]`),
 		"lookup-b": []byte(`[]`),
 		"query-1":  []byte("3 errors between 22:00 and 23:00\n"),
+		"excerpt":  []byte("svc@abc123 main.go:10-12\nif !flag { return errFailed }\n"),
 	}
 }
 
@@ -54,6 +55,20 @@ func baseRound(intake contract.Ref) Round {
 		Gaps:            []Gap{{ID: "g1", Text: "metrics not yet read"}},
 		GapDispositions: []GapDisposition{},
 	}
+}
+
+func deployedBuild() []Build {
+	return []Build{{ID: "b1", Stack: "pop-a", Component: "svc", Build: "1.2.3", Evidence: []Evidence{{FileID: "query-1", Locator: &Locator{Offset: ptr(int64(0)), Length: ptr(int64(8))}}}}}
+}
+
+// codeClaim is a candidate that read deployed code of build id in this
+// round (nil owner) or in owner.
+func codeClaim(id string, owner *contract.Ref) *Candidate {
+	excerpt := Evidence{FileID: "excerpt"}
+	return &Candidate{Statement: "svc returns the error when the flag is off", Premises: []string{"the flag is off on pop-a"},
+		AllowedEvidence: []Evidence{{FileID: "query-1"}, excerpt},
+		CodeRefs:        []CodeRef{{Repo: "svc", Ref: "abc123", Path: "main.go", Relation: "deployed", Basis: &BuildRef{Ref: owner, ID: id}, Evidence: []Evidence{excerpt}}},
+		Verification:    "runtime-verified"}
 }
 
 // Contracts are committed with Attach only to get exact committed Refs for
@@ -94,17 +109,44 @@ func TestCheckRound(t *testing.T) {
 		{name: "receipt window not RFC 3339", change: func(v *Round, _ refs) { v.Receipts[0].From = "2025-01-01 22:00Z" }, want: "receipts[0].from"},
 		{name: "receipt without result evidence", change: func(v *Round, _ refs) { v.Receipts[0].Evidence = []Evidence{} }, schema: true},
 		{name: "receipt citing a file it does not have", change: func(v *Round, _ refs) { v.Receipts[0].Evidence = []Evidence{{FileID: "query-2"}} }, want: "receipts[0].evidence[0].file_id"},
-		{name: "build citation resolves", change: func(v *Round, _ refs) {
-			v.DeployedBuilds = []Build{{ID: "b1", Stack: "pop-a", Component: "svc", Build: "1.2.3", Evidence: []Evidence{citeRange(contract.Ref{}, "query-1", 0, 8)}}}
-			v.DeployedBuilds[0].Evidence[0].Ref = nil
-		}},
+		{name: "build citation resolves", change: func(v *Round, _ refs) { v.DeployedBuilds = deployedBuild() }},
 		{name: "candidate with evidence outside the inputs", change: func(v *Round, in refs) {
 			v.Status = "candidate"
-			v.Candidate = &Candidate{Statement: "x", Premises: []string{}, AllowedEvidence: []Evidence{{Ref: &in.other, FileID: "prompt"}}, CodeRefs: []CodeRef{}, Basis: "inference"}
+			v.Candidate = &Candidate{Statement: "x", Premises: []string{}, AllowedEvidence: []Evidence{{Ref: &in.other, FileID: "prompt"}}, CodeRefs: []CodeRef{}, NoCodeBasis: true, Verification: "inference"}
 		}, want: "candidate.allowed_evidence[0].ref"},
+		{name: "claim reading the deployed code of a build in this round", change: func(v *Round, _ refs) {
+			v.Status, v.DeployedBuilds, v.Candidate = "candidate", deployedBuild(), codeClaim("b1", nil)
+		}},
+		{name: "claim citing a build this round does not have", change: func(v *Round, _ refs) {
+			v.Status, v.DeployedBuilds, v.Candidate = "candidate", deployedBuild(), codeClaim("b2", nil)
+		},
+			want: `candidate.code_refs[0].basis.id: got "b2"; want the id of a build in this round's deployed_builds`},
+		{name: "claim citing a build of an input without builds", change: func(v *Round, in refs) {
+			v.Status, v.DeployedBuilds, v.Candidate = "candidate", deployedBuild(), codeClaim("b1", &in.status)
+		}, want: "candidate.code_refs[0].basis.id: got \"b1\"; want the id of a build in the deployed_builds of attempt"},
+		{name: "claim citing a build of a contract outside the inputs", change: func(v *Round, in refs) {
+			v.Status, v.DeployedBuilds, v.Candidate = "candidate", deployedBuild(), codeClaim("b1", &in.other)
+		}, want: "candidate.code_refs[0].basis.ref"},
+		{name: "code excerpt the verifier may not read", change: func(v *Round, _ refs) {
+			v.Status, v.DeployedBuilds, v.Candidate = "candidate", deployedBuild(), codeClaim("b1", nil)
+			v.Candidate.AllowedEvidence = []Evidence{{FileID: "query-1"}}
+		}, want: `candidate.code_refs[0].evidence[0]: file "excerpt" is not in candidate.allowed_evidence`},
+		{name: "deployed code without its build", change: func(v *Round, _ refs) {
+			v.Status, v.Candidate = "candidate", codeClaim("b1", nil)
+			v.Candidate.CodeRefs[0].Basis = nil
+		}, schema: true},
+		{name: "claim without code and without saying so", change: func(v *Round, _ refs) {
+			v.Status, v.Candidate = "candidate", codeClaim("b1", nil)
+			v.Candidate.CodeRefs = []CodeRef{}
+		}, schema: true},
+		{name: "claim with code that says it has none", change: func(v *Round, _ refs) {
+			v.Status, v.DeployedBuilds, v.Candidate = "candidate", deployedBuild(), codeClaim("b1", nil)
+			v.Candidate.NoCodeBasis = true
+		}, schema: true},
+		{name: "receipt with only a non-breaking space as outcome", change: func(v *Round, _ refs) { v.Receipts[0].Outcome = "\u00a0" }, want: "receipts[0]: source, condition and outcome must not be blank"},
 		{name: "candidate without a claim", change: func(v *Round, _ refs) { v.Status = "candidate" }, schema: true},
 		{name: "claim on a continue round", change: func(v *Round, in refs) {
-			v.Candidate = &Candidate{Statement: "x", Premises: []string{}, AllowedEvidence: []Evidence{{FileID: "query-1"}}, CodeRefs: []CodeRef{}, Basis: "inference"}
+			v.Candidate = &Candidate{Statement: "x", Premises: []string{}, AllowedEvidence: []Evidence{{FileID: "query-1"}}, CodeRefs: []CodeRef{}, NoCodeBasis: true, Verification: "inference"}
 		}, schema: true},
 		{name: "blocked without what would unblock it", change: func(v *Round, _ refs) { v.Status = "blocked" }, schema: true},
 		{name: "blocked with what would unblock it", change: func(v *Round, _ refs) { v.Status, v.Unblock = "blocked", ptr("a kubeconfig for pop-c") }},
@@ -121,13 +163,19 @@ func TestCheckRound(t *testing.T) {
 		{name: "disposition of a gap the input lacks", change: func(v *Round, in refs) {
 			v.GapDispositions = []GapDisposition{{Gap: GapRef{Ref: in.status, ID: "g9"}, Disposition: "resolved", Reason: "x", Evidence: []Evidence{}}}
 		}, want: `gap_dispositions[0].gap.id: attempt`},
+		{name: "unconfirmed decision is never recorded absent", change: func(v *Round, _ refs) {
+			v.Identity.Decisions[0] = Decision{ID: "d-pop", Fact: "home_pop", Status: "unconfirmed", Identifiers: []string{}, Reason: "same row on two stacks"}
+		}, absent: map[string]string{"identity:home_pop=pop-a": "not-accepted-r1-d-pop"}},
 		{name: "disposition naming a contract outside the inputs", change: func(v *Round, in refs) {
 			v.GapDispositions = []GapDisposition{{Gap: GapRef{Ref: in.other, ID: "g1"}, Disposition: "not-applicable", Reason: "x", Evidence: []Evidence{}}}
 		}, want: "gap_dispositions[0].gap.ref"},
 		{name: "fact recorded absent declared again", change: func(*Round, refs) {}, absent: map[string]string{"fact:ui_hostname=acme.example.invalid": "not-accepted-r1-host"},
 			want: `facts_update[0]: ui_hostname "acme.example.invalid" was not accepted too often`},
-		{name: "decision recorded absent declared again", change: func(*Round, refs) {}, absent: map[string]string{"identity:home_pop=pop-a:confirmed": "not-accepted-r1-d-pop"},
-			want: "identity.decisions[0]: this home_pop decision was not accepted too often"},
+		{name: "decision recorded absent declared again", change: func(*Round, refs) {}, absent: map[string]string{"identity:home_pop=pop-a": "not-accepted-r1-d-pop"},
+			want: `identity.decisions[0]: confirming home_pop "pop-a" was not accepted too often`},
+		{name: "anchor recorded absent declared again", change: func(v *Round, in refs) {
+			v.TimeAnchors = []TimeAnchor{{ID: "event", Event: "reported failure", Original: "2025-01-02T00:30:00+02:00", Format: "rfc3339", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: cite(in.intake, "page-0")}}
+		}, absent: map[string]string{"anchor:reported failure@2025-01-01T22:30:00Z": "g"}, want: "time_anchors[0]: the anchor at 2025-01-01T22:30:00Z was not accepted too often"},
 		{name: "blank gap text", change: func(v *Round, _ refs) { v.Gaps[0].Text = "\u00a0" }, want: "gaps[0].text"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
