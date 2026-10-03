@@ -334,8 +334,8 @@ func TestRounds(t *testing.T) {
 				return ""
 			},
 			checker: func(t *testing.T, call agentCall, _ int) string {
-				if labels := labelsOf(call.Task); !strings.Contains(labels, "cited by the facts under review") {
-					t.Errorf("fact check inputs = %s; want the cited transcript", labels)
+				if labels := labelsOf(call.Task); !strings.Contains(labels, "cited by the facts under review") || !strings.Contains(labels, "S0 candidate facts,S0 fact check,facts under review") {
+					t.Errorf("fact check inputs = %s; want the S0 facts and check and the cited transcript", labels)
 				}
 				call.reply(t, checkFor(t, call, func(string) string { return "supported" }), nil)
 				return ""

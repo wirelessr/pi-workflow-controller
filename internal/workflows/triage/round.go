@@ -137,7 +137,8 @@ type roundCheck struct {
 
 // checkRound is the structural acceptance of a round: unique ids,
 // resolvable citations, recomputed anchors, identity decisions that echo
-// their lookup row, nonzero UTC receipt windows and dispositions naming a
+// their lookup row, UTC receipt times (a nonzero window, or a snapshot's
+// read time) and dispositions naming a
 // real earlier gap. Whether evidence supports a decision is judged later.
 func checkRound(ctx context.Context, r *engine.Run, ref contract.Ref, c roundCheck) (Round, error) {
 	p, err := readAccepted[Round](ctx, r, ref, RoundSchema)
@@ -296,7 +297,7 @@ func checkReceipt(field string, q Receipt, cite func(string, Evidence) error) er
 	switch q.Kind {
 	case "window":
 		if q.From == nil || q.To == nil {
-			return fmt.Errorf("%s: a window receipt needs from and to", field)
+			return fmt.Errorf("%s: a window receipt needs both from and to; got from %s, to %s", field, nullable(q.From), nullable(q.To))
 		}
 		from, err := utc(*q.From)
 		if err != nil {
@@ -462,4 +463,11 @@ func roundJudged(v Round) []judged {
 		}
 	}
 	return out
+}
+
+func nullable(s *string) string {
+	if s == nil {
+		return "null"
+	}
+	return fmt.Sprintf("%q", *s)
 }

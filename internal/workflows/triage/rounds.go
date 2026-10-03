@@ -456,7 +456,9 @@ const batchAttach = 1
 // once it reaches the limit. It returns feedback for the next round.
 func judgeRound(ctx context.Context, r *engine.Run, skills Skills, s0 S0, model runtime.ModelSpec, policy RoundPolicy, n int, ref contract.Ref, round Round, book *ledger) (check, status contract.Ref, supported map[string]bool, feedback *engine.Feedback, failures []RecoveryFailure, err error) {
 	items := roundJudged(round)
-	citable := []LabeledRef{{"intake", s0.Intake}, {"caller prompt", s0.Prompt}, {"facts under review", ref}}
+	// The S0 facts and their check show whether a candidate stack that a
+	// single-stack identity lookup verified was a supported fact.
+	citable := []LabeledRef{{"intake", s0.Intake}, {"caller prompt", s0.Prompt}, {"S0 candidate facts", s0.Facts}, {"S0 fact check", s0.Check}, {"facts under review", ref}}
 	for _, cited := range roundCitedInputs(round) {
 		if !slices.Contains(task{Citable: citable}.inputs(), cited) {
 			citable = append(citable, LabeledRef{"cited by the facts under review", cited})

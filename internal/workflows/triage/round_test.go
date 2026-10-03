@@ -120,6 +120,7 @@ func TestCheckRound(t *testing.T) {
 			q := &v.Receipts[0]
 			q.Kind, q.From, q.To, q.At = "snapshot", nil, nil, ptr("2025-01-02 08:00Z")
 		}, want: "receipts[0].at"},
+		{name: "window receipt without to", change: func(v *Round, _ refs) { v.Receipts[0].To = nil }, schema: true},
 		{name: "window receipt without time basis", change: func(v *Round, _ refs) { v.Receipts[0].TimeBasis = []Evidence{} }, schema: true},
 		{name: "unknown receipt kind", change: func(v *Round, _ refs) { v.Receipts[0].Kind = "point" }, schema: true},
 		{name: "receipt without result evidence", change: func(v *Round, _ refs) { v.Receipts[0].Evidence = []Evidence{} }, schema: true},
