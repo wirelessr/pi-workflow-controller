@@ -12,7 +12,8 @@
     "gaps",
     "new_gaps",
     "next_steps",
-    "report_file"
+    "report_file",
+    "limit"
   ],
   "properties": {
     "request": {
@@ -25,6 +26,7 @@
       "required": [
         "claim",
         "delivery",
+        "t2a",
         "t2b",
         "outcome"
       ],
@@ -66,6 +68,16 @@
             "not-passed",
             "none"
           ]
+        },
+        "t2a": {
+          "anyOf": [
+            {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -89,7 +101,8 @@
           "ref",
           "id",
           "disposition",
-          "note"
+          "note",
+          "evidence"
         ],
         "description": "Each gap the request lists, once",
         "properties": {
@@ -109,8 +122,32 @@
           "note": {
             "type": "string",
             "pattern": "\\S"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            }
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "disposition": {
+                  "const": "open"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "evidence": {
+                  "minItems": 1
+                }
+              }
+            }
+          }
+        ]
       }
     },
     "new_gaps": {
@@ -128,6 +165,10 @@
     },
     "report_file": {
       "const": "triage-report"
+    },
+    "limit": {
+      "type": "string",
+      "description": "What ended the investigation early, copied exactly from the request; empty when nothing did"
     }
   }
 }

@@ -34,6 +34,7 @@ const reportRequirements = `You write the report of this investigation from its 
 type ReportClaim struct {
 	Claim    *contract.Ref `json:"claim"`
 	Delivery *contract.Ref `json:"delivery"`
+	T2a      *contract.Ref `json:"t2a"`
 	T2b      *contract.Ref `json:"t2b"`
 	Outcome  string        `json:"outcome"`
 }
@@ -43,6 +44,7 @@ type ReportGap struct {
 	ID          string       `json:"id"`
 	Disposition string       `json:"disposition"`
 	Note        string       `json:"note"`
+	Evidence    []Evidence   `json:"evidence"`
 }
 
 type Report struct {
@@ -50,6 +52,7 @@ type Report struct {
 	Claim        ReportClaim `json:"claim"`
 	Conclusion   string      `json:"conclusion"`
 	Completeness string      `json:"completeness"`
+	Limit        string      `json:"limit"`
 	Gaps         []ReportGap `json:"gaps"`
 	NewGaps      []Gap       `json:"new_gaps"`
 	NextSteps    []string    `json:"next_steps"`
@@ -84,7 +87,7 @@ func reportClaim(out Rounds) ReportClaim {
 		return ReportClaim{Outcome: "none"}
 	}
 	last := out.Claims[len(out.Claims)-1]
-	c := ReportClaim{Claim: &last.Claim, Outcome: "not-passed"}
+	c := ReportClaim{Claim: &last.Claim, T2a: &last.T2a, Outcome: "not-passed"}
 	if last.Delivery != (contract.Ref{}) {
 		c.Delivery = &last.Delivery
 	}
@@ -134,6 +137,14 @@ func checkReport(ctx context.Context, r *engine.Run, ref contract.Ref, want repo
 	if !reflect.DeepEqual(v.Claim, want.Claim) {
 		return fmt.Errorf("claim: want the claim object copied exactly from the request")
 	}
+	if v.Limit != want.Limit {
+		return fmt.Errorf("limit: got %q; want %q copied exactly from the request", v.Limit, want.Limit)
+	}
+	in, err := citable(ctx, r, inputs...)
+	if err != nil {
+		return err
+	}
+	cite := citations{ctx, in, ref, p.Files}.check
 	listed := map[GapRef]bool{}
 	for i, g := range v.Gaps {
 		key := GapRef{Ref: g.Ref, ID: g.ID}
@@ -144,6 +155,9 @@ func checkReport(ctx context.Context, r *engine.Run, ref contract.Ref, want repo
 			return fmt.Errorf("gaps[%d]: %s gap %q is listed twice", i, describeRef(g.Ref), g.ID)
 		}
 		listed[key] = true
+		if err := citeAll(cite, fmt.Sprintf("gaps[%d].evidence", i), g.Evidence); err != nil {
+			return err
+		}
 	}
 	for _, g := range want.Gaps {
 		if !listed[g] {
@@ -273,7 +287,7 @@ func renderReport(ctx context.Context, projection reportProjection) ([]byte, err
 // runReport extracts the renderer into the run and has a fresh report
 // Step write the report over every committed result of the investigation;
 // a timed-out report reruns.
-func runReport(ctx context.Context, r *engine.Run, s0 S0, out Rounds, inputs []LabeledRef, policy ReportPolicy, retries int) (contract.Ref, []RecoveryFailure, error) {
+func runReport(ctx context.Context, r *engine.Run, s0 S0, skills Skills, out Rounds, policy ReportPolicy, retries int) (contract.Ref, []RecoveryFailure, error) {
 	if err := policy.check(); err != nil {
 		return contract.Ref{}, nil, err
 	}
@@ -286,19 +300,31 @@ func runReport(ctx context.Context, r *engine.Run, s0 S0, out Rounds, inputs []L
 		return contract.Ref{}, nil, err
 	}
 	_, input := r.WorkflowInput()
+	// Every committed result with recorded gaps: the skills record, what
+	// the rounds handed on, and the session observations.
 	t := newTask(r, "report", s0.Ticket, nil, reportRequirements, citationRequirements)
-	t.Citable = inputs
+	t.Citable = append([]LabeledRef{{"skills", skills.Record}}, out.Inputs...)
+	for i, record := range out.Records {
+		if record.Observation != (contract.Ref{}) {
+			t.Citable = append(t.Citable, LabeledRef{fmt.Sprintf("round %d observation", i+1), record.Observation})
+		}
+	}
 	refs := t.inputs()
 	gaps, err := reportGaps(ctx, r, refs)
 	if err != nil {
 		return contract.Ref{}, nil, err
 	}
 	want := reportTask{Request: input.Prompt, Claim: reportClaim(out), Gaps: gaps, Limit: out.Limit, Renderer: filepath.Join(root, "render_report.py")}
+	for _, ref := range []*contract.Ref{want.Claim.Claim, want.Claim.Delivery, want.Claim.T2a, want.Claim.T2b} {
+		if ref != nil && !slices.Contains(refs, *ref) {
+			return contract.Ref{}, nil, fmt.Errorf("report inputs lack %s named by the claim", describeRef(*ref))
+		}
+	}
 	if want.Gaps == nil {
 		want.Gaps = []GapRef{}
 	}
 	t.Report = &want
-	return RetryInputs(ctx, r, r.Root(), "report-recovery", "report", retries, func(ctx context.Context, s *engine.Scope, retry *engine.Feedback) (contract.Ref, error) {
+	ref, failures, err := RetryInputs(ctx, r, r.Root(), "report-recovery", "report", retries, func(ctx context.Context, s *engine.Scope, retry *engine.Feedback) (contract.Ref, error) {
 		ref, err := RunTaskStep(ctx, r, TaskStep{Scope: s, Model: policy.Model, Stage: "report", Key: "report", Task: t, Schema: ReportSchema, Inputs: refs, Recovery: true, Timeout: policy.Timeout, Feedback: retry,
 			Validate: func(ctx context.Context, ref contract.Ref) error { return checkReport(ctx, r, ref, want, refs) }})
 		if err != nil {
@@ -306,4 +332,8 @@ func runReport(ctx context.Context, r *engine.Run, s0 S0, out Rounds, inputs []L
 		}
 		return ref, checkReportOwner(r, ref.AttemptID, policy.Model)
 	}, nil)
+	if err != nil {
+		return ref, failures, err
+	}
+	return ref, failures, r.Root().Decision(ctx, "report-recorded", "Report coverage, completeness and rendering accepted; its conclusion is the report's judgment", append(slices.Clone(refs), ref))
 }

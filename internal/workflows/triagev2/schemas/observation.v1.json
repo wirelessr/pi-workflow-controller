@@ -6,7 +6,8 @@
   "additionalProperties": false,
   "required": [
     "round",
-    "attempts"
+    "attempts",
+    "gaps"
   ],
   "properties": {
     "round": {
@@ -72,6 +73,13 @@
           }
         }
       }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"
+      },
+      "description": "One gap per attempt whose audit coverage is incomplete"
     }
   }
 }

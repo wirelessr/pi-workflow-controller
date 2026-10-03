@@ -220,7 +220,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("recoveries = %+v", out.Recoveries)
 				}
 			}},
-		{name: "a run budget that cannot cover the first round runs none", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 27 },
+		{name: "a run budget that cannot cover the first round runs none", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 31 },
 			roles: "intake facts fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
 				t.Error("dispatched a round past the budget")
@@ -250,7 +250,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("one round reached the limit of 2 with a repeated key: %+v", status.Gaps)
 				}
 			}},
-		{name: "a run budget that cannot cover another round ends the rounds", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 28 },
+		{name: "a run budget that cannot cover another round ends the rounds", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 32 },
 			roles: "intake facts fact-check investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, nil); return "" },
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
@@ -441,7 +441,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("recoveries = %+v", out.Recoveries)
 				}
 			}},
-		{name: "vision requests beside an exactly covered round become gaps", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 28 },
+		{name: "vision requests beside an exactly covered round become gaps", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 32 },
 			roles: "intake facts fact-check",
 			facts: func(f *Facts, call agentCall) {
 				f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: ptr(call.citable("intake")), FileID: "bundle"}, Question: "what does it show"}}
@@ -458,7 +458,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("vision batch = %+v", batch)
 				}
 			}},
-		{name: "vision requests of a last round with little budget left become gaps", verdict: allSupported, policy: func(p *RoundPolicy) { p.MaxRounds = 1 }, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 28 },
+		{name: "vision requests of a last round with little budget left become gaps", verdict: allSupported, policy: func(p *RoundPolicy) { p.MaxRounds = 1 }, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 32 },
 			roles: "intake facts fact-check investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
 				c.round0(t, func(v *Round) {
@@ -797,7 +797,7 @@ func TestRounds(t *testing.T) {
 				return ""
 			}},
 		{name: "a run budget that covers T2a but not the verification ends the rounds", verdict: allSupported, stewards: "T1 T2a",
-			roles: "intake facts fact-check investigator", run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 28 },
+			roles: "intake facts fact-check investigator", run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 32 },
 			agent: func(t *testing.T, c investigatorCall) string {
 				c.round0(t, func(v *Round) {
 					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
@@ -1110,7 +1110,7 @@ func TestRounds(t *testing.T) {
 func TestRoundFits(t *testing.T) {
 	p := RoundPolicy{TimeoutRetries: 1}
 	snapshot := func(sessions, attempts int) engine.Snapshot {
-		s := engine.Snapshot{Policy: engine.RunPolicy{MaxTotalSessions: 12, MaxTotalAttempts: 24}, Sessions: map[string]engine.SessionStatus{}, Attempts: map[string]engine.AttemptState{}}
+		s := engine.Snapshot{Policy: engine.RunPolicy{MaxTotalSessions: 14, MaxTotalAttempts: 28}, Sessions: map[string]engine.SessionStatus{}, Attempts: map[string]engine.AttemptState{}}
 		for i := range sessions {
 			s.Sessions[fmt.Sprint(i)] = engine.SessionStatus{}
 		}
@@ -1179,19 +1179,19 @@ func TestVisionAllowed(t *testing.T) {
 		}
 		return s
 	}
-	// A round reserves 10 sessions and 22 attempts; a vision Step takes up
+	// A round reserves 12 sessions and 26 attempts; a vision Step takes up
 	// to 2 sessions and 4 attempts; the batch record takes 1 attempt.
 	for _, tc := range []struct {
 		sessions, attempts, used, want int
 	}{
-		{0, 0, 0, 4},
+		{0, 0, 0, 3},
 		{0, 0, 3, 2},
-		{8, 0, 0, 1},
-		{10, 0, 0, 0},
-		{0, 9, 0, 2},
-		{0, 13, 0, 1},
-		{0, 14, 0, 0},
-		{0, 17, 0, 0},
+		{6, 0, 0, 1},
+		{8, 0, 0, 0},
+		{0, 5, 0, 2},
+		{0, 9, 0, 1},
+		{0, 10, 0, 0},
+		{0, 13, 0, 0},
 	} {
 		if got := visionAllowed(snapshot(tc.sessions, tc.attempts), p, tc.used); got != tc.want {
 			t.Errorf("visionAllowed(%d sessions, %d attempts, %d used) = %d, want %d", tc.sessions, tc.attempts, tc.used, got, tc.want)

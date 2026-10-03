@@ -17,9 +17,6 @@ REPORT_PATH = "artifacts/triage-report.md"
 
 def render(meta, data, documents):
     sections = ["# 調查報告\n"]
-    by_ref = {}
-    for doc in documents:
-        by_ref[doc["ref"]["attempt_id"]] = doc
 
     def text(label, value):
         if value is None or value == "":
@@ -38,13 +35,15 @@ def render(meta, data, documents):
             text("File ID", entry["file_id"])
 
     def document(ref):
-        require(ref is not None and ref["attempt_id"] in by_ref, "report input missing")
-        return by_ref[ref["attempt_id"]]["data"]
+        matches = [doc["data"] for doc in documents if doc["ref"] == ref]
+        require(len(matches) == 1, "report input missing or ambiguous")
+        return matches[0]
 
     text("原始請求", data["request"])
     sections.append("## 結論\n")
     text("結論", data["conclusion"])
     text("完整性", data["completeness"])
+    text("提前結束的原因", data["limit"])
     claim = data["claim"]
     text("驗證結果", claim["outcome"])
     if claim["claim"] is not None:
@@ -81,6 +80,9 @@ def render(meta, data, documents):
                     text("理由", issue["reason"])
                 for gap in assessment["gaps"]:
                     text("驗證缺口", gap)
+        if claim["t2a"] is not None:
+            for note in document(claim["t2a"])["notes"]:
+                text("Steward T2a 備註", note)
         if claim["t2b"] is not None:
             steward = document(claim["t2b"])
             text("Steward T2b", steward["verdict"])
@@ -88,10 +90,20 @@ def render(meta, data, documents):
                 text("Steward 備註", note)
             for item in steward["items"]:
                 text("Steward 質疑", "[" + item["pattern_id"] + "] " + item["question"])
+    audits = [doc for doc in documents if doc["ref"]["schema_id"] == "triage.audit.v1"]
+    if any(doc["data"]["findings"] for doc in audits):
+        sections.append("## 稽核發現\n")
+        for doc in audits:
+            for finding in doc["data"]["findings"]:
+                text("發現", finding["category"] + " (" + finding["effect"] + "): " + finding["reason"])
     sections.append("## 缺口與下一步\n")
     for gap in data["gaps"]:
         reference("缺口來源", gap["ref"])
-        text("缺口", gap["id"] + " (" + gap["disposition"] + "): " + gap["note"])
+        recorded = [g for g in document(gap["ref"])["gaps"] if g["id"] == gap["id"]]
+        require(len(recorded) == 1, "report gap missing from its input")
+        text("缺口", gap["id"] + ": " + recorded[0]["text"])
+        text("處置", gap["disposition"] + ": " + gap["note"])
+        evidence("處置依據", gap["evidence"])
     for gap in data["new_gaps"]:
         text("新缺口", gap["id"] + ": " + gap["text"])
     for step in data["next_steps"]:

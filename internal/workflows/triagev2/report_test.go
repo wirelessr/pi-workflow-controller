@@ -20,9 +20,9 @@ import (
 func writeReport(t *testing.T, call agentCall, change func(*Report), render bool) {
 	t.Helper()
 	want := call.Task.Report
-	v := Report{Request: want.Request, Claim: want.Claim, Conclusion: "the error comes from svc", Completeness: "incomplete", Gaps: []ReportGap{}, NewGaps: []Gap{}, NextSteps: []string{"confirm on a second stack"}, ReportFile: ReportFileID}
+	v := Report{Request: want.Request, Claim: want.Claim, Conclusion: "the error comes from svc", Completeness: "incomplete", Limit: want.Limit, Gaps: []ReportGap{}, NewGaps: []Gap{}, NextSteps: []string{"confirm on a second stack"}, ReportFile: ReportFileID}
 	for _, g := range want.Gaps {
-		v.Gaps = append(v.Gaps, ReportGap{Ref: g.Ref, ID: g.ID, Disposition: "resolved", Note: "covered by the verified claim"})
+		v.Gaps = append(v.Gaps, ReportGap{Ref: g.Ref, ID: g.ID, Disposition: "resolved", Note: "covered by the verified claim", Evidence: []Evidence{cite(call.citable("intake"), "page-0")}})
 	}
 	if change != nil {
 		change(&v)
@@ -48,6 +48,7 @@ func TestReport(t *testing.T) {
 		name     string
 		blocked  bool
 		report   func(t *testing.T, call agentCall)
+		timeout  time.Duration
 		fails    string
 		complete bool
 	}{
@@ -77,6 +78,50 @@ func TestReport(t *testing.T) {
 				}
 				writeReport(t, call, nil, true)
 			}},
+		{name: "a rewritten request is repaired", report: repairedReport(func(v *Report) { v.Request += " please" }, "request: want the caller's prompt copied exactly")},
+		{name: "a changed claim object is repaired", report: repairedReport(func(v *Report) { v.Claim.Outcome = "none" }, "claim: want the claim object copied exactly")},
+		{name: "a changed limit is repaired", report: repairedReport(func(v *Report) { v.Limit = "rounds" }, `limit: got "rounds"; want ""`)},
+		{name: "a gap listed twice is repaired", report: repairedReport(func(v *Report) { v.Gaps = append(v.Gaps, v.Gaps[0]) }, "is listed twice")},
+		{name: "a gap from nowhere is repaired", report: func(t *testing.T, call agentCall) {
+			// The renderer refuses it too; the Controller says why.
+			if call.Request.Feedback == nil {
+				writeReport(t, call, func(v *Report) {
+					g := v.Gaps[0]
+					g.ID = "invented"
+					v.Gaps = append(v.Gaps, g)
+				}, false)
+				return
+			}
+			if !strings.Contains(call.Request.Feedback.Message, `gap "invented" is not in the request's gap list`) {
+				t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
+			}
+			writeReport(t, call, nil, true)
+		}},
+		{name: "an open gap reported complete is repaired", report: repairedReport(func(v *Report) {
+			v.Completeness, v.Gaps[0].Disposition, v.Gaps[0].Evidence = "complete", "open", []Evidence{}
+		}, "completeness: got complete")},
+		{name: "a new gap reported complete is repaired", report: repairedReport(func(v *Report) {
+			v.Completeness, v.NewGaps = "complete", []Gap{{ID: "late", Text: "found while writing"}}
+		}, "completeness: got complete")},
+		{name: "a resolved gap without evidence is repaired by the schema", report: repairedReport(func(v *Report) { v.Gaps[0].Evidence = []Evidence{} }, "evidence")},
+		{name: "a report edited after rendering is repaired", report: func(t *testing.T, call agentCall) {
+			writeReport(t, call, nil, true)
+			if call.Request.Feedback == nil {
+				path := filepath.Join(filepath.Dir(call.Candidate), "artifacts", "triage-report.md")
+				if err := os.WriteFile(path, []byte("# edited\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else if !strings.Contains(call.Request.Feedback.Message, "differs from the deterministic rendering") {
+				t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
+			}
+		}},
+		{name: "a timed-out report reruns in a fresh attempt", timeout: time.Second, report: func(t *testing.T, call agentCall) {
+			if call.Request.Feedback == nil {
+				writeReport(t, call, nil, true)
+				panic(holdReport{})
+			}
+			writeReport(t, call, nil, true)
+		}},
 		{name: "a report without the rendered file fails after its repair", fails: "want exactly the renderer's artifact",
 			report: func(t *testing.T, call agentCall) { writeReport(t, call, nil, false) }},
 	} {
@@ -96,8 +141,7 @@ func TestReport(t *testing.T) {
 				if rounds, err = runRounds(ctx, r, sk, s0, RoundModels{Investigator: model, Validator: model, Steward: model}, policy); err != nil {
 					return engine.Result{}, err
 				}
-				inputs := append([]LabeledRef{{"skills", sk.Record}}, rounds.Inputs...)
-				if reportRef, _, err = runReport(ctx, r, s0, rounds, inputs, ReportPolicy{Model: model, Timeout: 30 * time.Second}, 1); err != nil {
+				if reportRef, _, err = runReport(ctx, r, s0, sk, rounds, ReportPolicy{Model: model, Timeout: reportTimeout(tc.timeout)}, 1); err != nil {
 					return engine.Result{}, err
 				}
 				return engine.Result{Outputs: map[string]contract.Ref{"report": reportRef}, Final: &engine.FinalSelection{Output: "report"}}, nil
@@ -130,7 +174,21 @@ func TestReport(t *testing.T) {
 					if !strings.HasSuffix(call.Task.Report.Renderer, "triage-report/render_report.py") || len(call.Task.Skills) != 0 {
 						t.Errorf("report task = %+v", call.Task.Report)
 					}
-					tc.report(t, call)
+					held := false
+					func() {
+						defer func() {
+							if v := recover(); v != nil {
+								if _, ok := v.(holdReport); !ok {
+									panic(v)
+								}
+								held = true
+							}
+						}()
+						tc.report(t, call)
+					}()
+					if held {
+						return "hold"
+					}
 				}
 				return ""
 			})
@@ -152,5 +210,30 @@ func TestReport(t *testing.T) {
 				t.Errorf("report file = %q, %v", body, err)
 			}
 		})
+	}
+}
+
+// holdReport makes the fake report agent leave its prompt running.
+type holdReport struct{}
+
+func reportTimeout(d time.Duration) time.Duration {
+	if d == 0 {
+		return 30 * time.Second
+	}
+	return d
+}
+
+// repairedReport writes a report with change, then the correct one after
+// the repair feedback names want.
+func repairedReport(change func(*Report), want string) func(*testing.T, agentCall) {
+	return func(t *testing.T, call agentCall) {
+		if call.Request.Feedback == nil {
+			writeReport(t, call, change, true)
+			return
+		}
+		if !strings.Contains(call.Request.Feedback.Message, want) {
+			t.Errorf("repair feedback = %q, want %q", call.Request.Feedback.Message, want)
+		}
+		writeReport(t, call, nil, true)
 	}
 }

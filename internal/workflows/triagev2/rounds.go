@@ -130,13 +130,14 @@ type ledger struct {
 // runRounds runs investigation rounds from the S0 outputs. A session is
 // reused while its context usage stays below the handoff threshold; a
 // timed-out round reruns in a fresh session from the same inputs.
-func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models RoundModels, policy RoundPolicy) (Rounds, error) {
-	var out Rounds
+func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models RoundModels, policy RoundPolicy) (out Rounds, err error) {
 	if err := policy.check(); err != nil {
 		return out, err
 	}
 	root := r.Root()
 	inputs := []LabeledRef{{"caller prompt", s0.Prompt}, {"intake", s0.Intake}, {"facts", s0.Facts}, {"fact check", s0.Check}, {"fact status", s0.Status}}
+	// Whoever reports the outcome, failed or not, gets what was committed.
+	defer func() { out.Inputs = inputs }()
 	book := &ledger{rejections: map[string]int{}, absent: map[string]string{}}
 	var ts *TaskSession
 	var feedback *engine.Feedback
@@ -393,18 +394,17 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 			return out, err
 		}
 	}
-	out.Inputs = inputs
 	return out, nil
 }
 
 const rerunNote = "The previous attempt of this round failed (%s) and its work was not committed; queries it started may still be running remotely, so reuse what the inputs already hold and narrow expensive queries. "
 
 // roundCost is the worst case of one round: its investigator Step, fact
-// check, audit and two stewards (T1 and T2a after the identity round) each
-// retried after a timeout and repaired once, plus the fact status and
-// observation records.
+// check, audit and two stewards (T1 and T2a after the identity round), and
+// the report kept in reserve, each retried after a timeout and repaired
+// once, plus the fact status and observation records.
 func roundCost(p RoundPolicy) (sessions, attempts int) {
-	steps := 5 * (p.TimeoutRetries + 1)
+	steps := 6 * (p.TimeoutRetries + 1)
 	return steps, 2*steps + 2
 }
 
@@ -415,10 +415,10 @@ func roundFits(s engine.Snapshot, p RoundPolicy) bool {
 }
 
 // verificationFits reports whether three verifiers and the T2b steward,
-// each retried after a timeout and repaired once, plus the claim and
-// delivery records, fit the run budget.
+// with the report kept in reserve, each retried after a timeout and
+// repaired once, plus the claim and delivery records, fit the run budget.
 func verificationFits(s engine.Snapshot, p RoundPolicy) bool {
-	steps := 4 * (p.TimeoutRetries + 1)
+	steps := 5 * (p.TimeoutRetries + 1)
 	return s.Policy.MaxTotalSessions-len(s.Sessions) >= steps && s.Policy.MaxTotalAttempts-len(s.Attempts) >= 2*steps+2
 }
 

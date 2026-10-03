@@ -37,6 +37,7 @@ type ObservedAttempt struct {
 type ObservationRecord struct {
 	Round    contract.Ref      `json:"round"`
 	Attempts []ObservedAttempt `json:"attempts"`
+	Gaps     []Gap             `json:"gaps"`
 }
 
 type Finding struct {
@@ -126,6 +127,12 @@ func attachObservations(ctx context.Context, r *engine.Run, key string, round co
 		files = append(files, contract.ControllerFile{ID: id, Path: "evidence/" + id + ".jsonl", Data: raw})
 		for _, entryID := range entryIDs(raw) {
 			ids[entryID] = true
+		}
+	}
+	record.Gaps = []Gap{}
+	for i, a := range record.Attempts {
+		if len(a.Gaps) > 0 {
+			record.Gaps = append(record.Gaps, Gap{ID: fmt.Sprintf("audit-coverage-%d", i+1), Text: "Audit coverage of attempt " + a.AttemptID + " is incomplete: " + strings.Join(a.Gaps, "; ")})
 		}
 	}
 	ref, err := r.Root().Attach(ctx, engine.AttachSpec{Key: key, Output: contract.Spec{SchemaID: ObservationSchema}, Data: record, Files: files})
