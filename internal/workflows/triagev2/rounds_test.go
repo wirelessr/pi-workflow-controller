@@ -50,9 +50,9 @@ func TestRounds(t *testing.T) {
 		vision  func(t *testing.T, call agentCall) string
 		run     func(*engine.RunPolicy)
 		within  time.Duration
+		fails   string
 		roles   string
 		check   func(t *testing.T, out Rounds, calls []investigatorCall, handles []string)
-		visions func(t *testing.T, out Rounds, calls []investigatorCall, visions []agentCall)
 	}{
 		{name: "a confirmed home stack opens runtime and a candidate ends the rounds", verdict: allSupported,
 			roles: "intake facts fact-check investigator fact-check investigator",
@@ -278,20 +278,37 @@ func TestRounds(t *testing.T) {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
-		{name: "an image the facts ask about is read before the identity round", verdict: allSupported,
+		{name: "an image the facts ask about is read before the identity round and its transcript is judged", verdict: allSupported,
 			roles: "intake facts fact-check vision investigator fact-check",
 			facts: func(f *Facts, call agentCall) {
 				f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: ptr(call.citable("intake")), FileID: "bundle"}, Question: "which host does the screenshot show"}}
 			},
-			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, stuck); return "" },
-			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {},
-			visions: func(t *testing.T, out Rounds, calls []investigatorCall, visions []agentCall) {
-				v := visions[0].Task
-				if v.Vision == nil || v.Vision.Question != "which host does the screenshot show" || v.Vision.Image.FileID != "bundle" || len(v.Skills) != 0 || !strings.Contains(v.Requirements, visionRequirements) || !strings.HasPrefix(v.Requirements, baselineRequirements) {
+			vision: func(t *testing.T, call agentCall) string {
+				v := call.Task
+				if v.Vision == nil || v.Vision.Question != "which host does the screenshot show" || v.Vision.Image.FileID != "bundle" || *v.Vision.Image.Ref != call.citable("image owner") || len(v.Skills) != 0 || !strings.Contains(v.Requirements, visionRequirements) || !strings.HasPrefix(v.Requirements, baselineRequirements) {
 					t.Errorf("vision task = %+v", v)
 				}
-				if labels := labelsOf(calls[0].Task); !strings.Contains(labels, "vision status of facts,vision shot of facts") {
-					t.Errorf("identity round inputs = %s", labels)
+				transcribe(t, call, nil)
+				return ""
+			},
+			agent: func(t *testing.T, c investigatorCall) string {
+				shot := c.citable("vision shot of facts")
+				c.round0(t, func(v *Round) {
+					stuck(v)
+					v.FactsUpdate[0].Evidence = []Evidence{citeRange(shot, "transcript", 5, 20)}
+				})
+				return ""
+			},
+			checker: func(t *testing.T, call agentCall, _ int) string {
+				if labels := labelsOf(call.Task); !strings.Contains(labels, "cited by the facts under review") {
+					t.Errorf("fact check inputs = %s; want the cited transcript", labels)
+				}
+				call.reply(t, checkFor(t, call, func(string) string { return "supported" }), nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
+				if labels := labelsOf(calls[0].Task); !strings.Contains(labels, "vision status of facts,vision shot of facts") || len(out.Vision) != 1 {
+					t.Errorf("identity round inputs = %s, batches %v", labels, out.Vision)
 				}
 			}},
 		{name: "vision requests beyond the budget become gaps", verdict: allSupported,
@@ -300,7 +317,7 @@ func TestRounds(t *testing.T) {
 				c.round0(t, func(v *Round) {
 					if c.round == 1 {
 						for _, id := range []string{"a", "b", "c"} {
-							v.VisionRequests = append(v.VisionRequests, VisionRequest{ID: "shot-" + id, Attachment: Evidence{Ref: ptr(c.citable("intake")), FileID: "bundle"}, Question: "what does it show"})
+							v.VisionRequests = append(v.VisionRequests, VisionRequest{ID: "shot-" + id, Attachment: Evidence{Ref: ptr(c.citable("intake")), FileID: "bundle"}, Question: "what is shot " + id})
 						}
 						return
 					}
@@ -308,36 +325,106 @@ func TestRounds(t *testing.T) {
 				})
 				return ""
 			},
+			vision: func(t *testing.T, call agentCall) string {
+				transcribe(t, call, func(v *Vision) { v.Answer = call.Task.Vision.Question })
+				return ""
+			},
 			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
-				var status contract.Ref
-				for _, in := range calls[1].Task.Citable {
-					if in.Label == "vision status of round 1" {
-						status = in.Ref
+				batch := decodeRef[VisionBatch](t, nil, calls[1].citable("vision status of round 1"))
+				if len(batch.Results) != 2 || len(batch.Gaps) != 1 || batch.Gaps[0].ID != "vision-not-run-shot-c" || batch.Owner != out.Records[0].Round {
+					t.Fatalf("vision batch = %+v", batch)
+				}
+				for _, res := range batch.Results {
+					if v := decodeRef[Vision](t, nil, res.Vision); v.Request.ID != res.ID || v.Answer != "what is shot "+strings.TrimPrefix(res.ID, "shot-") {
+						t.Errorf("result %s binds vision for %s", res.ID, v.Request.ID)
 					}
 				}
-				batch := decodeRef[VisionBatch](t, nil, status)
-				if len(batch.Results) != 2 || len(batch.Gaps) != 1 || batch.Gaps[0].ID != "vision-not-run-shot-c" || batch.Owner != out.Records[0].Round {
+			}},
+		{name: "vision requests of the last round become gaps", verdict: allSupported, policy: func(p *RoundPolicy) { p.MaxRounds = 1 },
+			roles: "intake facts fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.VisionRequests = []VisionRequest{{ID: "late", Attachment: Evidence{Ref: ptr(c.citable("intake")), FileID: "bundle"}, Question: "what does it show"}}
+				})
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if len(out.Vision) != 1 {
+					t.Fatalf("batches = %v", out.Vision)
+				}
+				if batch := decodeRef[VisionBatch](t, nil, out.Vision[0]); len(batch.Results) != 0 || len(batch.Gaps) != 1 || out.Limit != LimitRounds {
 					t.Errorf("vision batch = %+v", batch)
 				}
 			}},
-		{name: "a vision transcript that is not its own file is repaired", verdict: allSupported,
+		{name: "a vision Step that copies the image wrongly or not as its own transcript is repaired", verdict: allSupported,
+			roles: "intake facts fact-check vision vision investigator fact-check",
+			facts: func(f *Facts, call agentCall) {
+				f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: ptr(call.citable("intake")), FileID: "bundle"}, Question: "which host does the screenshot show"}}
+			},
+			vision: func(t *testing.T, call agentCall) string {
+				if call.Request.Feedback == nil {
+					transcribe(t, call, func(v *Vision) { v.Image.Ref = nil })
+					return ""
+				}
+				if !strings.Contains(call.Request.Feedback.Message, "image.ref: got null") {
+					t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
+				}
+				transcribe(t, call, nil)
+				return ""
+			},
+			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, stuck); return "" }},
+		{name: "a vision Step that answers another request is repaired", verdict: allSupported,
 			roles: "intake facts fact-check vision vision investigator fact-check",
 			facts: func(f *Facts, call agentCall) {
 				f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: ptr(call.citable("intake")), FileID: "bundle"}, Question: "what does it show"}}
 			},
 			vision: func(t *testing.T, call agentCall) string {
 				if call.Request.Feedback == nil {
-					transcribe(t, call, func(v *Vision) { v.Transcript.Ref = ptr(call.citable("request owner")) })
+					transcribe(t, call, func(v *Vision) { v.Request.ID = "other" })
 					return ""
 				}
-				if !strings.Contains(call.Request.Feedback.Message, "transcript.ref") {
+				if !strings.Contains(call.Request.Feedback.Message, `request.id: got "other"; want "shot"`) {
 					t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
 				}
 				transcribe(t, call, nil)
 				return ""
 			},
+			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, stuck); return "" }},
+		{name: "a timed-out vision Step reruns", verdict: allSupported, roles: "intake facts fact-check vision vision investigator fact-check",
+			facts: func(f *Facts, call agentCall) {
+				f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: ptr(call.citable("intake")), FileID: "bundle"}, Question: "which host does the screenshot show"}}
+			},
+			policy: func(p *RoundPolicy) { p.Vision.Timeout = time.Second },
+			vision: func(t *testing.T, call agentCall) string {
+				if call.Request.Feedback == nil {
+					return "hold"
+				}
+				transcribe(t, call, nil)
+				return ""
+			},
 			agent: func(t *testing.T, c investigatorCall) string { c.round0(t, stuck); return "" },
-			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {}},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if len(out.Recoveries) != 1 || out.Recoveries[0].Stage != "vision" || out.Recoveries[0].Code != engine.TimedOut {
+					t.Errorf("recoveries = %+v", out.Recoveries)
+				}
+			}},
+		{name: "vision requests the run budget cannot cover leave the rounds to the budget check", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 6 },
+			roles: "intake facts fact-check",
+			facts: func(f *Facts, call agentCall) {
+				f.VisionRequests = []VisionRequest{{ID: "shot", Attachment: Evidence{Ref: ptr(call.citable("intake")), FileID: "bundle"}, Question: "which host does the screenshot show"}}
+			},
+			agent: func(t *testing.T, c investigatorCall) string {
+				t.Error("dispatched a round past the budget")
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if out.Limit != LimitRun || len(out.Records) != 0 || len(out.Vision) != 0 {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
+		{name: "vision parallelism must leave a live session for the investigator", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxLiveSessions = 2 },
+			roles: "intake facts fact-check", fails: "leaves no live session for the investigator",
+			agent: func(t *testing.T, c investigatorCall) string { return "" }},
 		{name: "a timed-out round reruns in a fresh session from the same inputs", verdict: allSupported, policy: func(p *RoundPolicy) { p.RoundTimeout = time.Second },
 			roles: "intake facts fact-check investigator investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
@@ -438,7 +525,6 @@ func TestRounds(t *testing.T) {
 			var out Rounds
 			var calls []investigatorCall
 			checks := 0
-			var visions []agentCall
 			started := time.Now()
 			harnessPolicy = tc.run
 			defer func() { harnessPolicy = nil }()
@@ -479,7 +565,6 @@ func TestRounds(t *testing.T) {
 					}
 					call.reply(t, f, nil)
 				case "vision":
-					visions = append(visions, call)
 					if tc.vision != nil {
 						return tc.vision(t, call)
 					}
@@ -499,6 +584,12 @@ func TestRounds(t *testing.T) {
 				}
 				return ""
 			})
+			if tc.fails != "" {
+				if res.Report.Outcome != engine.Failed || !strings.Contains(fmt.Sprint(res.Report.Failure), tc.fails) {
+					t.Fatalf("outcome = %s failure = %v, want %q", res.Report.Outcome, res.Report.Failure, tc.fails)
+				}
+				return
+			}
 			if res.Report.Outcome != engine.Succeeded {
 				t.Fatalf("outcome = %s: %v", res.Report.Outcome, res.Report.Failure)
 			}
@@ -524,9 +615,8 @@ func TestRounds(t *testing.T) {
 					t.Errorf("session %s left %s", s.ID, s.State)
 				}
 			}
-			tc.check(t, out, calls, handles)
-			if tc.visions != nil {
-				tc.visions(t, out, calls, visions)
+			if tc.check != nil {
+				tc.check(t, out, calls, handles)
 			}
 		})
 	}
@@ -590,4 +680,35 @@ func labelsOf(t task) string {
 		labels = append(labels, in.Label)
 	}
 	return strings.Join(labels, ",")
+}
+
+func TestVisionAllowed(t *testing.T) {
+	p := RoundPolicy{TimeoutRetries: 1, Vision: VisionPolicy{MaxSteps: 5}}
+	snapshot := func(sessions, attempts int) engine.Snapshot {
+		s := engine.Snapshot{Policy: engine.RunPolicy{MaxTotalSessions: 20, MaxTotalAttempts: 40}, Sessions: map[string]engine.SessionStatus{}, Attempts: map[string]engine.AttemptState{}}
+		for i := range sessions {
+			s.Sessions[fmt.Sprint(i)] = engine.SessionStatus{}
+		}
+		for i := range attempts {
+			s.Attempts[fmt.Sprint(i)] = engine.AttemptState{}
+		}
+		return s
+	}
+	// A round reserves 4 sessions and 9 attempts; a vision Step takes up to
+	// 2 sessions and 4 attempts; the batch record takes 1 attempt.
+	for _, tc := range []struct {
+		sessions, attempts, used, want int
+	}{
+		{0, 0, 0, 5},
+		{0, 0, 3, 2},
+		{10, 0, 0, 3},
+		{0, 22, 0, 2},
+		{0, 26, 0, 1},
+		{0, 31, 0, 0},
+		{16, 0, 0, 0},
+	} {
+		if got := visionAllowed(snapshot(tc.sessions, tc.attempts), p, tc.used); got != tc.want {
+			t.Errorf("visionAllowed(%d sessions, %d attempts, %d used) = %d, want %d", tc.sessions, tc.attempts, tc.used, got, tc.want)
+		}
+	}
 }

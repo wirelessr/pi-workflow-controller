@@ -3,6 +3,7 @@ package triagev2
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -297,11 +298,16 @@ func rejectedReasons(items []FactVerdict) string {
 	return strings.Join(reasons, "; ")
 }
 
-// absentGapID names the gap for an item recorded absent; ids longer than
-// the schema allows fall back to a position.
-func absentGapID(prefix, id string, position int) string {
-	if gap := prefix + id; len(gap) <= 128 {
-		return gap
+// absentGapID names the gap for an item recorded absent, unique among the
+// gaps already listed; ids longer than the schema allows fall back to a
+// position.
+func absentGapID(prefix, id string, gaps []Gap) string {
+	gap := prefix + id
+	if len(gap) > 128 {
+		gap = fmt.Sprintf("%s%d", prefix, len(gaps)+1)
 	}
-	return fmt.Sprintf("%s%d", prefix, position)
+	for base, n := gap, 2; slices.ContainsFunc(gaps, func(g Gap) bool { return g.ID == gap }); n++ {
+		gap = fmt.Sprintf("%s-%d", base, n)
+	}
+	return gap
 }

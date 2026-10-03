@@ -66,7 +66,9 @@ type RoundRecord struct {
 // Limit says what ended rounds that still wanted to continue; with
 // LimitRun and no Records, the budget could not cover even the first round.
 type Rounds struct {
-	Records    []RoundRecord
+	Records []RoundRecord
+	// Vision holds the vision batch records, with their gaps.
+	Vision     []contract.Ref
 	Last       Round
 	Limit      string
 	HomeStack  string
@@ -103,32 +105,39 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 	visionUsed := 0
 	// vision runs one contract's vision requests and makes the results
 	// inputs of the next round.
-	vision := func(key, label string, owner contract.Ref, requests []VisionRequest) error {
-		if len(requests) == 0 {
+	// With dispatch false, as after the last round, every request gets a
+	// gap. When not even the batch record and one more round fit the run
+	// budget, nothing is recorded and the next budget check ends the rounds.
+	vision := func(key, label string, owner contract.Ref, requests []VisionRequest, dispatch bool) error {
+		snapshot := r.Snapshot()
+		if len(requests) == 0 || !batchFits(snapshot, policy) {
 			return nil
 		}
-		allowed := visionAllowed(r.Snapshot(), policy, visionUsed)
-		ref, fails, err := runVision(ctx, r, s0, policy.Vision, policy.TimeoutRetries, key, owner, requests, allowed)
+		allowed := 0
+		if dispatch {
+			allowed = visionAllowed(snapshot, policy, visionUsed)
+		}
+		ref, batch, fails, err := runVision(ctx, r, s0.Ticket, policy, key, owner, requests, allowed)
 		out.Recoveries = append(out.Recoveries, fails...)
 		if err != nil {
 			return err
 		}
-		batch, err := readAccepted[VisionBatch](ctx, r, ref, VisionBatchSchema)
-		if err != nil {
-			return err
-		}
-		visionUsed += len(batch.Data.Results)
+		visionUsed += len(batch.Results)
+		out.Vision = append(out.Vision, ref)
 		inputs = append(inputs, LabeledRef{"vision status of " + label, ref})
-		for _, res := range batch.Data.Results {
+		for _, res := range batch.Results {
 			inputs = append(inputs, LabeledRef{fmt.Sprintf("vision %s of %s", res.ID, label), res.Vision})
 		}
 		return nil
+	}
+	if live := r.Snapshot().Policy.MaxLiveSessions; policy.Vision.Parallel > live-1 {
+		return out, fmt.Errorf("vision Parallel %d leaves no live session for the investigator: the run allows %d live sessions", policy.Vision.Parallel, live)
 	}
 	facts, err := readAccepted[Facts](ctx, r, s0.Facts, FactsSchema)
 	if err != nil {
 		return out, err
 	}
-	if err := vision("vision-facts", "facts", s0.Facts, facts.Data.VisionRequests); err != nil {
+	if err := vision("vision-facts", "facts", s0.Facts, facts.Data.VisionRequests, true); err != nil {
 		return out, err
 	}
 	for n := 1; ; n++ {
@@ -204,12 +213,12 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		if round.Status != "continue" {
 			break
 		}
+		if err := vision(fmt.Sprintf("vision-round-%d", n), fmt.Sprintf("round %d", n), ref, round.VisionRequests, n < policy.MaxRounds); err != nil {
+			return out, err
+		}
 		if n == policy.MaxRounds {
 			out.Limit = LimitRounds
 			break
-		}
-		if err := vision(fmt.Sprintf("vision-round-%d", n), fmt.Sprintf("round %d", n), ref, round.VisionRequests); err != nil {
-			return out, err
 		}
 		if ts != nil {
 			handoff, note, err := capacityHandoff(ctx, r, *ts, last, policy.HandoffPercent)
@@ -232,12 +241,27 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 
 const rerunNote = "The previous attempt of this round failed (%s) and its work was not committed; queries it started may still be running remotely, so reuse what the inputs already hold and narrow expensive queries. "
 
-// roundFits reports whether the run's session and attempt budgets still
-// cover one more round in the worst case: every Step of it retried after a
-// timeout and repaired once, plus its fact status record.
-func roundFits(s engine.Snapshot, p RoundPolicy) bool {
+// roundCost is the worst case of one round: its investigator Step and its
+// fact check each retried after a timeout and repaired once, plus the fact
+// status record.
+func roundCost(p RoundPolicy) (sessions, attempts int) {
 	steps := 2 * (p.TimeoutRetries + 1)
-	return s.Policy.MaxTotalSessions-len(s.Sessions) >= steps && s.Policy.MaxTotalAttempts-len(s.Attempts) >= 2*steps+1
+	return steps, 2*steps + 1
+}
+
+// roundFits reports whether the run's budget still covers one more round.
+func roundFits(s engine.Snapshot, p RoundPolicy) bool {
+	sessions, attempts := roundCost(p)
+	return s.Policy.MaxTotalSessions-len(s.Sessions) >= sessions && s.Policy.MaxTotalAttempts-len(s.Attempts) >= attempts
+}
+
+// batchAttach is the attempt the vision batch record takes.
+const batchAttach = 1
+
+// batchFits reports whether a vision batch record and one more round fit.
+func batchFits(s engine.Snapshot, p RoundPolicy) bool {
+	sessions, attempts := roundCost(p)
+	return s.Policy.MaxTotalSessions-len(s.Sessions) >= sessions && s.Policy.MaxTotalAttempts-len(s.Attempts) >= attempts+batchAttach
 }
 
 // judgeRound has an independent check judge what a round declares, counts
@@ -286,7 +310,7 @@ func judgeRound(ctx context.Context, r *engine.Run, skills Skills, s0 S0, model 
 		if book.rejections[key]++; book.rejections[key] < policy.MaxRejections {
 			continue
 		}
-		gap := absentGapID(fmt.Sprintf("not-accepted-r%d-", n), item.ID, len(fs.Gaps)+1)
+		gap := absentGapID(fmt.Sprintf("not-accepted-r%d-", n), item.ID, fs.Gaps)
 		book.absent[key] = gap
 		fs.Gaps = append(fs.Gaps, Gap{ID: gap, Text: fmt.Sprintf("Item %s of round %d was not accepted by the independent check %d times and is treated as absent; last verdict %s: %s", item.ID, n, book.rejections[key], item.Verdict, item.Reason)})
 	}
