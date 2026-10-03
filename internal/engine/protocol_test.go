@@ -266,8 +266,20 @@ func TestEngineProtocolLegacyNULCWD(t *testing.T) {
 	}
 }
 
+// physical is the path a child reports from getcwd: symlinks resolved (the
+// macOS temp dir is under the /var link), while roles keep the given path.
+// The CWD test resolves inline because it runs inside the engine goroutine.
+func physical(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
 func TestEngineProtocolCWD(t *testing.T) {
-	for _, name := range []string{"launch", "default", "explicit", "relative", "space", "tilde", "null", "missing", "file", "nul", "nul-clean", "unused-missing", "unused-file", "unused-nul"} {
+	for _, name := range []string{"launch", "default", "explicit", "relative", "space", "tilde", "null", "symlink", "missing", "file", "nul", "nul-clean", "unused-missing", "unused-file", "unused-nul"} {
 		t.Run(name, func(t *testing.T) {
 			service := protocol.SourceWorkspace(t)
 			launch := filepath.Dir(service)
@@ -307,11 +319,18 @@ func TestEngineProtocolCWD(t *testing.T) {
 			case "space", "tilde", "null":
 				defaultCWD = map[string]string{"space": " service ", "tilde": "~", "null": "null"}[name]
 				// These names are literal, not configuration sentinels.
-				launch = protocol.RealTempDir(t)
+				launch = t.TempDir()
 				want = filepath.Join(launch, defaultCWD)
 				if err := os.Mkdir(want, 0700); err != nil {
 					t.Fatal(err)
 				}
+			case "symlink":
+				// The role keeps the configured link; only the child's getcwd resolves it.
+				defaultCWD = filepath.Join(base, "link")
+				if err := os.Symlink(service, defaultCWD); err != nil {
+					t.Fatal(err)
+				}
+				want = defaultCWD
 			case "missing", "unused-missing":
 				defaultCWD, bad = filepath.Join(base, "absent"), "spawn"
 			case "file", "unused-file":
@@ -351,8 +370,9 @@ func TestEngineProtocolCWD(t *testing.T) {
 					}
 					select {
 					case event := <-host.Events():
-						if event.Err != nil || event.Message.Type != "hello" || event.Message.CWD != want {
-							return engine.Result{}, fmt.Errorf("actual child cwd: %+v %v, want %q", event.Message, event.Err, want)
+						physical, _ := filepath.EvalSymlinks(want)
+						if event.Err != nil || event.Message.Type != "hello" || event.Message.CWD != physical {
+							return engine.Result{}, fmt.Errorf("actual child cwd: %+v %v, want %q", event.Message, event.Err, physical)
 						}
 						hellos = append(hellos, event.Message)
 					case <-ctx.Done():
@@ -604,8 +624,8 @@ func TestEngineProtocolHandoff(t *testing.T) {
 					return c
 				}
 				hello := next("hello")
-				if hello.CWD != service {
-					t.Fatalf("handoff child cwd=%q, want %q", hello.CWD, service)
+				if hello.CWD != physical(t, service) {
+					t.Fatalf("handoff child cwd=%q, want %q", hello.CWD, physical(t, service))
 				}
 				hellos = append(hellos, hello)
 				if session == 1 {

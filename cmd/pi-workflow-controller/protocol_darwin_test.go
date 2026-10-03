@@ -276,6 +276,7 @@ func TestCLIPTYNewlineBoundary(t *testing.T) {
 				input := strings.Repeat("A", offset) + "\nEND\n"
 				assertCLIPlain(t, input)
 				written := make(chan error, 1)
+				var writes int
 				go func() {
 					// A blocking write returns short when a signal (such as Go's
 					// preemption SIGURG) interrupts it after a partial transfer.
@@ -284,6 +285,7 @@ func TestCLIPTYNewlineBoundary(t *testing.T) {
 					for len(buf) > 0 {
 						var n int
 						n, err = unix.Write(int(pty.slave.Fd()), buf)
+						writes++
 						if n > 0 {
 							buf = buf[n:]
 						}
@@ -351,7 +353,7 @@ func TestCLIPTYNewlineBoundary(t *testing.T) {
 				pty.join(t)
 				pty.restored(t, false)
 				raw := pty.text()
-				t.Logf("pure LF syscall input=%d raw=%d boundary=%q CRCRLF=%d", len(input), len(raw), raw[max(0, len(raw)-10):], strings.Count(raw, "\r\r\n"))
+				t.Logf("pure LF syscall input=%d writes=%d raw=%d boundary=%q CRCRLF=%d", len(input), writes, len(raw), raw[max(0, len(raw)-10):], strings.Count(raw, "\r\r\n"))
 				t.Logf("raw PTY hex: %x", []byte(raw))
 				if raw != want {
 					t.Fatalf("unexpected transport bytes: %q", raw)

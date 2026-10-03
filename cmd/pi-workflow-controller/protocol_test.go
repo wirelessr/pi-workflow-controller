@@ -669,8 +669,13 @@ func TestCLIProtocolSuccess(t *testing.T) {
 			if wantCWD == "" {
 				wantCWD = cwd
 			}
-			if hello.CWD != wantCWD {
-				t.Fatalf("CLI child cwd=%q, want %q", hello.CWD, wantCWD)
+			// The child's getcwd resolves symlinks; the role keeps the given path.
+			physical, err := filepath.EvalSymlinks(wantCWD)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hello.CWD != physical {
+				t.Fatalf("CLI child cwd=%q, want %q", hello.CWD, physical)
 			}
 			for _, session := range s.Sessions {
 				if session.Role.CWD != wantCWD {
