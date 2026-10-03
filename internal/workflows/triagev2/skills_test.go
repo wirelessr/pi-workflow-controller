@@ -73,12 +73,17 @@ func sha(raw []byte) string { s := sha256.Sum256(raw); return hex.EncodeToString
 
 func runSkills(t *testing.T, prepare func(context.Context, *engine.Run) error) engine.Report {
 	t.Helper()
+	return runSkillsPolicy(t, engine.DefaultRunPolicy(), prepare)
+}
+
+func runSkillsPolicy(t *testing.T, policy engine.RunPolicy, prepare func(context.Context, *engine.Run) error) engine.Report {
+	t.Helper()
 	registry, err := contract.NewRegistry(Resources(), Schemas())
 	if err != nil {
 		t.Fatal(err)
 	}
 	base := t.TempDir()
-	r, err := engine.New(context.Background(), engine.Definition{Name: "skills-fixture", Version: "1", Policy: engine.DefaultRunPolicy(), Execute: func(ctx context.Context, run *engine.Run, _ engine.Input) (engine.Result, error) {
+	r, err := engine.New(context.Background(), engine.Definition{Name: "skills-fixture", Version: "1", Policy: policy, Execute: func(ctx context.Context, run *engine.Run, _ engine.Input) (engine.Result, error) {
 		return engine.Result{}, prepare(ctx, run)
 	}}, engine.Input{Prompt: "skills fixture", LaunchCWD: base}, engine.Options{BaseDir: base, Schemas: registry, Runtime: noRuntime{}})
 	if err != nil {

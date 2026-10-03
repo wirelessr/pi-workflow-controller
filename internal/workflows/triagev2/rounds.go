@@ -275,7 +275,7 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		}
 		// T1 runs after the identity round unless it ended the
 		// investigation; a T1 challenge goes to round 2 before any candidate
-		// of round 1 is gated.
+		// of round 1 is gated, when there is a round 2.
 		t1Challenge := false
 		if n == 1 && round.Status != "blocked" {
 			v, err := ask("T1")
@@ -287,7 +287,8 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		switch round.Status {
 		case "blocked":
 		case "candidate":
-			if t1Challenge {
+			// With no round left the candidate is still gated.
+			if t1Challenge && n < policy.MaxRounds {
 				break
 			}
 			if challenges >= policy.MaxChallenges {

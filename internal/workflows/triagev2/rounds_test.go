@@ -649,6 +649,29 @@ func TestRounds(t *testing.T) {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
+		{name: "a T1 challenge with no round left still lets T2a gate the candidate", verdict: allSupported, stewards: "T1 T2a",
+			policy: func(p *RoundPolicy) { p.MaxRounds = 1 },
+			roles:  "intake facts fact-check investigator",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
+					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
+				})
+				return ""
+			},
+			steward: func(t *testing.T, call agentCall) string {
+				verdict := "pass"
+				if call.Task.Trigger == "T1" {
+					verdict = "challenge"
+				}
+				call.reply(t, stewardVerdict(call, verdict), nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if out.Pass == (contract.Ref{}) {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
 		{name: "a stuck last round gets no redirection", verdict: allSupported, policy: func(p *RoundPolicy) { p.MaxRounds = 1 },
 			roles: "intake facts fact-check investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
@@ -1153,5 +1176,47 @@ func TestAttachObservations(t *testing.T) {
 	}
 	if coverageNote(ObservationRecord{Attempts: []ObservedAttempt{{AttemptID: "a"}}}) != "" {
 		t.Error("a complete observation has a coverage note")
+	}
+}
+
+func TestAttachObservationsWithinAttemptLimits(t *testing.T) {
+	dir := t.TempDir()
+	var paths []string
+	for i := range 2 {
+		path := filepath.Join(dir, fmt.Sprintf("e%d.jsonl", i))
+		if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"source":"rpc","entry":{"id":"e%d"}}`+"\n", i)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+	}
+	policy := engine.DefaultRunPolicy()
+	policy.MaxAttemptFiles = 3
+	var record ObservationRecord
+	var ids map[string]bool
+	report := runSkillsPolicy(t, policy, func(ctx context.Context, r *engine.Run) error {
+		round, err := attachFixture(ctx, r, "round", PromptSchema, CallerPrompt{Ticket: "CASE-17"}, nil)
+		if err != nil {
+			return err
+		}
+		ref, got, err := attachObservations(ctx, r, "observation", round, []observed{
+			{"a1", &engine.Observation{Path: paths[0], Entries: 1, Calls: []engine.ToolCall{{EntryID: "c1", Tool: "bash"}}}},
+			{"a2", &engine.Observation{Path: paths[1], Entries: 1, Calls: []engine.ToolCall{{EntryID: "c2", Tool: "bash"}}}},
+		})
+		if err != nil {
+			return err
+		}
+		ids, record = got, decodeRef[ObservationRecord](t, r, ref)
+		return nil
+	})
+	if report.Outcome != engine.Succeeded {
+		t.Fatalf("fixture run failed: %v", report.Failure)
+	}
+	a := record.Attempts
+	// Both indexes go first; one entries file still fits, the other is a gap.
+	if a[0].CallsFile == nil || a[1].CallsFile == nil || a[0].EntriesFile == nil || a[1].EntriesFile != nil || !strings.Contains(strings.Join(a[1].Gaps, ";"), "reached the attempt file limits") {
+		t.Fatalf("attempts = %+v", a)
+	}
+	if !ids["c1"] || !ids["c2"] || !ids["e0"] || ids["e1"] {
+		t.Errorf("entry ids = %v; want only committed entries", ids)
 	}
 }

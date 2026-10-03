@@ -91,7 +91,6 @@ func attachObservations(ctx context.Context, r *engine.Run, key string, round co
 				return contract.Ref{}, nil, err
 			}
 			calls.Write(append(line, '\n'))
-			ids[c.EntryID] = true
 		}
 		if why := fits(calls.Len()); why != "" {
 			entry.Gaps = append(entry.Gaps, "tool call index not attached: "+why)
@@ -99,6 +98,10 @@ func attachObservations(ctx context.Context, r *engine.Run, key string, round co
 			id := fmt.Sprintf("calls-%d", i+1)
 			entry.CallsFile = &id
 			files = append(files, contract.ControllerFile{ID: id, Path: "evidence/" + id + ".jsonl", Data: calls.Bytes()})
+			// Only committed entries may be named by a finding.
+			for _, c := range a.o.Calls {
+				ids[c.EntryID] = true
+			}
 		}
 		record.Attempts = append(record.Attempts, entry)
 	}
@@ -114,8 +117,8 @@ func attachObservations(ctx context.Context, r *engine.Run, key string, round co
 			continue
 		}
 		raw, err := os.ReadFile(a.o.Path)
-		if err != nil {
-			entry.Gaps = append(entry.Gaps, fmt.Sprintf("entries file could not be read: %v", err))
+		if err != nil || int64(len(raw)) != info.Size() {
+			entry.Gaps = append(entry.Gaps, fmt.Sprintf("entries file could not be read whole: %v", err))
 			continue
 		}
 		id := fmt.Sprintf("entries-%d", i+1)
