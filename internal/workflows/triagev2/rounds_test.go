@@ -485,7 +485,10 @@ func TestRounds(t *testing.T) {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
-		{name: "vision parallelism must leave a live session for the investigator", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxLiveSessions = 2 },
+		{name: "verification needs three live sessions beside the investigator", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxLiveSessions = 3 },
+			roles: "intake facts fact-check", fails: "verification needs 3 live sessions",
+			agent: func(t *testing.T, c investigatorCall) string { return "" }},
+		{name: "vision parallelism must leave a live session for the investigator", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxLiveSessions = 4 }, policy: func(p *RoundPolicy) { p.Vision.Parallel = 4 },
 			roles: "intake facts fact-check", fails: "leaves no live session for the investigator",
 			agent: func(t *testing.T, c investigatorCall) string { return "" }},
 		{name: "a T1 challenge on a receipt reaches the next round", verdict: allSupported,
@@ -709,8 +712,12 @@ func TestRounds(t *testing.T) {
 				return ""
 			},
 			verifier: func(t *testing.T, call agentCall) string {
-				if labels := labelsOf(call.Task); labels != "claim,allowed evidence owner" || len(call.Task.Skills) != 0 || !strings.Contains(call.Task.Requirements, verifierRequirements) {
-					t.Errorf("verifier sees %s with skills %v", labels, call.Task.Skills)
+				claim := decodeRef[Claim](t, nil, call.citable("claim"))
+				if labels := labelsOf(call.Task); labels != "claim,allowed evidence owner" || len(call.Request.Inputs) != 2 || call.Request.Inputs[0] != call.citable("claim") || call.Request.Inputs[1] != claim.Round || len(call.Task.Skills) != 0 || !strings.Contains(call.Task.Requirements, verifierRequirements) {
+					t.Errorf("verifier sees %s, inputs %v, skills %v; want only the claim and its round", labels, call.Request.Inputs, call.Task.Skills)
+				}
+				if *claim.Candidate.CodeRefs[0].Evidence[0].Ref != claim.Round {
+					t.Errorf("code excerpt not cited through the round: %+v", claim.Candidate.CodeRefs[0])
 				}
 				if call.Task.Verify.Role != "con" {
 					call.reply(t, verdictFor(call, nil), nil)
@@ -771,6 +778,86 @@ func TestRounds(t *testing.T) {
 				if out.Limit != LimitVerifications || out.Passed() || len(out.Claims) != 1 || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T2b) challenged") {
 					t.Errorf("rounds = %+v", out)
 				}
+			}},
+		{name: "a verifier contract still invalid after its repair fails the run", verdict: allSupported,
+			roles: "intake facts fact-check investigator", fails: `role: got "con"; want "pro"`,
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
+					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
+				})
+				return ""
+			},
+			verifier: func(t *testing.T, call agentCall) string {
+				call.reply(t, verdictFor(call, func(v *Verification) {
+					if v.Role == "pro" {
+						v.Role = "con"
+					}
+				}), nil)
+				return ""
+			}},
+		{name: "a run budget that covers T2a but not the verification ends the rounds", verdict: allSupported, stewards: "T1 T2a",
+			roles: "intake facts fact-check investigator", run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 28 },
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
+					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
+				})
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if out.Limit != LimitRun || len(out.Claims) != 0 {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
+		{name: "a T2b challenge counts toward the challenge limit", verdict: allSupported, stewards: "T1 T2a T2b",
+			roles: "intake facts fact-check investigator investigator", policy: func(p *RoundPolicy) { p.MaxChallenges = 1 },
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
+					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
+				})
+				return ""
+			},
+			steward: func(t *testing.T, call agentCall) string {
+				verdict := "pass"
+				if call.Task.Trigger == "T2b" {
+					verdict = "challenge"
+					if labels := labelsOf(call.Task); !strings.Contains(labels, "verification 1 claim,verification 1 delivery,verification 1 pro,verification 1 con,verification 1 cross") {
+						t.Errorf("T2b inputs = %s", labels)
+					}
+				}
+				call.reply(t, stewardVerdict(call, verdict), nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if out.Limit != LimitChallenges {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
+		{name: "a candidate citing a steward's wiki copy is repaired", verdict: allSupported, stewards: "T1 T2a T2b",
+			roles: "intake facts fact-check investigator fact-check investigator investigator",
+			agent: func(t *testing.T, c investigatorCall) string {
+				if c.round == 1 {
+					c.round0(t, nil)
+					return ""
+				}
+				c.round0(t, func(v *Round) {
+					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
+					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
+					if !c.repair {
+						v.Candidate.AllowedEvidence = append(v.Candidate.AllowedEvidence, Evidence{Ref: ptr(c.citable("steward T1 after round 1")), FileID: "page"})
+					} else if !strings.Contains(c.Request.Feedback.Message, "a triage.steward.v1; verifiers may not read it") {
+						t.Errorf("repair feedback = %q", c.Request.Feedback.Message)
+					}
+				})
+				return ""
+			},
+			steward: func(t *testing.T, call agentCall) string {
+				v := stewardVerdict(call, "pass")
+				v.Wiki = []StewardWiki{{Query: "tenant 17", Evidence: []Evidence{{FileID: "page"}}}}
+				call.reply(t, v, map[string][]byte{"page": []byte("a prior investigation\n")})
+				return ""
 			}},
 		{name: "a timed-out round reruns in a fresh session from the same inputs", verdict: allSupported, policy: func(p *RoundPolicy) { p.RoundTimeout = time.Second },
 			roles: "intake facts fact-check investigator investigator fact-check",
@@ -1326,4 +1413,74 @@ func verdictFor(call agentCall, change func(*Verification)) Verification {
 		change(&out)
 	}
 	return out
+}
+
+func TestCheckVerification(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*Verification, contract.Ref)
+		files  map[string][]byte
+		want   string
+	}{
+		{name: "valid", change: func(*Verification, contract.Ref) {}},
+		{name: "files", change: func(*Verification, contract.Ref) {}, files: map[string][]byte{"x": []byte("x")}, want: "a verifier writes no files"},
+		{name: "another claim", change: func(v *Verification, other contract.Ref) { v.Claim = other }, want: "claim:"},
+		{name: "another role", change: func(v *Verification, _ contract.Ref) { v.Role = "con" }, want: `role: got "con"; want "pro"`},
+		{name: "evidence out of order", change: func(v *Verification, _ contract.Ref) {
+			v.AllowedEvidence[0], v.AllowedEvidence[1] = v.AllowedEvidence[1], v.AllowedEvidence[0]
+		}, want: "allowed_evidence: want the claim's allowed evidence copied in order"},
+		{name: "blank measurement", change: func(v *Verification, _ contract.Ref) { v.Assessment.Measurement = "\u00a0" }, want: "assessment.measurement"},
+		{name: "blank gap", change: func(v *Verification, _ contract.Ref) { v.Assessment.Gaps = []string{"\u00a0"} }, want: "assessment.gaps[0]"},
+		{name: "runtime basis outside", change: func(v *Verification, other contract.Ref) {
+			v.Assessment.RuntimeBasis = []Evidence{{Ref: &other, FileID: "prompt"}}
+		}, want: `assessment.runtime_basis[0]: file "prompt" is not cited exactly`},
+		{name: "counterexample basis outside", change: func(v *Verification, other contract.Ref) {
+			v.Assessment.Counterexamples = []VerificationIssue{{Statement: "s", Disposition: "d", Reason: "r", Basis: []Evidence{{Ref: &other, FileID: "prompt"}}}}
+		}, want: "assessment.counterexamples[0].basis[0]"},
+		{name: "blank counterexample", change: func(v *Verification, _ contract.Ref) {
+			v.Assessment.Counterexamples = []VerificationIssue{{Statement: "s", Disposition: "\u00a0", Reason: "r", Basis: []Evidence{}}}
+		}, want: "assessment.counterexamples[0]: statement, disposition and reason"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			report := runSkills(t, func(ctx context.Context, r *engine.Run) error {
+				v, files := intakeFiles()
+				intake, e := attachFixture(ctx, r, "intake", IntakeSchema, v, files)
+				if e != nil {
+					return e
+				}
+				round := baseRound(intake)
+				round.Status, round.FactsUpdate, round.Identity, round.Receipts = "candidate", []Fact{}, nil, []Receipt{}
+				round.DeployedBuilds, round.Candidate = deployedBuild(), codeClaim("b1", nil)
+				roundRef, e := attachFixture(ctx, r, "round", RoundSchema, round, roundFiles())
+				if e != nil {
+					return e
+				}
+				other, e := attachFixture(ctx, r, "other", PromptSchema, CallerPrompt{Ticket: "CASE-17"}, map[string][]byte{"prompt": []byte("CASE-17")})
+				if e != nil {
+					return e
+				}
+				claim := claimFor(roundRef, *round.Candidate, other)
+				claimRef, e := attachFixture(ctx, r, "claim", ClaimSchema, claim, nil)
+				if e != nil {
+					return e
+				}
+				verification := verdictFor(agentCall{Task: task{Verify: &verifyTask{Role: "pro", Claim: claimRef, AllowedEvidence: claim.Candidate.AllowedEvidence}}}, nil)
+				verification.AllowedEvidence = slices.Clone(verification.AllowedEvidence)
+				tc.change(&verification, other)
+				ref, e := attachFixture(ctx, r, "verification", VerificationSchema, verification, tc.files)
+				if e != nil {
+					return e
+				}
+				err = checkVerification(ctx, r, ref, claimRef, claim, "pro")
+				return nil
+			})
+			if report.Outcome != engine.Succeeded {
+				t.Fatalf("fixture run failed: %v", report.Failure)
+			}
+			if got := errText(err); tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("checkVerification = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }

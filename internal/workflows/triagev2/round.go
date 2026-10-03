@@ -315,6 +315,18 @@ func checkCandidate(ctx context.Context, r *engine.Run, c Candidate, builds []Bu
 	if err := citeAll(cite, "candidate.allowed_evidence", c.AllowedEvidence); err != nil {
 		return err
 	}
+	// Verifiers must not read other roles' judgments or session logs.
+	judged := func(field string, e Evidence) error {
+		if e.Ref != nil && slices.Contains(judgmentSchemas, e.Ref.SchemaID) {
+			return fmt.Errorf("%s.ref: got %s, a %s; verifiers may not read it, so copy what the claim needs into this round's own evidence files", field, describeRef(*e.Ref), e.Ref.SchemaID)
+		}
+		return nil
+	}
+	for i, e := range c.AllowedEvidence {
+		if err := judged(fmt.Sprintf("candidate.allowed_evidence[%d]", i), e); err != nil {
+			return err
+		}
+	}
 	allowed := map[citedFile]bool{}
 	for _, e := range c.AllowedEvidence {
 		allowed[fileOf(e)] = true
@@ -327,6 +339,9 @@ func checkCandidate(ctx context.Context, r *engine.Run, c Candidate, builds []Bu
 		field := fmt.Sprintf("candidate.code_refs[%d]", i)
 		for j, e := range code.Evidence {
 			if err := cite(fmt.Sprintf("%s.evidence[%d]", field, j), e); err != nil {
+				return err
+			}
+			if err := judged(fmt.Sprintf("%s.evidence[%d]", field, j), e); err != nil {
 				return err
 			}
 			if !allowed[fileOf(e)] {
@@ -350,6 +365,10 @@ func checkCandidate(ctx context.Context, r *engine.Run, c Candidate, builds []Bu
 	}
 	return nil
 }
+
+// judgmentSchemas are contracts holding other roles' judgments or session
+// logs; a claim may not hand them to verifiers as evidence.
+var judgmentSchemas = []string{StewardSchema, AuditSchema, FactCheckSchema, ClaimSchema, VerificationSchema, DeliverySchema, ObservationSchema}
 
 type citedFile struct {
 	ref    contract.Ref

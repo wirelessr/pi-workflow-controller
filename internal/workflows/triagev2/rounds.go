@@ -167,6 +167,9 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		}
 		return nil
 	}
+	if live := r.Snapshot().Policy.MaxLiveSessions; live < len(verifierRoles)+1 {
+		return out, fmt.Errorf("verification needs %d live sessions beside the investigator's: the run allows %d", len(verifierRoles), live)
+	}
 	if live := r.Snapshot().Policy.MaxLiveSessions; policy.Vision.MaxSteps > 0 && policy.Vision.Parallel > live-1 {
 		return out, fmt.Errorf("vision Parallel %d leaves no live session for the investigator: the run allows %d live sessions", policy.Vision.Parallel, live)
 	}
@@ -335,6 +338,8 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 			deliveryRef, delivery, fails, err := runVerification(ctx, r, s0.Ticket, policy.Verification, policy.TimeoutRetries, len(out.Claims)+1, claimRef, claim)
 			out.Recoveries = append(out.Recoveries, fails...)
 			if err != nil {
+				// Keep the committed claim for whoever reports the failure.
+				out.Claims = append(out.Claims, ClaimRecord{Round: n, Claim: claimRef, T2a: t2a})
 				return out, err
 			}
 			label := fmt.Sprintf("verification %d", len(out.Claims)+1)

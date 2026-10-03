@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,12 +86,21 @@ func claimFor(round contract.Ref, c Candidate, t2a contract.Ref) Claim {
 	return Claim{Round: round, Steward: t2a, Candidate: c}
 }
 
-// claimInputs are the claim and the owners of its allowed evidence.
+// claimInputs are the claim, the owners of its allowed evidence and the
+// rounds holding the deployed builds its code rests on.
 func claimInputs(ref contract.Ref, c Claim) []contract.Ref {
 	inputs := []contract.Ref{ref}
+	add := func(r contract.Ref) {
+		if !slices.Contains(inputs, r) {
+			inputs = append(inputs, r)
+		}
+	}
 	for _, e := range c.Candidate.AllowedEvidence {
-		if !slices.Contains(inputs, *e.Ref) {
-			inputs = append(inputs, *e.Ref)
+		add(*e.Ref)
+	}
+	for _, code := range c.Candidate.CodeRefs {
+		if code.Basis != nil {
+			add(*code.Basis.Ref)
 		}
 	}
 	return inputs
@@ -210,13 +220,13 @@ func checkVerification(ctx context.Context, r *engine.Run, ref, claimRef contrac
 }
 
 // checkVerifierOwner keeps the approved owner rule: the result comes from
-// a closed fresh session of this role and model that served only this
-// verifier's attempts.
-func checkVerifierOwner(r *engine.Run, attemptID, key, role string, model runtime.ModelSpec) error {
+// a closed fresh session of this role and model, in this verification's
+// group, that served only this verifier's attempts (its repair included).
+func checkVerifierOwner(r *engine.Run, attemptID, group, key, role string, model runtime.ModelSpec) error {
 	snapshot := r.Snapshot()
 	attempt, ok := snapshot.Attempts[attemptID]
 	owner, owned := snapshot.Sessions[attempt.HandleID]
-	if !ok || !owned || owner.Role.Name != "triage-verify-"+role || owner.Role.Model != model || owner.State != "Closed" || attempt.Key != key {
+	if !ok || !owned || owner.Role.Name != "triage-verify-"+role || owner.Role.Model != model || owner.State != "Closed" || attempt.Key != key || !strings.Contains(attempt.Scope, "/"+group+"/") {
 		return fmt.Errorf("verification %s must come from a closed fresh %s session of its model", attemptID, role)
 	}
 	for id, other := range snapshot.Attempts {
@@ -233,6 +243,7 @@ func checkVerifierOwner(r *engine.Run, attemptID, key, role string, model runtim
 func runVerification(ctx context.Context, r *engine.Run, ticket string, policy VerificationPolicy, retries, n int, claimRef contract.Ref, claim Claim) (contract.Ref, Delivery, []RecoveryFailure, error) {
 	delivery := Delivery{Claim: claimRef, Roles: make([]RoleDelivery, len(verifierRoles))}
 	inputs := claimInputs(claimRef, claim)
+	group := fmt.Sprintf("verification-%d", n)
 	var failures []RecoveryFailure
 	var mu sync.Mutex
 	var branches []engine.Branch
@@ -253,7 +264,7 @@ func runVerification(ctx context.Context, r *engine.Run, ticket string, policy V
 				if err != nil {
 					return ref, err
 				}
-				return ref, checkVerifierOwner(r, ref.AttemptID, key, role, policy.model(role))
+				return ref, checkVerifierOwner(r, ref.AttemptID, group, key, role, policy.model(role))
 			}, nil)
 			mu.Lock()
 			failures = append(failures, fails...)
@@ -278,7 +289,7 @@ func runVerification(ctx context.Context, r *engine.Run, ticket string, policy V
 			return engine.Result{Outputs: map[string]contract.Ref{"verification": ref}}, nil
 		}})
 	}
-	results, err := r.Root().Parallel(ctx, fmt.Sprintf("verification-%d", n), engine.CollectAll, branches)
+	results, err := r.Root().Parallel(ctx, group, engine.CollectAll, branches)
 	if err != nil {
 		return contract.Ref{}, delivery, failures, err
 	}
