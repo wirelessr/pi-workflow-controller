@@ -185,7 +185,10 @@ func TestRounds(t *testing.T) {
 			}},
 		{name: "a run budget that cannot cover the first round runs none", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 14 },
 			roles: "intake facts fact-check",
-			agent: func(t *testing.T, c investigatorCall) string { t.Error("dispatched a round past the budget"); return "" },
+			agent: func(t *testing.T, c investigatorCall) string {
+				t.Error("dispatched a round past the budget")
+				return ""
+			},
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
 				if out.Limit != LimitRun || len(out.Records) != 0 {
 					t.Errorf("rounds = %+v", out)
