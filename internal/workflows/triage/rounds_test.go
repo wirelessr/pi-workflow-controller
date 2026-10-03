@@ -1450,6 +1450,13 @@ func TestCheckVerification(t *testing.T) {
 			e.Ref = nil
 			v.Assessment.Basis = []Evidence{e}
 		}, want: `is not cited exactly as the claim allows it: got ref null`},
+		{name: "basis with a mistyped digest", change: func(v *Verification, _ contract.Ref) {
+			e := v.AllowedEvidence[0]
+			ref := *e.Ref
+			ref.SHA256 = strings.Repeat("0", 64)
+			e.Ref = &ref
+			v.Assessment.Basis = []Evidence{e}
+		}, want: `(yours differs in sha256 "` + strings.Repeat("0", 64) + `"`},
 		{name: "basis of an unknown file", change: func(v *Verification, _ contract.Ref) {
 			v.Assessment.Basis = []Evidence{{FileID: "nowhere"}}
 		}, want: `file "nowhere" is not cited exactly as the claim allows it: the claim's allowed_evidence has no entry for this file id`},

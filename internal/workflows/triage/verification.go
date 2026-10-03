@@ -312,7 +312,13 @@ func allowedHint(allowed []Evidence, e Evidence) string {
 	var want []string
 	for _, x := range allowed {
 		if x.FileID == e.FileID {
-			want = append(want, describeEvidence(x))
+			d := describeEvidence(x)
+			if e.Ref != nil && x.Ref != nil && e.Ref.AttemptID == x.Ref.AttemptID {
+				if fields := differingFields(*e.Ref, *x.Ref); fields != "" {
+					d += " (yours differs in " + fields + ")"
+				}
+			}
+			want = append(want, d)
 		}
 	}
 	if len(want) == 0 {

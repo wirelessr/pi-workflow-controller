@@ -11,7 +11,7 @@ import (
 )
 
 // feedbackDispatchNote marks a dispatch whose request carries feedback.
-const feedbackDispatchNote = "This request carries request.feedback: read request.feedback.message before starting. It states what this attempt must address; the rest of the request may be identical to a previous attempt's."
+const feedbackDispatchNote = "This request carries request.feedback: read request.feedback.message before starting. It explains why this attempt runs or what it must address; the rest of the request may match a previous attempt's."
 
 func (s *Scope) Step(ctx context.Context, spec StepSpec) (result StepResult, err error) {
 	if s == nil || s.run == nil {
