@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Render the triage report from its committed inputs, without inventing claims."""
 
+import json
 import os
 import re
 import sys
@@ -27,6 +28,9 @@ def render(meta, data, documents):
 
     def inline(value):
         body = str(value)
+        if "\n" in body or "\r" in body:
+            # A code span cannot hold a line break; escape it instead.
+            body = json.dumps(body, ensure_ascii=False)
         fence = "`" * (1 + max((len(run) for run in re.findall(r"`+", body)), default=0))
         pad = " " if body.startswith("`") or body.endswith("`") else ""
         return fence + pad + body + pad + fence
