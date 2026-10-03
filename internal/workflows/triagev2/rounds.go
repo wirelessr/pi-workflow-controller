@@ -62,7 +62,8 @@ type RoundRecord struct {
 
 // Rounds is the outcome of the round loop. Until the steward and
 // verification stages exist, a candidate, stuck or blocked round ends it.
-// Limit says what ended a round that still wanted to continue.
+// Limit says what ended rounds that still wanted to continue; with
+// LimitRun and no Records, the budget could not cover even the first round.
 type Rounds struct {
 	Records    []RoundRecord
 	Last       Round

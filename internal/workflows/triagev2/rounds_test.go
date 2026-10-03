@@ -2,6 +2,7 @@ package triagev2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -180,6 +181,33 @@ func TestRounds(t *testing.T) {
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
 				if len(out.Recoveries) != 1 || out.Recoveries[0].Stage != "fact-check" || out.Recoveries[0].Code != engine.TimedOut || out.Records[0].Check == (contract.Ref{}) {
 					t.Errorf("recoveries = %+v", out.Recoveries)
+				}
+			}},
+		{name: "a run budget that cannot cover the first round runs none", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 14 },
+			roles: "intake facts fact-check",
+			agent: func(t *testing.T, c investigatorCall) string { t.Error("dispatched a round past the budget"); return "" },
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if out.Limit != LimitRun || len(out.Records) != 0 {
+					t.Errorf("rounds = %+v", out)
+				}
+			}},
+		{name: "two rejected items with one key count one rejection", verdict: func(id string) string {
+			if strings.HasPrefix(id, "host") {
+				return "unsupported"
+			}
+			return "supported"
+		}, policy: func(p *RoundPolicy) { p.MaxRounds = 1 }, roles: "intake facts fact-check investigator fact-check",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					twin := v.FactsUpdate[0]
+					twin.ID = "host-2"
+					v.FactsUpdate = append(v.FactsUpdate, twin)
+				})
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if status := decodeRef[FactStatus](t, nil, out.Records[0].Status); len(status.Gaps) != 0 {
+					t.Errorf("one round reached the limit of 2 with a repeated key: %+v", status.Gaps)
 				}
 			}},
 		{name: "a run budget that cannot cover another round ends the rounds", verdict: allSupported, run: func(p *engine.RunPolicy) { p.MaxTotalAttempts = 17 },
@@ -366,6 +394,9 @@ func TestRounds(t *testing.T) {
 						t.Errorf("session %s is %s when the rounds return", id, s.State)
 					}
 				}
+				if len(out.Records) == 0 {
+					return engine.Result{}, nil
+				}
 				last := out.Records[len(out.Records)-1].Round
 				return engine.Result{Outputs: map[string]contract.Ref{"round": last}, Final: &engine.FinalSelection{Output: "round"}}, nil
 			}, func(t *testing.T, call agentCall) string {
@@ -438,6 +469,26 @@ func TestRoundFits(t *testing.T) {
 	}{{6, 11, true}, {7, 11, false}, {6, 12, false}} {
 		if got := roundFits(snapshot(tc.sessions, tc.attempts), p); got != tc.fits {
 			t.Errorf("roundFits(%d sessions, %d attempts) = %v, want %v", tc.sessions, tc.attempts, got, tc.fits)
+		}
+	}
+}
+
+func TestCloseFailure(t *testing.T) {
+	classified := &engine.Failure{Code: engine.TimedOut, Origin: engine.OriginRunDeadline}
+	for _, tc := range []struct {
+		name string
+		err  error
+		code engine.Code
+	}{
+		{"a classified failure stays", classified, engine.TimedOut},
+		{"a bare cancellation is a cancellation", context.Canceled, engine.Cancelled},
+		{"running out of cleanup time is a cleanup failure", context.DeadlineExceeded, engine.CleanupFailed},
+		{"anything else is a cleanup failure", fmt.Errorf("close: broken pipe"), engine.CleanupFailed},
+	} {
+		var f *engine.Failure
+		err := closeFailure(tc.err, "triage-probe", "h1")
+		if !errors.As(err, &f) || f.Code != tc.code || f.Code != engine.TimedOut && f.HandleID != "h1" {
+			t.Errorf("%s: closeFailure = %+v", tc.name, f)
 		}
 	}
 }

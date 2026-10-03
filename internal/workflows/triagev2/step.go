@@ -179,7 +179,11 @@ func (ts TaskSession) Close(ctx context.Context, r *engine.Run, stage string, ou
 	}
 	closed, err := r.CloseSessionReport(ctx, ts.Handle)
 	if err != nil {
-		err = closeFailure(err, "triage-"+stage, ts.Identity.HandleID)
+		handle := ts.Identity.HandleID
+		if handle == "" {
+			handle = closed.Identity.HandleID
+		}
+		err = closeFailure(err, "triage-"+stage, handle)
 		if recovery {
 			return &TaskFailure{Cause: err, Handle: ts.Handle, Identity: ts.Identity, Stage: stage, Attempt: out.AttemptID}
 		}
