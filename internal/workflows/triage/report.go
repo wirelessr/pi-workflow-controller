@@ -109,7 +109,10 @@ func reportClaim(out Rounds) ReportClaim {
 		return ReportClaim{Outcome: "none"}
 	}
 	last := out.Claims[len(out.Claims)-1]
-	c := ReportClaim{Claim: &last.Claim, T2a: &last.T2a, Outcome: "not-passed"}
+	c := ReportClaim{Claim: &last.Claim, Outcome: "not-passed"}
+	if last.T2a != (contract.Ref{}) {
+		c.T2a = &last.T2a
+	}
 	if last.Delivery != (contract.Ref{}) {
 		c.Delivery = &last.Delivery
 	}

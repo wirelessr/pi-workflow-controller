@@ -330,16 +330,22 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 			if t1Challenge && n < policy.MaxRounds {
 				break
 			}
+			// With the challenges spent the steward gate is skipped, but the
+			// candidate still gets the independent verification: ending
+			// here would report the best answer unverified (user decision,
+			// a revision of "any spent budget goes to the report").
+			var t2a contract.Ref
 			if challenges >= policy.MaxChallenges {
 				out.Limit = LimitChallenges
-				break
-			}
-			v, err := ask("T2a")
-			if err != nil {
-				return out, err
-			}
-			if v.Verdict != "pass" {
-				break
+			} else {
+				v, err := ask("T2a")
+				if err != nil {
+					return out, err
+				}
+				if v.Verdict != "pass" {
+					break
+				}
+				t2a = out.Stewards[len(out.Stewards)-1].Ref
 			}
 			if len(out.Claims) >= policy.Verification.MaxRuns {
 				out.Limit = LimitVerifications
@@ -349,7 +355,6 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 				out.Limit = LimitRun
 				break
 			}
-			t2a := out.Stewards[len(out.Stewards)-1].Ref
 			claim := claimFor(ref, *round.Candidate, t2a)
 			claimRef, err := root.Attach(ctx, engine.AttachSpec{Key: fmt.Sprintf("claim-round-%d", n), Output: contract.Spec{SchemaID: ClaimSchema}, Data: claim})
 			if err != nil {
@@ -370,7 +375,7 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 				}
 			}
 			record := ClaimRecord{Round: n, Claim: claimRef, Delivery: deliveryRef, T2a: t2a}
-			v, err = ask("T2b")
+			v, err := ask("T2b")
 			if err != nil {
 				return out, err
 			}

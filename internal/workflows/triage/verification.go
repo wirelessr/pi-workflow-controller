@@ -54,9 +54,9 @@ func (p VerificationPolicy) check() error {
 
 // Claim is the Controller's record of a candidate going to verification.
 type Claim struct {
-	Round     contract.Ref `json:"round"`
-	Steward   contract.Ref `json:"steward"`
-	Candidate Candidate    `json:"candidate"`
+	Round     contract.Ref  `json:"round"`
+	Steward   *contract.Ref `json:"steward"`
+	Candidate Candidate     `json:"candidate"`
 }
 
 // claimFor copies a round's candidate, citing the round's own evidence
@@ -83,7 +83,11 @@ func claimFor(round contract.Ref, c Candidate, t2a contract.Ref) Claim {
 		}
 		c.CodeRefs[i] = code
 	}
-	return Claim{Round: round, Steward: t2a, Candidate: c}
+	claim := Claim{Round: round, Candidate: c}
+	if t2a != (contract.Ref{}) {
+		claim.Steward = &t2a
+	}
+	return claim
 }
 
 // claimInputs are the claim, the owners of its allowed evidence and the

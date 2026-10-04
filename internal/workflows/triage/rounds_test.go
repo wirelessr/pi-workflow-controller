@@ -521,7 +521,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("round 2 feedback = %+v", fb)
 				}
 			}},
-		{name: "a T2a challenge sends the candidate back and the challenge limit ends the rounds", verdict: allSupported, stewards: "T1 T2a",
+		{name: "a T2a challenge sends the candidate back and the challenge limit still verifies the next candidate", verdict: allSupported, stewards: "T1 T2a T2b",
 			policy: func(p *RoundPolicy) { p.MaxChallenges = 1 },
 			roles:  "intake facts fact-check investigator investigator",
 			agent: func(t *testing.T, c investigatorCall) string {
@@ -540,8 +540,13 @@ func TestRounds(t *testing.T) {
 				return ""
 			},
 			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
-				if out.Limit != LimitChallenges || out.Passed() || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T2a) challenged") {
+				// The spent challenges skip T2a; the claim binds no steward and
+				// the limit stays recorded even though verification passed.
+				if out.Limit != LimitChallenges || !out.Passed() || len(out.Claims) != 1 || out.Claims[0].T2a != (contract.Ref{}) || !strings.Contains(calls[1].Request.Feedback.Message, "The steward (T2a) challenged") {
 					t.Errorf("rounds = %+v", out)
+				}
+				if claim := decodeRef[Claim](t, nil, out.Claims[0].Claim); claim.Steward != nil {
+					t.Errorf("claim steward = %+v; want null when T2a was skipped", claim.Steward)
 				}
 			}},
 		{name: "a stuck round gets a T3 redirection that does not count as a challenge", verdict: allSupported, stewards: "T1 T3 T2a T2b",
@@ -814,7 +819,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
-		{name: "a T2b challenge counts toward the challenge limit", verdict: allSupported, stewards: "T1 T2a T2b",
+		{name: "a T2b challenge counts toward the challenge limit and the next candidate is verified once more", verdict: allSupported, stewards: "T1 T2a T2b T2b",
 			roles: "intake facts fact-check investigator investigator", policy: func(p *RoundPolicy) { p.MaxChallenges = 1 },
 			agent: func(t *testing.T, c investigatorCall) string {
 				c.round0(t, func(v *Round) {
@@ -835,7 +840,7 @@ func TestRounds(t *testing.T) {
 				return ""
 			},
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
-				if out.Limit != LimitChallenges {
+				if out.Limit != LimitChallenges || len(out.Claims) != 2 || out.Passed() {
 					t.Errorf("rounds = %+v", out)
 				}
 			}},
