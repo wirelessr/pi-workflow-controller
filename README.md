@@ -13,7 +13,7 @@
 
 `code-review` 只讀 pinned code／來源，不執行被審 repository 的 tests/build/scripts，不發 comments 或其他外部寫入。合法 `limited` report 可以是執行成功，但不代表 PR 全面通過；必要 reviewer 失敗不能 exit 0。模型、來源及失敗語義見 [CODE-REVIEW](docs/CODE-REVIEW.md)。
 
-`jira-triage` 以固定階段調查一張 Jira 票（intake／facts、身分確認、調查 rounds、稽核、steward、對抗驗證、報告），程式在 `internal/workflows/triage`，設計與現況見 [JIRA-TRIAGE](docs/JIRA-TRIAGE.md)。執行需 `PWC_TRIAGE_SKILLS_DIR` 指向 repo 外的私有 skill 目錄，以及 `python3`（報告 renderer）。目前只有匿名結構驗收，尚未以真實票券做 live 驗證，不代表調查品質。
+`jira-triage` 以固定階段調查一張 Jira 票（intake／facts、身分確認、調查 rounds、稽核、steward、對抗驗證、報告），程式在 `internal/workflows/triage`，設計與現況見 [JIRA-TRIAGE](docs/JIRA-TRIAGE.md)。執行需 `PWC_TRIAGE_SKILLS_DIR` 指向 repo 外的私有 skill 目錄，以及 `python3`（報告 renderer）。現況是 alpha：一張真實票的 live run 已成功，尚未 live 驗證的範圍見 JIRA-TRIAGE，不代表調查品質。
 
 ## CI 與 coverage
 
@@ -117,7 +117,7 @@ NODE_TLS_REJECT_UNAUTHORIZED=1 pi --session "$SESSION"
 | [IMPLEMENTATION](IMPLEMENTATION.md) | 開發維護路線、責任分工與 source/tests 入口 |
 | [ADDING-A-WORKFLOW](docs/ADDING-A-WORKFLOW.md) | Workflow authoring、registry／skills／交付與清理 |
 | [CODE-REVIEW](docs/CODE-REVIEW.md) | 固定靜態 review 的業務設計 |
-| [JIRA-TRIAGE](docs/JIRA-TRIAGE.md) | `jira-triage` 的階段、驗收與限制；目前只有匿名結構驗收 |
+| [JIRA-TRIAGE](docs/JIRA-TRIAGE.md) | `jira-triage` 的階段、驗收、alpha 現況與限制 |
 | [FINAL-DELIVERY](docs/FINAL-DELIVERY.md) | FinalSelection／FinalDelivery／result.json.final |
 | [VERIFICATION](docs/VERIFICATION.md) | 分組測試 gates、共享環境安全與發布 scan 方法 |
 

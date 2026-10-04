@@ -34,7 +34,7 @@ func DefaultConfig() Config {
 		FactRetries: 1,
 		Rounds:      RoundModels{Investigator: strong, Validator: flash, Steward: strong},
 		Policy: RoundPolicy{MaxRounds: 8, MaxRejections: 2, MaxChallenges: 3, TimeoutRetries: 1,
-			RoundTimeout: 30 * time.Minute, CheckTimeout: 15 * time.Minute, AuditTimeout: 15 * time.Minute, StewardTimeout: 20 * time.Minute, HandoffPercent: 80,
+			RoundTimeout: 45 * time.Minute, CheckTimeout: 15 * time.Minute, AuditTimeout: 15 * time.Minute, StewardTimeout: 20 * time.Minute, HandoffPercent: 80,
 			Vision:       VisionPolicy{Model: flash, MaxSteps: 6, Parallel: 2, Timeout: 10 * time.Minute},
 			Verification: VerificationPolicy{Pro: strong, Con: strong, Cross: strong, Timeout: 30 * time.Minute, MaxRuns: 2},
 			Report:       ReportPolicy{Model: strong, Timeout: 30 * time.Minute}},
