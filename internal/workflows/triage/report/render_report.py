@@ -22,6 +22,11 @@ BASIS = {"verified-claim": "已驗證", "evidence": "證據直接顯示", "infer
 def render(meta, data, documents):
     sections = ["# 調查報告\n"]
 
+    def escaped(text):
+        for ch in "\\<[]|`":
+            text = text.replace(ch, "\\" + ch)
+        return text
+
     def plain(value):
         """Agent prose as Markdown text that cannot open a block or HTML."""
         lines = []
@@ -29,11 +34,18 @@ def render(meta, data, documents):
             # Backslash escapes keep agent text from opening HTML, links,
             # images, link or footnote definitions and tables anywhere, and
             # a heading, list, quote, rule or fence at the start of a line.
-            line = line.strip()
-            for ch in "\\<[]|":
-                line = line.replace(ch, "\\" + ch)
-            line = re.sub(r"^([#+*=`~>:_-])", r"\\\1", line)
-            line = re.sub(r"^(\d+)([.)])", r"\1\\\2", line)
+            # Code spans the agent wrote stay verbatim, since Markdown does
+            # not parse inside them; a stray backtick is escaped.
+            line, out, at = line.strip(), [], 0
+            for span in re.finditer(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", line):
+                out.append(escaped(line[at:span.start()]))
+                out.append(span.group(0))
+                at = span.end()
+            out.append(escaped(line[at:]))
+            line = "".join(out)
+            if not line.startswith("`"):
+                line = re.sub(r"^([#+*=~>:_-])", r"\\\1", line)
+                line = re.sub(r"^(\d+)([.)])", r"\1\\\2", line)
             lines.append(line)
         return "\n".join(lines).strip()
 
