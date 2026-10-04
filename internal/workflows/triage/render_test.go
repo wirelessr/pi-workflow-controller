@@ -39,7 +39,8 @@ sys.stdout.write(render({}, data, docs).decode())
 	got := string(out)
 	for _, want := range []string{
 		"原始請求：`T-1 hint`\n",
-		"**問題**：Is the change intended?\n- 依據：``a`b`` at `/rows/0` in `triage.facts.v1` attempt `a1` `/run/steps/s/attempts/0001-a1/published/contract.json`\n",
+		"**問題**：Is the change intended?\n- 依據：``a`b`` at `/rows/0` in 來源 1（`triage.facts.v1`）\n",
+		"## 來源索引\n\n| 來源 | Schema | Attempt | Path |\n|---|---|---|---|\n| 1 | `triage.facts.v1` | `a1` | `/run/steps/s/attempts/0001-a1/published/contract.json` |\n",
 		"**答案**：Neither.\n\\# Not a heading\n\\<b>bold\\</b>\n",
 		// A rule, a table, a link definition, an image, a numbered list and
 		// a stray backslash all stay text.

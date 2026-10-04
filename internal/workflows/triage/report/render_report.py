@@ -66,10 +66,17 @@ def render(meta, data, documents):
         pad = " " if body.startswith("`") or body.endswith("`") else ""
         return fence + pad + body + pad + fence
 
-    # One line per Ref: the exact Refs stay in the report contract, the
-    # report names the schema, attempt and path a reader opens.
+    # A Ref reads as a short source number; the source index at the end
+    # names its schema, attempt and path. The exact Refs stay in the
+    # report contract.
+    sources = []
+
     def described(ref):
-        return inline(ref["schema_id"]) + " attempt " + inline(ref["attempt_id"]) + " " + inline(ref["path"])
+        key = (ref["attempt_id"], ref["path"])
+        if key not in [(r["attempt_id"], r["path"]) for r in sources]:
+            sources.append(ref)
+        n = [(r["attempt_id"], r["path"]) for r in sources].index(key) + 1
+        return "來源 " + str(n) + "（" + inline(ref["schema_id"]) + "）"
 
     def located(entry):
         source = "本 attempt" if entry["ref"] is None else described(entry["ref"])
@@ -186,6 +193,10 @@ def render(meta, data, documents):
                 para("Steward 備註", note)
             for item in steward["items"]:
                 para("Steward 質疑", "[" + item["pattern_id"] + "] " + item["question"])
+    if sources:
+        sections.append("## 來源索引\n\n| 來源 | Schema | Attempt | Path |\n|---|---|---|---|\n" + "".join(
+            "| " + str(n) + " | " + inline(r["schema_id"]) + " | " + inline(r["attempt_id"]) + " | " + inline(r["path"]).replace("|", "\\|") + " |\n"
+            for n, r in enumerate(sources, 1)))
     sections.append("## 限制\n\n「已驗證」只表示該步屬於通過獨立驗證的 claim，不是 Controller 認列因果；「推論」未經驗證。新的或改寫的結論必須回到獨立驗證；未完成的查詢或執行失敗不是反證。完整資料留於 committed 工作資料。\n")
     return "\n".join(sections).encode("utf-8")
 
