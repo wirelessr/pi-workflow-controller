@@ -16,15 +16,30 @@ REPORT_ID = "triage-report"
 REPORT_PATH = "artifacts/triage-report.md"
 
 
+BASIS = {"verified-claim": "已驗證", "evidence": "證據直接顯示", "inference": "推論，未驗證"}
+
+
 def render(meta, data, documents):
     sections = ["# 調查報告\n"]
 
-    def text(label, value):
+    def plain(value):
+        """Agent prose as Markdown text that cannot open a block or HTML."""
+        lines = []
+        for line in str(value).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            # A backslash keeps "<" from opening HTML and a leading marker
+            # from opening a heading, list, quote, table or fence.
+            line = line.strip().replace("<", "\\<")
+            line = re.sub(r"^([#+*=|`~>-]|\d+[.)])", r"\\\1", line)
+            lines.append(line)
+        return "\n".join(lines).strip()
+
+    def oneline(value):
+        return re.sub(r"\s*\n\s*", " ", plain(value))
+
+    def para(label, value):
         if value is None or value == "":
             return
-        body = str(value)
-        fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", body)), default=0))
-        sections.append(label + "\n\n" + fence + "text\n" + body + "\n" + fence + "\n")
+        sections.append("**" + label + "**：" + plain(value) + "\n")
 
     def inline(value):
         body = str(value)
@@ -40,90 +55,122 @@ def render(meta, data, documents):
     def described(ref):
         return inline(ref["schema_id"]) + " attempt " + inline(ref["attempt_id"]) + " " + inline(ref["path"])
 
-    def reference(label, ref):
-        if ref is not None:
-            sections.append(label + "：" + described(ref) + "\n")
+    def located(entry):
+        source = "本 attempt" if entry["ref"] is None else described(entry["ref"])
+        where = ""
+        locator = entry.get("locator") or {}
+        if "pointer" in locator:
+            where = " at " + inline(locator["pointer"]) if locator["pointer"] else "（整份檔案）"
+        elif "offset" in locator:
+            where = " bytes " + str(locator["offset"]) + "+" + str(locator["length"])
+        return inline(entry["file_id"]) + where + " in " + source
 
-    def evidence(label, entries):
-        for entry in entries or []:
-            source = "本 attempt" if entry["ref"] is None else described(entry["ref"])
-            sections.append(label + "：" + inline(entry["file_id"]) + " in " + source + "\n")
+    def cited(entries, indent="   "):
+        return "".join(indent + "- 依據：" + located(e) + "\n" for e in entries or [])
 
     def document(ref):
         matches = [doc["data"] for doc in documents if doc["ref"] == ref]
         require(len(matches) == 1, "report input missing or ambiguous")
         return matches[0]
 
-    text("原始請求", data["request"])
-    sections.append("## 結論\n")
-    text("結論", data["conclusion"])
-    text("完整性", data["completeness"])
-    text("提前結束的原因", data["limit"])
+    def recorded(gap):
+        found = [g for g in document(gap["ref"]).get("gaps", []) if g["id"] == gap["id"]]
+        require(len(found) == 1, "report gap missing from its input")
+        return found[0]["text"]
+
     claim = data["claim"]
-    text("驗證結果", claim["outcome"])
-    if claim["claim"] is not None:
-        sections.append("## 候選結論與獨立驗證\n")
-        reference("Claim", claim["claim"])
-        candidate = document(claim["claim"])["candidate"]
-        text("陳述", candidate["statement"])
-        for premise in candidate["premises"]:
-            text("前提", premise)
-        text("Investigator 標示", candidate["verification"])
-        evidence("允許的證據", candidate["allowed_evidence"])
-        for code in candidate["code_refs"]:
-            text("程式碼", code["repo"] + "@" + code["ref"] + " " + code["path"] + " (" + code["relation"] + ")")
-        if candidate["no_code_basis"]:
-            text("程式碼", "此結論不依據程式碼")
-        if claim["delivery"] is not None:
-            for role in document(claim["delivery"])["roles"]:
-                text("角色", role["role"])
-                if role["unavailable"]:
-                    text("狀態", "unavailable")
-                    for failure in role["failures"]:
-                        text("失敗", failure["code"] + " " + failure["diagnostic"])
-                    continue
-                assessment = document(role["result"])["assessment"]
-                for key, label in (("support", "支持程度"), ("reason", "支持理由"),
-                                   ("measurement", "量測條件"), ("window", "查詢時間窗"),
-                                   ("filter", "查詢條件"), ("environment", "環境"), ("release", "版本")):
-                    text(label, assessment[key])
-                evidence("支持依據", assessment["basis"])
-                evidence("Runtime 依據", assessment["runtime_basis"])
-                for issue in assessment["counterexamples"]:
-                    text("反例", issue["statement"])
-                    text("處置", issue["disposition"])
-                    text("理由", issue["reason"])
-                for gap in assessment["gaps"]:
-                    text("驗證缺口", gap)
-        if claim["t2a"] is not None:
-            for note in document(claim["t2a"])["notes"]:
-                text("Steward T2a 備註", note)
-        if claim["t2b"] is not None:
-            steward = document(claim["t2b"])
-            text("Steward T2b", steward["verdict"])
-            for note in steward["notes"]:
-                text("Steward 備註", note)
-            for item in steward["items"]:
-                text("Steward 質疑", "[" + item["pattern_id"] + "] " + item["question"])
+    sections.append("原始請求：" + inline(data["request"]) + "\n")
+    sections.append("## 結論\n")
+    question = data["question"]
+    sections.append("**問題**：" + plain(question["text"]) + "\n" + cited(question["evidence"], ""))
+    para("答案", data["answer"])
+    sections.append("| 完整性 | 驗證結果 | 提前結束 |\n|---|---|---|\n| " + inline(data["completeness"]) + " | " + inline(claim["outcome"]) + " | "
+                    + (oneline(data["limit"]).replace("|", "\\|") if data["limit"] else "無") + " |\n")
+    para("把握程度", data["certainty"])
+
+    sections.append("## 因果鏈\n")
+    for n, step in enumerate(data["chain"], 1):
+        sections.append(str(n) + ". [" + BASIS[step["basis"]] + "] " + oneline(step["statement"]) + "\n" + cited(step["evidence"]))
+
+    sections.append("## 建議行動\n")
+    if not data["actions"]:
+        sections.append("報告沒有提出行動；見下一步。\n")
+    for n, action in enumerate(data["actions"], 1):
+        sections.append(str(n) + ". **" + oneline(action["audience"]) + "**：" + oneline(action["action"]) + "\n   - 理由：" + oneline(action["reason"]) + "\n" + cited(action["evidence"]))
+
+    opened = [g for g in data["gaps"] if g["disposition"] == "open"]
+    sections.append("## 未解問題與下一步\n")
+    for gap in opened:
+        sections.append("- 未解缺口 " + inline(gap["id"]) + "：" + oneline(recorded(gap)) + "\n  - 說明：" + oneline(gap["note"]) + "\n" + cited(gap["evidence"], "  "))
+    for gap in data["new_gaps"]:
+        sections.append("- 新缺口 " + inline(gap["id"]) + "：" + oneline(gap["text"]) + "\n")
+    for step in data["next_steps"]:
+        sections.append("- 下一步：" + oneline(step) + "\n")
+    if not opened and not data["new_gaps"] and not data["next_steps"]:
+        sections.append("無。\n")
+
+    closed = [g for g in data["gaps"] if g["disposition"] != "open"]
+    if closed:
+        sections.append("## 已處理的缺口\n")
+        for gap in closed:
+            sections.append("- " + inline(gap["id"]) + "（" + gap["disposition"] + "）：" + oneline(recorded(gap)) + "\n  - 處置：" + oneline(gap["note"]) + "\n"
+                            + "  - 來源：" + described(gap["ref"]) + "\n" + cited(gap["evidence"], "  "))
+
     audits = [doc for doc in documents if doc["ref"]["schema_id"] == "triage.audit.v1"]
     if any(doc["data"]["findings"] for doc in audits):
         sections.append("## 稽核發現\n")
         for doc in audits:
             for finding in doc["data"]["findings"]:
-                text("發現", finding["category"] + " (" + finding["effect"] + "): " + finding["reason"])
-    sections.append("## 缺口與下一步\n")
-    for gap in data["gaps"]:
-        reference("缺口來源", gap["ref"])
-        recorded = [g for g in document(gap["ref"]).get("gaps", []) if g["id"] == gap["id"]]
-        require(len(recorded) == 1, "report gap missing from its input")
-        text("缺口", gap["id"] + ": " + recorded[0]["text"])
-        text("處置", gap["disposition"] + ": " + gap["note"])
-        evidence("處置依據", gap["evidence"])
-    for gap in data["new_gaps"]:
-        text("新缺口", gap["id"] + ": " + gap["text"])
-    for step in data["next_steps"]:
-        text("下一步", step)
-    sections.append("## 限制\n\n支持程度與結論是調查角色的判讀，不是 Controller 投票或 renderer 認列因果。新的或改寫的結論必須回到獨立驗證；未完成的查詢或執行失敗不是反證。完整資料留於 committed 工作資料，不在本報告展開。\n")
+                sections.append("- " + inline(finding["category"]) + "（" + finding["effect"] + "）：" + oneline(finding["reason"]) + "\n")
+
+    if claim["claim"] is not None:
+        sections.append("## 附錄：候選結論與獨立驗證\n")
+        sections.append("Claim：" + described(claim["claim"]) + "\n")
+        candidate = document(claim["claim"])["candidate"]
+        para("陳述", candidate["statement"])
+        for premise in candidate["premises"]:
+            para("前提", premise)
+        para("Investigator 標示", candidate["verification"])
+        for e in candidate["allowed_evidence"]:
+            sections.append("- 允許的證據：" + located(e) + "\n")
+        for code in candidate["code_refs"]:
+            sections.append("- 程式碼：" + inline(code["repo"] + "@" + code["ref"] + " " + code["path"]) + "（" + code["relation"] + "）\n")
+        if candidate["no_code_basis"]:
+            sections.append("- 程式碼：此結論不依據程式碼\n")
+        if claim["delivery"] is not None:
+            for role in document(claim["delivery"])["roles"]:
+                sections.append("### 驗證角色 " + inline(role["role"]) + "\n")
+                if role["unavailable"]:
+                    para("狀態", "unavailable")
+                    for failure in role["failures"]:
+                        para("失敗", failure["code"] + " " + failure["diagnostic"])
+                    continue
+                assessment = document(role["result"])["assessment"]
+                for key, label in (("support", "支持程度"), ("reason", "支持理由"),
+                                   ("measurement", "量測條件"), ("window", "查詢時間窗"),
+                                   ("filter", "查詢條件"), ("environment", "環境"), ("release", "版本")):
+                    para(label, assessment[key])
+                for e in assessment["basis"]:
+                    sections.append("- 支持依據：" + located(e) + "\n")
+                for e in assessment["runtime_basis"]:
+                    sections.append("- Runtime 依據：" + located(e) + "\n")
+                for issue in assessment["counterexamples"]:
+                    para("反例", issue["statement"])
+                    para("處置", issue["disposition"])
+                    para("理由", issue["reason"])
+                for gap in assessment["gaps"]:
+                    para("驗證缺口", gap)
+        if claim["t2a"] is not None:
+            for note in document(claim["t2a"])["notes"]:
+                para("Steward T2a 備註", note)
+        if claim["t2b"] is not None:
+            steward = document(claim["t2b"])
+            para("Steward T2b", steward["verdict"])
+            for note in steward["notes"]:
+                para("Steward 備註", note)
+            for item in steward["items"]:
+                para("Steward 質疑", "[" + item["pattern_id"] + "] " + item["question"])
+    sections.append("## 限制\n\n「已驗證」只表示該步屬於通過獨立驗證的 claim，不是 Controller 認列因果；「推論」未經驗證。新的或改寫的結論必須回到獨立驗證；未完成的查詢或執行失敗不是反證。完整資料留於 committed 工作資料。\n")
     return "\n".join(sections).encode("utf-8")
 
 

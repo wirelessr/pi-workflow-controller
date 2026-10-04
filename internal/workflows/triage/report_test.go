@@ -20,7 +20,11 @@ import (
 func writeReport(t *testing.T, call agentCall, change func(*Report), render bool) {
 	t.Helper()
 	want := call.Task.Report
-	v := Report{Request: want.Request, Claim: want.Claim, Conclusion: "the error comes from svc", Completeness: "incomplete", Limit: want.Limit, Gaps: []ReportGap{}, NewGaps: []Gap{}, NextSteps: []string{"confirm on a second stack"}, ReportFile: ReportFileID}
+	ticket := []Evidence{cite(call.citable("intake"), "page-0")}
+	v := Report{Request: want.Request, Claim: want.Claim, Question: ReportQuestion{Text: "why does svc fail?", Evidence: ticket}, Answer: "the error comes from svc",
+		Chain: []ChainStep{{Statement: "svc rejects the flag", Basis: "evidence", Evidence: ticket}}, Certainty: "from the ticket text only",
+		Actions:      []ReportAction{{Audience: "svc owners", Action: "accept the flag", Reason: "the rejection is the error", Evidence: ticket}},
+		Completeness: "incomplete", Limit: want.Limit, Gaps: []ReportGap{}, NewGaps: []Gap{}, NextSteps: []string{"confirm on a second stack"}, ReportFile: ReportFileID}
 	for _, g := range want.Gaps {
 		v.Gaps = append(v.Gaps, ReportGap{Ref: g.Ref, ID: g.ID, Disposition: "resolved", Note: "covered by the verified claim", Evidence: []Evidence{cite(call.citable("intake"), "page-0")}})
 	}
@@ -104,6 +108,12 @@ func TestReport(t *testing.T) {
 		{name: "a new gap reported complete is repaired", report: repairedReport(func(v *Report) {
 			v.Completeness, v.NewGaps = "complete", []Gap{{ID: "late", Text: "found while writing"}}
 		}, "completeness: got complete")},
+		{name: "a verified chain step without a passed claim is repaired", blocked: true, report: repairedReport(func(v *Report) { v.Chain[0].Basis = "verified-claim" }, `chain[0].basis: got verified-claim, but the claim outcome is "none"`)},
+		{name: "a chain step citing an unknown file is repaired", report: repairedReport(func(v *Report) {
+			v.Chain[0].Evidence = []Evidence{{FileID: "nowhere", Locator: &Locator{Pointer: ptr("")}}}
+		}, "chain[0].evidence[0].file_id")},
+		{name: "a report with nothing to do is repaired", report: repairedReport(func(v *Report) { v.Actions, v.NextSteps = []ReportAction{}, []string{} }, "actions, next_steps: both are empty")},
+		{name: "a chain step without evidence is repaired by the schema", report: repairedReport(func(v *Report) { v.Chain[0].Evidence = []Evidence{} }, "evidence")},
 		{name: "a resolved gap without evidence is repaired by the schema", report: repairedReport(func(v *Report) { v.Gaps[0].Evidence = []Evidence{} }, "evidence")},
 		{name: "a report edited after rendering is repaired", report: func(t *testing.T, call agentCall) {
 			writeReport(t, call, nil, true)
@@ -207,7 +217,7 @@ func TestReport(t *testing.T) {
 				t.Errorf("report = %+v", report)
 			}
 			body, err := os.ReadFile(filepath.Join(filepath.Dir(reportRef.Path), "artifacts", "triage-report.md"))
-			if err != nil || !strings.HasPrefix(string(body), "# 調查報告") || tc.blocked == strings.Contains(string(body), "## 候選結論與獨立驗證") {
+			if err != nil || !strings.HasPrefix(string(body), "# 調查報告") || tc.blocked == strings.Contains(string(body), "## 附錄：候選結論與獨立驗證") {
 				t.Errorf("report file = %q, %v", body, err)
 			}
 		})

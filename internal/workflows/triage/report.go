@@ -29,7 +29,7 @@ const (
 //go:embed report/render_report.py
 var reportResources embed.FS
 
-const reportRequirements = `You write the report of this investigation from its committed results; you state no new claim or verdict. Copy request and claim exactly as this request gives them. Give every gap the request lists one disposition with a note, add gaps you find, and say how complete the investigation is: incomplete whenever a limit ended it, the claim did not pass verification, or a gap stays open. Write the candidate, then run python3 -B with the renderer and the absolute request.json and candidate.json paths; the renderer adds the report file, so do not create it yourself.`
+const reportRequirements = `You write the report of this investigation from its committed results, for a reader who did not follow it and has to act on it; you state no new claim or verdict. Write its prose in Traditional Chinese; identifiers, code, quotes and technical terms stay as they are. State the ticket's question as the ticket asks it and answer it directly first; if the investigation could not answer it, say so and what is missing. Then give the chain from root cause or established mechanism to the observed symptom, in order, marking each step as part of the verified claim, shown directly by its evidence, or your own inference; never present more than the verified claim as verified. Say how sure the answer is and why. Name the concrete actions for the people who own the next move (a fix, a decision, a reply, a test change), apart from further investigation, which goes in next steps. Copy request and claim exactly as this request gives them. Give every gap the request lists one disposition with a note, add gaps you find, and say how complete the investigation is: incomplete whenever a limit ended it, the claim did not pass verification, or a gap stays open. Write the candidate, then run python3 -B with the renderer and the absolute request.json and candidate.json paths; the renderer adds the report file, so do not create it yourself.`
 
 type ReportClaim struct {
 	Claim    *contract.Ref `json:"claim"`
@@ -37,6 +37,24 @@ type ReportClaim struct {
 	T2a      *contract.Ref `json:"t2a"`
 	T2b      *contract.Ref `json:"t2b"`
 	Outcome  string        `json:"outcome"`
+}
+
+type ReportQuestion struct {
+	Text     string     `json:"text"`
+	Evidence []Evidence `json:"evidence"`
+}
+
+type ChainStep struct {
+	Statement string     `json:"statement"`
+	Basis     string     `json:"basis"`
+	Evidence  []Evidence `json:"evidence"`
+}
+
+type ReportAction struct {
+	Audience string     `json:"audience"`
+	Action   string     `json:"action"`
+	Reason   string     `json:"reason"`
+	Evidence []Evidence `json:"evidence"`
 }
 
 type ReportGap struct {
@@ -48,15 +66,19 @@ type ReportGap struct {
 }
 
 type Report struct {
-	Request      string      `json:"request"`
-	Claim        ReportClaim `json:"claim"`
-	Conclusion   string      `json:"conclusion"`
-	Completeness string      `json:"completeness"`
-	Limit        string      `json:"limit"`
-	Gaps         []ReportGap `json:"gaps"`
-	NewGaps      []Gap       `json:"new_gaps"`
-	NextSteps    []string    `json:"next_steps"`
-	ReportFile   string      `json:"report_file"`
+	Request      string         `json:"request"`
+	Claim        ReportClaim    `json:"claim"`
+	Question     ReportQuestion `json:"question"`
+	Answer       string         `json:"answer"`
+	Chain        []ChainStep    `json:"chain"`
+	Certainty    string         `json:"certainty"`
+	Actions      []ReportAction `json:"actions"`
+	Completeness string         `json:"completeness"`
+	Limit        string         `json:"limit"`
+	Gaps         []ReportGap    `json:"gaps"`
+	NewGaps      []Gap          `json:"new_gaps"`
+	NextSteps    []string       `json:"next_steps"`
+	ReportFile   string         `json:"report_file"`
 }
 
 // reportTask is what the report Step is given beyond its inputs.
@@ -124,7 +146,10 @@ func reportGaps(ctx context.Context, r *engine.Run, inputs []contract.Ref) ([]Ga
 // checkReport keeps the approved report rules: the exact caller request
 // and claim, every recorded gap kept, declared completeness that is
 // incomplete whenever the investigation is, and an exclusive report file
-// equal to the deterministic rendering of the committed inputs.
+// equal to the deterministic rendering of the committed inputs. The
+// answer, chain and actions must cite resolvable evidence, a chain step
+// may claim verification only when the claim passed, and the report must
+// leave the reader something to do; what they say is the report's own.
 func checkReport(ctx context.Context, r *engine.Run, ref contract.Ref, want reportTask, inputs []contract.Ref) error {
 	p, err := readAccepted[Report](ctx, r, ref, ReportSchema)
 	if err != nil {
@@ -145,6 +170,25 @@ func checkReport(ctx context.Context, r *engine.Run, ref contract.Ref, want repo
 		return err
 	}
 	cite := citations{ctx, in, ref, p.Files}.check
+	if err := citeAll(cite, "question.evidence", v.Question.Evidence); err != nil {
+		return err
+	}
+	for i, step := range v.Chain {
+		if step.Basis == "verified-claim" && want.Claim.Outcome != "passed" {
+			return fmt.Errorf("chain[%d].basis: got verified-claim, but the claim outcome is %q; mark the step evidence or inference", i, want.Claim.Outcome)
+		}
+		if err := citeAll(cite, fmt.Sprintf("chain[%d].evidence", i), step.Evidence); err != nil {
+			return err
+		}
+	}
+	for i, a := range v.Actions {
+		if err := citeAll(cite, fmt.Sprintf("actions[%d].evidence", i), a.Evidence); err != nil {
+			return err
+		}
+	}
+	if len(v.Actions) == 0 && len(v.NextSteps) == 0 {
+		return fmt.Errorf("actions, next_steps: both are empty; name at least one action for the owners of the next move or one further investigation step")
+	}
 	listed := map[GapRef]bool{}
 	for i, g := range v.Gaps {
 		key := GapRef{Ref: g.Ref, ID: g.ID}

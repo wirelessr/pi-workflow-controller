@@ -1,13 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pi-workflow-controller.local/schemas/triage/report.v1.json",
-  "description": "The report of the investigation over its committed results; it states no new claim or verdict",
+  "description": "The report of the investigation over its committed results, written for a reader who must act on it; it strengthens no verified claim",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "request",
     "claim",
-    "conclusion",
+    "question",
+    "answer",
+    "chain",
+    "certainty",
+    "actions",
     "completeness",
     "gaps",
     "new_gaps",
@@ -81,10 +85,110 @@
         }
       }
     },
-    "conclusion": {
+    "question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "evidence"
+      ],
+      "description": "The question the ticket asks, as the ticket asks it",
+      "properties": {
+        "text": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence"
+          },
+          "description": "Where the ticket asks it"
+        }
+      }
+    },
+    "answer": {
       "type": "string",
       "pattern": "\\S",
-      "description": "What the investigation established and how sure it is, from the committed results only"
+      "description": "The direct answer to the question, first; what the investigation could not answer, said plainly"
+    },
+    "chain": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Cause to effect, in order, from the root cause or the established mechanism to the observed symptom",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "statement",
+          "basis",
+          "evidence"
+        ],
+        "properties": {
+          "statement": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "basis": {
+            "enum": [
+              "verified-claim",
+              "evidence",
+              "inference"
+            ],
+            "description": "verified-claim: part of the claim that passed verification; evidence: shown directly by the cited evidence; inference: the report's own reasoning, not verified"
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence"
+            },
+            "description": "What the step rests on"
+          }
+        }
+      }
+    },
+    "certainty": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "How sure the answer is: what runtime evidence shows, what rests on code reading or inference, and what limits it"
+    },
+    "actions": {
+      "type": "array",
+      "description": "What the owners of the next move should do with this result: a fix, a decision, a reply, a test change. Further investigation goes in next_steps",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "audience",
+          "action",
+          "reason",
+          "evidence"
+        ],
+        "properties": {
+          "audience": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "Who acts: the ticket reporter, the owning developers, test owners, operators"
+          },
+          "action": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "reason": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence"
+            }
+          }
+        }
+      }
     },
     "completeness": {
       "enum": [
@@ -158,6 +262,7 @@
     },
     "next_steps": {
       "type": "array",
+      "description": "Further investigation that would close an open gap or question",
       "items": {
         "type": "string",
         "pattern": "\\S"
