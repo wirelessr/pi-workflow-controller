@@ -16,6 +16,7 @@ import sys
 sys.path[:0] = sys.argv[1:3]
 from render_report import render
 ref = {"run_id": "r", "attempt_id": "a1", "path": "/run/steps/s/attempts/0001-a1/published/contract.json", "schema_id": "triage.facts.v1", "sha256": "x", "manifest_sha256": "y"}
+ref2 = dict(ref, attempt_id="a2", path="/run/steps/t/attempts/0001-a2/published/contract.json", schema_id="triage.round.v1")
 own = {"ref": None, "file_id": "x\n\n# Injected\n<script>", "locator": {"offset": 3, "length": 4}}
 tick = {"ref": ref, "file_id": "` + "a`b" + `", "locator": {"pointer": "/rows/0"}}
 data = {"request": "T-1 hint", "limit": "budget | time",
@@ -24,7 +25,7 @@ data = {"request": "T-1 hint", "limit": "budget | time",
         "chain": [{"statement": "the write path stores bare keys", "basis": "verified-claim", "evidence": [tick]},
                   {"statement": "so the test matched the wrong field", "basis": "inference", "evidence": [own]}],
         "certainty": "see ` + "`rows[0]` and `C:\\\\tmp`" + ` and a stray ` + "`" + ` tick\n` + "`#x` first" + `\n___\na | b\n:-- | :--\n\n[l]: https://evil\n![t](https://evil/p.png)\n2024. year\n3.14 pi\nback\\slash", "completeness": "incomplete",
-        "actions": [{"audience": "test owners", "action": "match on the bare key", "reason": "it is the stored form", "evidence": [tick]}],
+        "actions": [{"audience": "test owners", "action": "match on the bare key", "reason": "it is the stored form", "evidence": [{"ref": ref2, "file_id": "q", "locator": {"pointer": ""}}, tick]}],
         "claim": {"claim": None, "delivery": None, "t2a": None, "t2b": None, "outcome": "passed"},
         "gaps": [{"ref": ref, "id": "g1", "disposition": "open", "note": "n", "evidence": [own]},
                  {"ref": ref, "id": "g2", "disposition": "resolved", "note": "done", "evidence": [tick]}],
@@ -40,7 +41,9 @@ sys.stdout.write(render({}, data, docs).decode())
 	for _, want := range []string{
 		"原始請求：`T-1 hint`\n",
 		"**問題**：Is the change intended?\n- 依據：``a`b`` at `/rows/0` in 來源 1（`triage.facts.v1`）\n",
-		"## 來源索引\n\n| 來源 | Schema | Attempt | Path |\n|---|---|---|---|\n| 1 | `triage.facts.v1` | `a1` | `/run/steps/s/attempts/0001-a1/published/contract.json` |\n",
+		// Sources are numbered in first-citation order and listed once.
+		"   - 依據：`q`（整份檔案） in 來源 2（`triage.round.v1`）\n   - 依據：``a`b`` at `/rows/0` in 來源 1（`triage.facts.v1`）\n",
+		"## 來源索引\n\n| 來源 | Schema | Attempt | Path |\n|---|---|---|---|\n| 1 | `triage.facts.v1` | `a1` | `/run/steps/s/attempts/0001-a1/published/contract.json` |\n| 2 | `triage.round.v1` | `a2` | `/run/steps/t/attempts/0001-a2/published/contract.json` |\n\n",
 		"**答案**：Neither.\n\\# Not a heading\n\\<b>bold\\</b>\n",
 		// A rule, a table, a link definition, an image, a numbered list and
 		// a stray backslash all stay text.

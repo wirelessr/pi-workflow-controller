@@ -43,8 +43,8 @@ type RoundPolicy struct {
 	CheckTimeout   time.Duration
 	AuditTimeout   time.Duration
 	StewardTimeout time.Duration
-	// MaxChallenges is Cmax, the steward challenges at T1 and T2a of the
-	// whole run; T3 redirections do not count.
+	// MaxChallenges is Cmax, the steward challenges at T1, T2a and T2b of
+	// the whole run; T3 redirections do not count.
 	MaxChallenges int
 	// HandoffPercent is the context usage at which the session is strictly
 	// closed and the next round starts fresh.
@@ -297,7 +297,8 @@ func runRounds(ctx context.Context, r *engine.Run, skills Skills, s0 S0, models 
 		// challenge to the next round's feedback.
 		ask := func(trigger string) (Steward, error) {
 			key := fmt.Sprintf("steward-%s-round-%d", strings.ToLower(trigger), n)
-			sref, v, fails, err := runSteward(ctx, r, skills, steward{Model: models.Steward, Ticket: s0.Ticket, Trigger: trigger, Key: key, Round: n, Citable: slices.Clone(inputs), Unconfirmed: book.home == "", Retries: policy.TimeoutRetries, Timeout: policy.StewardTimeout})
+			skipped := trigger == "T2b" && out.Limit == LimitChallenges
+			sref, v, fails, err := runSteward(ctx, r, skills, steward{Model: models.Steward, Ticket: s0.Ticket, Trigger: trigger, Key: key, Round: n, Citable: slices.Clone(inputs), Unconfirmed: book.home == "", SkippedT2a: skipped, Retries: policy.TimeoutRetries, Timeout: policy.StewardTimeout})
 			out.Recoveries = append(out.Recoveries, fails...)
 			if err != nil {
 				return v, err

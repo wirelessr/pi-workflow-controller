@@ -19,6 +19,8 @@ const stewardRequirements = `You are the steward at trigger %s (the steward rule
 
 const stewardUnconfirmed = `The home stack is not confirmed: flag what that means for the work ahead.`
 
+const stewardSkippedT2a = `The challenge limit is spent, so this candidate went to verification without a T2a gate and no further round will follow: also apply the T2a checks to the claim itself, and know that a challenge now leaves the claim not passed instead of sending the work back.`
+
 type StewardTarget struct {
 	Ref contract.Ref `json:"ref"`
 	ID  *string      `json:"id"`
@@ -138,8 +140,10 @@ type steward struct {
 	Round       int
 	Citable     []LabeledRef
 	Unconfirmed bool
-	Retries     int
-	Timeout     time.Duration
+	// SkippedT2a marks a T2b whose candidate skipped T2a.
+	SkippedT2a bool
+	Retries    int
+	Timeout    time.Duration
 }
 
 // runSteward runs the steward in a fresh session; a timed-out call reruns.
@@ -147,6 +151,9 @@ func runSteward(ctx context.Context, r *engine.Run, skills Skills, s steward) (c
 	requirements := []string{fmt.Sprintf(stewardRequirements, s.Trigger)}
 	if s.Unconfirmed {
 		requirements = append(requirements, stewardUnconfirmed)
+	}
+	if s.SkippedT2a {
+		requirements = append(requirements, stewardSkippedT2a)
 	}
 	t := newTask(r, "steward", s.Ticket, []string{skills.Entry("steward"), skills.Entry("core")}, append(requirements, citationRequirements)...)
 	t.Round, t.Citable, t.Trigger = s.Round, s.Citable, s.Trigger

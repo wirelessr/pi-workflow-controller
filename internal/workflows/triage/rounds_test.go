@@ -536,6 +536,9 @@ func TestRounds(t *testing.T) {
 				if call.Task.Trigger == "T2a" {
 					verdict = "challenge"
 				}
+				if skipped := strings.Contains(call.Task.Requirements, "without a T2a gate"); skipped != (call.Task.Trigger == "T2b") {
+					t.Errorf("%s requirements say T2a was skipped: %v", call.Task.Trigger, skipped)
+				}
 				call.reply(t, stewardVerdict(call, verdict), nil)
 				return ""
 			},
@@ -547,6 +550,29 @@ func TestRounds(t *testing.T) {
 				}
 				if claim := decodeRef[Claim](t, nil, out.Claims[0].Claim); claim.Steward != nil {
 					t.Errorf("claim steward = %+v; want null when T2a was skipped", claim.Steward)
+				}
+			}},
+		{name: "spent challenges and verifications end the rounds without another claim", verdict: allSupported, stewards: "T1 T2a T2b",
+			policy: func(p *RoundPolicy) { p.MaxChallenges, p.Verification.MaxRuns = 1, 1 },
+			roles:  "intake facts fact-check investigator investigator",
+			agent: func(t *testing.T, c investigatorCall) string {
+				c.round0(t, func(v *Round) {
+					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
+					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
+				})
+				return ""
+			},
+			steward: func(t *testing.T, call agentCall) string {
+				verdict := "pass"
+				if call.Task.Trigger == "T2b" {
+					verdict = "challenge"
+				}
+				call.reply(t, stewardVerdict(call, verdict), nil)
+				return ""
+			},
+			check: func(t *testing.T, out Rounds, _ []investigatorCall, _ []string) {
+				if out.Limit != LimitVerifications || len(out.Claims) != 1 || out.Passed() {
+					t.Errorf("rounds = %+v", out)
 				}
 			}},
 		{name: "a stuck round gets a T3 redirection that does not count as a challenge", verdict: allSupported, stewards: "T1 T3 T2a T2b",
