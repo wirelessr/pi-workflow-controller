@@ -26,10 +26,14 @@ def render(meta, data, documents):
         """Agent prose as Markdown text that cannot open a block or HTML."""
         lines = []
         for line in str(value).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-            # A backslash keeps "<" from opening HTML and a leading marker
-            # from opening a heading, list, quote, table or fence.
-            line = line.strip().replace("<", "\\<")
-            line = re.sub(r"^([#+*=|`~>-]|\d+[.)])", r"\\\1", line)
+            # Backslash escapes keep agent text from opening HTML, links,
+            # images, link or footnote definitions and tables anywhere, and
+            # a heading, list, quote, rule or fence at the start of a line.
+            line = line.strip()
+            for ch in "\\<[]|":
+                line = line.replace(ch, "\\" + ch)
+            line = re.sub(r"^([#+*=`~>:_-])", r"\\\1", line)
+            line = re.sub(r"^(\d+)([.)])", r"\1\\\2", line)
             lines.append(line)
         return "\n".join(lines).strip()
 
@@ -85,7 +89,7 @@ def render(meta, data, documents):
     sections.append("**問題**：" + plain(question["text"]) + "\n" + cited(question["evidence"], ""))
     para("答案", data["answer"])
     sections.append("| 完整性 | 驗證結果 | 提前結束 |\n|---|---|---|\n| " + inline(data["completeness"]) + " | " + inline(claim["outcome"]) + " | "
-                    + (oneline(data["limit"]).replace("|", "\\|") if data["limit"] else "無") + " |\n")
+                    + (oneline(data["limit"]) if data["limit"] else "無") + " |\n")
     para("把握程度", data["certainty"])
 
     sections.append("## 因果鏈\n")

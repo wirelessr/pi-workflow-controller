@@ -59,7 +59,7 @@ func TestReport(t *testing.T) {
 	}{
 		{name: "a passed claim with every gap resolved may be complete", complete: true,
 			report: func(t *testing.T, call agentCall) {
-				writeReport(t, call, func(v *Report) { v.Completeness = "complete" }, true)
+				writeReport(t, call, func(v *Report) { v.Completeness, v.Chain[0].Basis = "complete", "verified-claim" }, true)
 			}},
 		{name: "a blocked investigation reported complete is repaired", blocked: true,
 			report: func(t *testing.T, call agentCall) {
@@ -113,7 +113,13 @@ func TestReport(t *testing.T) {
 			v.Chain[0].Evidence = []Evidence{{FileID: "nowhere", Locator: &Locator{Pointer: ptr("")}}}
 		}, "chain[0].evidence[0].file_id")},
 		{name: "a report with nothing to do is repaired", report: repairedReport(func(v *Report) { v.Actions, v.NextSteps = []ReportAction{}, []string{} }, "actions, next_steps: both are empty")},
-		{name: "a chain step without evidence is repaired by the schema", report: repairedReport(func(v *Report) { v.Chain[0].Evidence = []Evidence{} }, "evidence")},
+		{name: "a chain step without evidence is repaired by the schema", report: repairedReport(func(v *Report) { v.Chain[0].Evidence = []Evidence{} }, "/chain/0/evidence")},
+		{name: "an action citing an unknown file is repaired", report: repairedReport(func(v *Report) {
+			v.Actions[0].Evidence = []Evidence{{FileID: "nowhere", Locator: &Locator{Pointer: ptr("")}}}
+		}, "actions[0].evidence[0].file_id")},
+		{name: "a question citing a missing pointer is repaired", report: repairedReport(func(v *Report) {
+			v.Question.Evidence[0].Locator = &Locator{Pointer: ptr("/no/such/field")}
+		}, "question.evidence[0]")},
 		{name: "a resolved gap without evidence is repaired by the schema", report: repairedReport(func(v *Report) { v.Gaps[0].Evidence = []Evidence{} }, "evidence")},
 		{name: "a report edited after rendering is repaired", report: func(t *testing.T, call agentCall) {
 			writeReport(t, call, nil, true)

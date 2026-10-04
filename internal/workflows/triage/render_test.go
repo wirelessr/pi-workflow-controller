@@ -23,7 +23,7 @@ data = {"request": "T-1 hint", "limit": "budget | time",
         "answer": "Neither.\n# Not a heading\n<b>bold</b>",
         "chain": [{"statement": "the write path stores bare keys", "basis": "verified-claim", "evidence": [tick]},
                   {"statement": "so the test matched the wrong field", "basis": "inference", "evidence": [own]}],
-        "certainty": "code reading only", "completeness": "incomplete",
+        "certainty": "___\na | b\n:-- | :--\n\n[l]: https://evil\n![t](https://evil/p.png)\n2024. year\n3.14 pi\nback\\slash", "completeness": "incomplete",
         "actions": [{"audience": "test owners", "action": "match on the bare key", "reason": "it is the stored form", "evidence": [tick]}],
         "claim": {"claim": None, "delivery": None, "t2a": None, "t2b": None, "outcome": "passed"},
         "gaps": [{"ref": ref, "id": "g1", "disposition": "open", "note": "n", "evidence": [own]},
@@ -41,6 +41,9 @@ sys.stdout.write(render({}, data, docs).decode())
 		"原始請求：`T-1 hint`\n",
 		"**問題**：Is the change intended?\n- 依據：``a`b`` at `/rows/0` in `triage.facts.v1` attempt `a1` `/run/steps/s/attempts/0001-a1/published/contract.json`\n",
 		"**答案**：Neither.\n\\# Not a heading\n\\<b>bold\\</b>\n",
+		// A rule, a table, a link definition, an image, a numbered list and
+		// a stray backslash all stay text.
+		"**把握程度**：\\___\na \\| b\n\\:-- \\| :--\n\n\\[l\\]: https://evil\n!\\[t\\](https://evil/p.png)\n2024\\. year\n3\\.14 pi\nback\\\\slash\n",
 		"| `incomplete` | `passed` | budget \\| time |\n",
 		"1. [已驗證] the write path stores bare keys\n   - 依據：``a`b`` at `/rows/0`",
 		"2. [推論，未驗證] so the test matched the wrong field\n   - 依據：`\"x\\n\\n# Injected\\n<script>\"` bytes 3+4 in 本 attempt\n",
