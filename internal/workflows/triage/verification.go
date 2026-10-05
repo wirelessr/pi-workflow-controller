@@ -184,6 +184,15 @@ func checkVerification(ctx context.Context, r *engine.Run, ref, claimRef contrac
 		return fmt.Errorf("role: got %q; want %q from the request", v.Role, role)
 	}
 	if !reflect.DeepEqual(v.AllowedEvidence, claim.Candidate.AllowedEvidence) {
+		want := claim.Candidate.AllowedEvidence
+		if len(v.AllowedEvidence) != len(want) {
+			return fmt.Errorf("allowed_evidence: got %d entries; want the claim's %d copied in order", len(v.AllowedEvidence), len(want))
+		}
+		for i := range want {
+			if err := sameEvidence(fmt.Sprintf("allowed_evidence[%d]", i), v.AllowedEvidence[i], want[i]); err != nil {
+				return err
+			}
+		}
 		return fmt.Errorf("allowed_evidence: want the claim's allowed evidence copied in order")
 	}
 	a := v.Assessment

@@ -1473,7 +1473,14 @@ func TestCheckVerification(t *testing.T) {
 		{name: "another role", change: func(v *Verification, _ contract.Ref) { v.Role = "con" }, want: `role: got "con"; want "pro"`},
 		{name: "evidence out of order", change: func(v *Verification, _ contract.Ref) {
 			v.AllowedEvidence[0], v.AllowedEvidence[1] = v.AllowedEvidence[1], v.AllowedEvidence[0]
-		}, want: "allowed_evidence: want the claim's allowed evidence copied in order"},
+		}, want: `allowed_evidence[0].file_id: got "`},
+		// Live: two verifiers wrote ref null for the round's own files.
+		{name: "evidence without the round ref", change: func(v *Verification, _ contract.Ref) {
+			v.AllowedEvidence[1].Ref = nil
+		}, want: "allowed_evidence[1].ref: got null; want attempt "},
+		{name: "evidence dropped", change: func(v *Verification, _ contract.Ref) {
+			v.AllowedEvidence = v.AllowedEvidence[:1]
+		}, want: "allowed_evidence: got 1 entries; want the claim's 2 copied in order"},
 		{name: "blank measurement", change: func(v *Verification, _ contract.Ref) { v.Assessment.Measurement = "\u00a0" }, want: "assessment.measurement"},
 		{name: "blank gap", change: func(v *Verification, _ contract.Ref) { v.Assessment.Gaps = []string{"\u00a0"} }, want: "assessment.gaps[0]"},
 		{name: "runtime basis outside", change: func(v *Verification, other contract.Ref) {
