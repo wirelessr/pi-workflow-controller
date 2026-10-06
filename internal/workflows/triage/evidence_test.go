@@ -36,8 +36,12 @@ func TestCheckEvidenceDiagnostics(t *testing.T) {
 		return contract.Ref{RunID: "run", AttemptID: attempt, Path: "/runs/" + attempt + "/contract.json", SchemaID: "triage.example.v1", SHA256: strings.Repeat("a", 64), ManifestSHA256: strings.Repeat("b", 64)}
 	}
 	ticket := ref("ticket")
+	audit := ref("audit")
+	audit.SchemaID = AuditSchema
+	shared := []contract.FileEntry{{ID: "shared", Kind: "evidence", Path: "evidence/shared.txt"}}
 	inputs := Inputs{
-		Citable: map[contract.Ref][]contract.FileEntry{ticket: {{ID: "issue", Kind: "evidence", Path: "evidence/issue.json"}, {ID: "summary", Kind: "artifact", Path: "artifacts/summary.md"}}},
+		Citable: map[contract.Ref][]contract.FileEntry{ticket: {{ID: "issue", Kind: "evidence", Path: "evidence/issue.json"}, {ID: "summary", Kind: "artifact", Path: "artifacts/summary.md"}},
+			audit: {{ID: "findings", Kind: "evidence", Path: "evidence/findings.json"}}, ref("second"): shared, ref("first"): shared},
 	}
 	own := []contract.FileEntry{{ID: "identity-receipt", Kind: "evidence", Path: "evidence/receipt.json"}, {ID: "report", Kind: "artifact", Path: "artifacts/report.md"}}
 	tampered := ticket
@@ -61,7 +65,13 @@ func TestCheckEvidenceDiagnostics(t *testing.T) {
 		{"own file of wrong kind", Evidence{FileID: "report"},
 			`facts[0].evidence[1].file_id: got "report", which this contract declares as kind=artifact; want a kind=evidence file`},
 		{"null ref naming an input's file", Evidence{FileID: "issue"},
-			`facts[0].evidence[1].file_id: got "issue", which this contract does not declare in files[]; want a kind=evidence id from this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id)`},
+			`facts[0].evidence[1].file_id: got "issue", which this contract does not declare in files[]; want a kind=evidence id from this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id) (input attempt ticket (triage.example.v1) declares "issue": set ref to that input's ref copied byte-exact from the request)`},
+		{"null ref naming a file of two inputs", Evidence{FileID: "shared"},
+			`facts[0].evidence[1].file_id: got "shared", which this contract does not declare in files[]; want a kind=evidence id from this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id) (inputs attempt first (triage.example.v1), attempt second (triage.example.v1) declare "shared": set ref to the ref of the input you read, copied byte-exact from the request)`},
+		{"no hint toward a judgment input", Evidence{FileID: "findings"},
+			`facts[0].evidence[1].file_id: got "findings", which this contract does not declare in files[]; want a kind=evidence id from this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id)`},
+		{"null ref naming an input's non-evidence file", Evidence{FileID: "summary"},
+			`facts[0].evidence[1].file_id: got "summary", which this contract does not declare in files[]; want a kind=evidence id from this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id)`},
 		{"input file missing", Evidence{Ref: &ticket, FileID: "comments"},
 			`facts[0].evidence[1].file_id: got "comments", which input attempt ticket (triage.example.v1) does not declare in files[]; want a kind=evidence id from that input's files[]`},
 		{"input file of wrong kind", Evidence{Ref: &ticket, FileID: "summary"},

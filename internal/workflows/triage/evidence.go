@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 
 	"pi-workflow-controller/internal/contract"
@@ -68,7 +69,27 @@ type Inputs struct {
 // received and what is expected, so a repair can fix it without guessing.
 func (in Inputs) CheckEvidence(field string, e Evidence, own []contract.FileEntry) error {
 	if e.Ref == nil {
-		return checkFile(field, e.FileID, own, "this contract", "this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id)")
+		err := checkFile(field, e.FileID, own, "this contract", "this contract's files[] (a null ref cites only this contract's own files; to cite a committed input, pair its exact ref with its file_id)")
+		if err == nil || slices.ContainsFunc(own, func(f contract.FileEntry) bool { return f.ID == e.FileID }) {
+			return err
+		}
+		// Judgment contracts are left out: a candidate may not cite them, so
+		// pointing there would trade one rejection for another.
+		var owners []string
+		for ref, files := range in.Citable {
+			if !slices.Contains(judgmentSchemas, ref.SchemaID) && slices.ContainsFunc(files, func(f contract.FileEntry) bool { return f.ID == e.FileID && f.Kind == "evidence" }) {
+				owners = append(owners, describeRef(ref))
+			}
+		}
+		slices.Sort(owners)
+		switch len(owners) {
+		case 0:
+			return err
+		case 1:
+			return fmt.Errorf("%w (input %s declares %q: set ref to that input's ref copied byte-exact from the request)", err, owners[0], e.FileID)
+		default:
+			return fmt.Errorf("%w (inputs %s declare %q: set ref to the ref of the input you read, copied byte-exact from the request)", err, strings.Join(owners, ", "), e.FileID)
+		}
 	}
 	ref := *e.Ref
 	if files, ok := in.Citable[ref]; ok {
