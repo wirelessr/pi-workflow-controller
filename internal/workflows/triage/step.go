@@ -147,7 +147,7 @@ func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engin
 			if ve := validate(ctx, out.Output); ve == nil {
 				break
 			} else if repairCount < repairBudget {
-				lastFeedback = &engine.Feedback{Message: "Previous contract was published but rejected by acceptance validation. Fix exactly the reported violation and republish the same contract; do not change substance: " + ve.Error()}
+				lastFeedback = &engine.Feedback{Message: "Previous contract was published but rejected by acceptance validation. Fix exactly the reported violations and republish the same contract; do not change substance: " + ve.Error()}
 				repairCount++
 				continue
 			} else {

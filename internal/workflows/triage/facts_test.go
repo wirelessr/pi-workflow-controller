@@ -69,6 +69,18 @@ func TestCheckFactsAndFactCheck(t *testing.T) {
 			f.Facts[0].Evidence = []Evidence{{Ref: &in.intake, FileID: "bundle", Locator: &Locator{Pointer: &p}}}
 		}, "not a single JSON document"},
 		{"blank anchor event", func(f *Facts, _ refs) { f.TimeAnchors[0].Event = "\u00a0" }, "event and source_tz"},
+		{"violations of one fact count toward the cap one by one", func(f *Facts, in refs) {
+			f.Facts[0].Evidence = nil
+			for range maxViolations + 5 {
+				f.Facts[0].Evidence = append(f.Facts[0].Evidence, cite(in.intake, "issue.json"))
+			}
+			f.TimeAnchors[0].UTC = "2025-01-02T00:30:00Z"
+		}, "facts[0].evidence[19].file_id*and 6 more violations not listed"},
+		{"independent violations are all reported", func(f *Facts, in refs) {
+			p := "/fields/customfield_9"
+			f.Facts[0].Evidence = []Evidence{cite(in.intake, "issue.json"), {Ref: &in.intake, FileID: "issue", Locator: &Locator{Pointer: &p}}}
+			f.TimeAnchors[0].UTC = "2025-01-02T00:30:00Z"
+		}, "facts[0].evidence[0].file_id: got \"issue.json\"*facts[0].evidence[1].locator.pointer: \"/fields/customfield_9\" does not exist*time_anchors[0].utc"},
 		{"own fetched file with a locator", func(f *Facts, _ refs) {
 			p := "/fetched"
 			f.Facts[0].Evidence = []Evidence{{FileID: "fetched", Locator: &Locator{Pointer: &p}}}
@@ -102,7 +114,7 @@ func TestCheckFactsAndFactCheck(t *testing.T) {
 			if report.Outcome != engine.Succeeded {
 				t.Fatalf("fixture run failed: %v", report.Failure)
 			}
-			if got := errText(err); tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
+			if got := errText(err); tc.want == "" && got != "" || tc.want != "" && !containsInOrder(got, strings.Split(tc.want, "*")) {
 				t.Fatalf("checkFacts = %q, want %q", got, tc.want)
 			}
 		})
@@ -167,4 +179,16 @@ func TestParseCallerPrompt(t *testing.T) {
 			t.Errorf("ParseCallerPrompt(%q) = %+v, %v", tc.prompt, got, err)
 		}
 	}
+}
+
+// containsInOrder reports whether s contains each part, in order.
+func containsInOrder(s string, parts []string) bool {
+	for _, p := range parts {
+		i := strings.Index(s, p)
+		if i < 0 {
+			return false
+		}
+		s = s[i+len(p):]
+	}
+	return true
 }

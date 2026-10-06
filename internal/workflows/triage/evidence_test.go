@@ -1,8 +1,10 @@
 package triage
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -196,4 +198,21 @@ func errText(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func TestViolations(t *testing.T) {
+	if violations(nil) != nil {
+		t.Fatal("no violations must be nil")
+	}
+	var errs []error
+	for i := range maxViolations + 3 {
+		errs = append(errs, fmt.Errorf("v%d", i))
+	}
+	got := errText(violations(errs))
+	if lines := strings.Split(got, "\n"); len(lines) != maxViolations+1 || lines[0] != "v0" || lines[maxViolations] != "and 3 more violations not listed" {
+		t.Fatalf("violations = %q", got)
+	}
+	if !errors.Is(violations(append(errs[:1:1], context.Canceled)), context.Canceled) {
+		t.Fatal("a joined cause must stay matchable")
+	}
 }

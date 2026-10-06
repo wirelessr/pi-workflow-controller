@@ -217,12 +217,19 @@ func checkRound(ctx context.Context, r *engine.Run, ref contract.Ref, c roundChe
 }
 
 func citeAll(cite func(string, Evidence) error, field string, evidence []Evidence) error {
+	return violations(citeErrs(cite, field, evidence))
+}
+
+// citeErrs is every failing citation of evidence, for a caller that joins
+// them with its own violations under one cap.
+func citeErrs(cite func(string, Evidence) error, field string, evidence []Evidence) []error {
+	var errs []error
 	for i, e := range evidence {
 		if err := cite(fmt.Sprintf("%s[%d]", field, i), e); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errs
 }
 
 // checkIdentity keeps the approved receipt echo: a confirmed value equals

@@ -1,6 +1,7 @@
 package triage
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -19,6 +20,18 @@ type Evidence struct {
 type Gap struct {
 	ID   string `json:"id"`
 	Text string `json:"text"`
+}
+
+// maxViolations bounds how many independent violations one diagnostic lists.
+const maxViolations = 20
+
+// violations joins the independent violations of one contract so a single
+// repair can fix them all; nil when there are none.
+func violations(errs []error) error {
+	if len(errs) > maxViolations {
+		errs = append(errs[:maxViolations:maxViolations], fmt.Errorf("and %d more violations not listed", len(errs)-maxViolations))
+	}
+	return errors.Join(errs...)
 }
 
 // checkGaps requires unique ids and text that is not only whitespace.

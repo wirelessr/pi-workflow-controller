@@ -222,40 +222,38 @@ func (s idSet) add(field, id string) error {
 // or round contract declares: unique ids, resolvable citations, recomputed
 // anchors, and vision attachments from an allowed owner.
 func checkDeclared(ids idSet, cite func(string, Evidence) error, factsField string, facts []Fact, anchors []TimeAnchor, vision []VisionRequest, visionRef func(*contract.Ref) bool, visionWant string) error {
+	// Items are independent: report every violation so one repair can fix
+	// them all instead of meeting them one at a time.
+	var errs []error
+	add := func(err error) {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
 	for i, f := range facts {
 		field := fmt.Sprintf("%s[%d]", factsField, i)
-		if err := ids.add(field, f.ID); err != nil {
-			return err
-		}
-		if err := citeAll(cite, field+".evidence", f.Evidence); err != nil {
-			return err
-		}
+		add(ids.add(field, f.ID))
+		errs = append(errs, citeErrs(cite, field+".evidence", f.Evidence)...)
 	}
 	for i, a := range anchors {
 		field := fmt.Sprintf("time_anchors[%d]", i)
-		if err := ids.add(field, a.ID); err != nil {
-			return err
-		}
+		add(ids.add(field, a.ID))
 		if !nonblank(a.Event) || !nonblank(a.SourceTZ) {
-			return fmt.Errorf("%s: event and source_tz must not be blank", field)
+			add(fmt.Errorf("%s: event and source_tz must not be blank", field))
+			continue
 		}
-		if err := checkAnchor(field, a, cite); err != nil {
-			return err
-		}
+		add(checkAnchor(field, a, cite))
 	}
 	for i, q := range vision {
 		field := fmt.Sprintf("vision_requests[%d]", i)
-		if err := ids.add(field, q.ID); err != nil {
-			return err
-		}
+		add(ids.add(field, q.ID))
 		if !visionRef(q.Attachment.Ref) {
-			return fmt.Errorf("%s.attachment.ref: got %s; want %s", field, describeRef(*q.Attachment.Ref), visionWant)
+			add(fmt.Errorf("%s.attachment.ref: got %s; want %s", field, describeRef(*q.Attachment.Ref), visionWant))
+			continue
 		}
-		if err := cite(field+".attachment", q.Attachment); err != nil {
-			return err
-		}
+		add(cite(field+".attachment", q.Attachment))
 	}
-	return nil
+	return violations(errs)
 }
 
 // factCheck is one independent judgment of the items a subject declares.
