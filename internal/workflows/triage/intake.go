@@ -203,9 +203,20 @@ func checkIntakePublication(ctx context.Context, ref contract.Ref, p contract.Pu
 	read := func(s Source) ([]byte, error) { return rawFile(ctx, ref, p.Files, s.FileID) }
 	decode := func(s Source, value any) error { return rawJSON(ctx, ref, p.Files, s.FileID, value) }
 	complete := true
+	// incomplete names the first source that makes the inventory incomplete,
+	// so a completeness mismatch says where to look.
+	var incomplete string
+	unproven := func(reason string) {
+		if complete {
+			incomplete = reason
+		}
+		complete = false
+	}
 	check := func(field string, s Source) error {
 		ok, err := checkSource(field, s, p.Files)
-		complete = complete && ok
+		if !ok {
+			unproven(fmt.Sprintf("%s has status %s", field, s.Status))
+		}
 		return err
 	}
 	if err := check("issue", v.Issue); err != nil {
@@ -288,11 +299,11 @@ func checkIntakePublication(ctx context.Context, ref contract.Ref, p contract.Pu
 			return v, fmt.Errorf("%s: the raw page needs startAt equal to start %d, a total and a comments array", field, page.Start)
 		}
 		if total >= 0 && total != *raw.Total {
-			complete = false
+			unproven(fmt.Sprintf("%s reports total %d; an earlier page reported %d", field, *raw.Total, total))
 		}
 		total = *raw.Total
 		if page.Start != next {
-			complete = false
+			unproven(fmt.Sprintf("%s.start is %d; want %d (pages in order from 0, each starting where the previous ends)", field, page.Start, next))
 		}
 		next = page.Start + len(raw.Comments)
 		if next > total {
@@ -305,7 +316,18 @@ func checkIntakePublication(ctx context.Context, ref contract.Ref, p contract.Pu
 			ids[c.ID] = true
 		}
 	}
-	complete = complete && total >= 0 && next == total && len(ids) == total && embedded.Total != nil && total == *embedded.Total
+	switch {
+	case total < 0:
+		unproven("comments: no available comment page; want a raw page from start 0, also when the issue has no comments")
+	case embedded.Total == nil:
+		unproven("comments: the raw issue gives no fields.comment.total to check the pages against")
+	case total != *embedded.Total:
+		unproven(fmt.Sprintf("comments: the pages report total %d; the raw issue's fields.comment.total is %d", total, *embedded.Total))
+	case next != total:
+		unproven(fmt.Sprintf("comments: the pages end at comment %d of %d", next, total))
+	case len(ids) != total:
+		unproven(fmt.Sprintf("comments: the pages hold %d distinct comments of %d", len(ids), total))
+	}
 	var links []jiraLink
 	var attachments []jiraAttachment
 	if issue.Fields != nil {
@@ -389,7 +411,11 @@ func checkIntakePublication(ctx context.Context, ref contract.Ref, p contract.Pu
 		return v, err
 	}
 	if v.Complete != complete || complete != (len(v.Gaps) == 0) {
-		return v, fmt.Errorf("complete/gaps: got complete=%t with %d gaps; the sources prove complete=%t, and complete requires no gaps while incomplete requires at least one", v.Complete, len(v.Gaps), complete)
+		proof := "every source is available"
+		if !complete {
+			proof = "first reason: " + incomplete
+		}
+		return v, fmt.Errorf("complete/gaps: got complete=%t with %d gaps; the sources prove complete=%t (%s), and complete requires no gaps while incomplete requires at least one", v.Complete, len(v.Gaps), complete, proof)
 	}
 	return v, nil
 }

@@ -108,8 +108,14 @@ func TestCheckIntakePublication(t *testing.T) {
 		{"missing comment page claimed complete", func(v *Intake, files map[string][]byte) {
 			delete(files, "page-1")
 			v.Comments = v.Comments[:1]
-		}, "complete/gaps"},
-		{"complete with a gap", func(v *Intake, _ map[string][]byte) { v.Gaps = []Gap{{ID: "x", Text: "nothing missing"}} }, "complete/gaps"},
+		}, "the sources prove complete=false (first reason: comments: the pages end at comment 1 of 2)"},
+		{"complete with a gap", func(v *Intake, _ map[string][]byte) { v.Gaps = []Gap{{ID: "x", Text: "nothing missing"}} }, "the sources prove complete=true (every source is available)"},
+		{"unsupported analysis claimed complete names the source", func(v *Intake, _ map[string][]byte) {
+			v.Attachments[0].Analysis = Source{Status: "unsupported", Reason: "no extraction applies"}
+		}, "the sources prove complete=false (first reason: attachments[0].analysis has status unsupported)"},
+		{"content cited as its own analysis is complete", func(v *Intake, _ map[string][]byte) {
+			v.Attachments[0].Analysis = v.Attachments[0].Content
+		}, ""},
 		{"duplicate gap ids", func(v *Intake, _ map[string][]byte) {
 			v.Fields = Source{Status: "missing", Reason: "denied"}
 			v.Complete, v.Gaps = false, []Gap{{ID: "x", Text: "a"}, {ID: "x", Text: "b"}}
@@ -133,6 +139,11 @@ func TestCheckIntakePublication(t *testing.T) {
 			files["page-1"] = []byte(`{"startAt":1,"total":3,"comments":[{"id":"c2","body":"x"}]}`)
 			v.Complete, v.Gaps = false, []Gap{{ID: "total", Text: "comment total changed during retrieval"}}
 		}, ""},
+		{"comment total changed during retrieval claimed complete", func(_ *Intake, files map[string][]byte) {
+			files["page-1"] = []byte(`{"startAt":1,"total":3,"comments":[{"id":"c2","body":"x"}]}`)
+		}, "first reason: comments[1] reports total 3; an earlier page reported 2)"},
+		{"no comment page claimed complete", func(v *Intake, _ map[string][]byte) { v.Comments = []CommentPage{} }, "first reason: comments: no available comment page"},
+		{"out-of-order page claimed complete", func(v *Intake, _ map[string][]byte) { v.Comments[0], v.Comments[1] = v.Comments[1], v.Comments[0] }, "first reason: comments[0].start is 1; want 0"},
 		{"comments past the total", func(_ *Intake, files map[string][]byte) {
 			files["page-1"] = []byte(`{"startAt":1,"total":2,"comments":[{"id":"c2","body":"x"},{"id":"c3","body":"y"}]}`)
 		}, "extend past the total"},

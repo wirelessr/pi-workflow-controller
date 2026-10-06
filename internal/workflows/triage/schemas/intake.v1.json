@@ -128,7 +128,8 @@
             "$ref": "https://pi-workflow-controller.local/schemas/triage/intake.v1.json#/$defs/source"
           },
           "analysis": {
-            "$ref": "https://pi-workflow-controller.local/schemas/triage/intake.v1.json#/$defs/source"
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/intake.v1.json#/$defs/source",
+            "description": "When the file type needs no mechanical extraction (plain text, a single JSON document, an image), the content itself is the analysis: status available with the content's file_id. unsupported is for a file that needs extraction which cannot be done"
           }
         }
       }
