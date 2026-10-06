@@ -139,7 +139,7 @@ func TestReport(t *testing.T) {
 			}
 			writeReport(t, call, nil, true)
 		}},
-		{name: "a report without the rendered file fails after its repair", fails: "want exactly the renderer's artifact",
+		{name: "a report without the rendered file fails after its repairs", fails: "want exactly the renderer's artifact",
 			report: func(t *testing.T, call agentCall) { writeReport(t, call, nil, false) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

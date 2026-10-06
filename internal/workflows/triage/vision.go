@@ -186,11 +186,12 @@ func visionStep(ctx context.Context, r *engine.Run, s *engine.Scope, ticket stri
 
 // visionAllowed is how many vision Steps may still run: within Vmax, and
 // leaving the run budget for the batch record and one more round. Each
-// vision Step may be retried after a timeout and repaired once.
+// vision Step may be retried after a timeout and repaired up to
+// repairBudget times.
 func visionAllowed(s engine.Snapshot, p RoundPolicy, used int) int {
 	per := p.TimeoutRetries + 1
 	sessions, attempts := roundCost(p)
 	bySessions := (s.Policy.MaxTotalSessions - len(s.Sessions) - sessions) / per
-	byAttempts := (s.Policy.MaxTotalAttempts - len(s.Attempts) - attempts - batchAttach) / (2 * per)
+	byAttempts := (s.Policy.MaxTotalAttempts - len(s.Attempts) - attempts - batchAttach) / (attemptsPerStep * per)
 	return max(0, min(p.Vision.MaxSteps-used, bySessions, byAttempts))
 }

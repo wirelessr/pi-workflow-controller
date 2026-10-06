@@ -39,9 +39,18 @@ type TaskStep struct {
 	Observed func(attemptID string, o *engine.Observation)
 }
 
-// RunTaskStep allows a single repair retry covering both contract-shape
-// (schema) failures and, when Validate is supplied, semantic acceptance
-// failures. A rejected contract returns to the same session with the exact
+// repairBudget is how many contract repairs one Step gets on its session:
+// most acceptance checks stop at the first violation, so a contract with
+// two independent slips needs a second pass after the first fix.
+const repairBudget = 2
+
+// attemptsPerStep is the attempts one Step dispatch may take: the first
+// and each repair. Budget reservations count Steps with it.
+const attemptsPerStep = repairBudget + 1
+
+// RunTaskStep allows up to repairBudget repair retries covering both
+// contract-shape (schema) failures and, when Validate is supplied, semantic
+// acceptance failures. A rejected contract returns to the same session with the exact
 // validator diagnostic as feedback; the repaired contract must pass the same
 // gates in full. Execution failures (timeout, cancellation, provider) are
 // never retried here.
@@ -82,7 +91,7 @@ func OpenTaskSession(ctx context.Context, r *engine.Run, t TaskStep) (TaskSessio
 	return ts, nil
 }
 
-// Run dispatches t on the session with the single contract repair and
+// Run dispatches t on the session with up to repairBudget contract repairs and
 // leaves the session open. A failure with Recovery is a *TaskFailure.
 func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engine.StepResult, error) {
 	s, stage, key, recovery, validate := t.Scope, t.Stage, t.Key, t.Recovery, t.Validate
@@ -94,13 +103,12 @@ func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engin
 	spec := engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: t.Inputs, Feedback: t.Feedback, Output: contract.Spec{SchemaID: t.Schema}, Timeout: t.Timeout, Observe: t.Observed != nil}
 	var out engine.StepResult
 	var lastFeedback *engine.Feedback
-	// Mechanical contract-shape repair, one budgeted re-attempt on the same
+	// Mechanical contract-shape repair, budgeted re-attempts on the same
 	// session: the rejection diagnostic rides spec.Feedback so the repairing
 	// agent sees the exact violation. Retried failures keep their typed code.
 	// Execution failures (timeout, cancellation, provider) are never retried.
 	// A manual second Step keeps successful steps from registering a retry
 	// scope: retry accounting must reflect only real repairs.
-	const repairBudget = 1
 	var repairCount int
 	var lastPublished contract.Ref
 	for {
@@ -108,12 +116,16 @@ func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engin
 		if repairCount > 0 && lastFeedback != nil {
 			attemptSpec.Feedback = lastFeedback
 		}
-		// The first attempt dispatches from the owning scope unchanged; only
-		// the repair re-attempt needs a fresh child scope, because a failed
-		// step key is burned on its owning scope.
+		// The first attempt dispatches from the owning scope unchanged; each
+		// repair re-attempt needs a fresh child scope, because a failed step
+		// key is burned on its owning scope.
 		attemptScope := s
 		if repairCount > 0 {
-			child, cerr := s.Child("contract-repair-" + key)
+			name := "contract-repair-" + key
+			if repairCount > 1 {
+				name = fmt.Sprintf("contract-repair-%d-%s", repairCount, key)
+			}
+			child, cerr := s.Child(name)
 			if cerr != nil {
 				err = cerr
 				break

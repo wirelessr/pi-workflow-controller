@@ -423,11 +423,11 @@ const rerunNote = "The previous attempt of this round failed (%s) and its work w
 
 // roundCost is the worst case of one round: its investigator Step, fact
 // check, audit and two stewards (T1 and T2a after the identity round), and
-// the report kept in reserve, each retried after a timeout and repaired
-// once, plus the fact status and observation records.
+// the report kept in reserve, each retried after a timeout and repaired up
+// to repairBudget times, plus the fact status and observation records.
 func roundCost(p RoundPolicy) (sessions, attempts int) {
 	steps := 6 * (p.TimeoutRetries + 1)
-	return steps, 2*steps + 2
+	return steps, attemptsPerStep*steps + 2
 }
 
 // roundFits reports whether the run's budget still covers one more round.
@@ -440,17 +440,23 @@ func roundFits(s engine.Snapshot, p RoundPolicy) bool {
 
 // timeFits reports whether the run deadline leaves d; running out of time
 // would fail the run without a report, while a budget limit still reports.
+// Callers count each Step once per timeout try, not per repair: a repair
+// fixes a reported violation on the open session and has taken minutes
+// live, while reserving a full Step timeout for each would end rounds hours
+// before the deadline. A repair that uses its full timeout can still reach
+// the run deadline, which fails the run without a report.
 func timeFits(s engine.Snapshot, d time.Duration) bool {
 	return s.Policy.DisableRunTimeout || time.Until(s.CreatedAt.Add(s.Policy.RunTimeout)) >= d
 }
 
 // verificationFits reports whether three verifiers and the T2b steward,
 // with the report kept in reserve, each retried after a timeout and
-// repaired once, plus the claim and delivery records, fit the run budget.
+// repaired up to repairBudget times, plus the claim and delivery records,
+// fit the run budget.
 func verificationFits(s engine.Snapshot, p RoundPolicy) bool {
 	steps := 5 * (p.TimeoutRetries + 1)
 	tries := time.Duration(p.TimeoutRetries + 1)
-	return s.Policy.MaxTotalSessions-len(s.Sessions) >= steps && s.Policy.MaxTotalAttempts-len(s.Attempts) >= 2*steps+2 &&
+	return s.Policy.MaxTotalSessions-len(s.Sessions) >= steps && s.Policy.MaxTotalAttempts-len(s.Attempts) >= attemptsPerStep*steps+2 &&
 		timeFits(s, tries*(p.Verification.Timeout+p.StewardTimeout+p.Report.Timeout))
 }
 

@@ -234,7 +234,7 @@ func checkVerification(ctx context.Context, r *engine.Run, ref, claimRef contrac
 
 // checkVerifierOwner keeps the approved owner rule: the result comes from
 // a closed fresh session of this role and model, in this verification's
-// group, that served only this verifier's attempts (its repair included).
+// group, that served only this verifier's attempts (its repairs included).
 func checkVerifierOwner(r *engine.Run, attemptID, group, key, role string, model runtime.ModelSpec) error {
 	snapshot := r.Snapshot()
 	attempt, ok := snapshot.Attempts[attemptID]

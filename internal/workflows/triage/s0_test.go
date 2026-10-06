@@ -359,7 +359,7 @@ func TestS0(t *testing.T) {
 				call.reply(t, f, nil)
 				return true
 			}},
-		{name: "an intake whose completeness the raw sources contradict fails after repair", retries: 0, roles: "intake intake", failure: "complete/gaps",
+		{name: "an intake whose completeness the raw sources contradict fails after both repairs", retries: 0, roles: "intake intake intake", failure: "complete/gaps",
 			agent: func(t *testing.T, call agentCall, round int) bool {
 				if call.Role != "intake" {
 					return false
