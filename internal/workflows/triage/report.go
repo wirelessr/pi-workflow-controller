@@ -32,6 +32,10 @@ const (
 // of its own to cite.
 const reportCitationRequirements = `Cite only the citable_inputs of this request, with their refs copied byte-exact; this contract has no evidence files of its own, its only file is the renderer's report.`
 
+// reportOwnFiles tells a report that cites or declares a file of its own
+// where its evidence comes from instead.
+const reportOwnFiles = "a report has no evidence files of its own, so cite a citable input's file with that input's exact ref"
+
 //go:embed report/render_report.py
 var reportResources embed.FS
 
@@ -178,7 +182,16 @@ func checkReport(ctx context.Context, r *engine.Run, ref contract.Ref, want repo
 	if err != nil {
 		return err
 	}
-	cite := citations{ctx, in, ref, p.Files}.check
+	// Every own file but the rendered report is refused below; a failing
+	// null-ref citation says so now, so the repair does not add one.
+	check := citations{ctx, in, ref, p.Files}.check
+	cite := func(field string, e Evidence) error {
+		err := check(field, e)
+		if err != nil && e.Ref == nil {
+			return fmt.Errorf("%w; %s", err, reportOwnFiles)
+		}
+		return err
+	}
 	if err := citeAll(cite, "question.evidence", v.Question.Evidence); err != nil {
 		return err
 	}
@@ -228,11 +241,14 @@ func checkReport(ctx context.Context, r *engine.Run, ref contract.Ref, want repo
 		return fmt.Errorf("completeness: got complete; want incomplete, since a limit ended the investigation, the claim did not pass verification or a gap is open")
 	}
 	if len(p.Files) != 1 || p.Files[0].ID != ReportFileID || p.Files[0].Kind != "artifact" || p.Files[0].Path != "artifacts/triage-report.md" {
-		got := make([]string, 0, len(p.Files))
+		got, own := make([]string, 0, len(p.Files)), ""
 		for _, f := range p.Files {
 			got = append(got, fmt.Sprintf("%s (%s, %s)", f.ID, f.Kind, f.Path))
+			if f.ID != ReportFileID {
+				own = "; " + reportOwnFiles
+			}
 		}
-		return fmt.Errorf("files: got [%s]; want exactly the renderer's artifact %s at artifacts/triage-report.md; run the renderer once. A report declares no evidence files of its own: cite a citable input's file with that input's exact ref instead", strings.Join(got, ", "), ReportFileID)
+		return fmt.Errorf("files: got [%s]; want exactly the renderer's artifact %s at artifacts/triage-report.md; run the renderer once%s", strings.Join(got, ", "), ReportFileID, own)
 	}
 	var meta struct {
 		Meta json.RawMessage `json:"meta"`

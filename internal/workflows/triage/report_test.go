@@ -155,8 +155,20 @@ func TestReport(t *testing.T) {
 				return
 			}
 			if !strings.Contains(call.Request.Feedback.Message, "files: got [inventory (evidence, evidence/inventory.txt), triage-report (artifact, artifacts/triage-report.md)]; want exactly the renderer's artifact") ||
-				!strings.Contains(call.Request.Feedback.Message, "cite a citable input's file with that input's exact ref instead") {
+				!strings.Contains(call.Request.Feedback.Message, reportOwnFiles) {
 				t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
+			}
+			writeReport(t, call, nil, true)
+		}},
+		{name: "a report citing an undeclared file of its own is told to cite an input", report: func(t *testing.T, call agentCall) {
+			if call.Request.Feedback == nil {
+				writeReport(t, call, func(v *Report) {
+					v.Question.Evidence = append(v.Question.Evidence, Evidence{FileID: "inventory", Locator: &Locator{Pointer: ptr("")}})
+				}, true)
+				return
+			}
+			if msg := call.Request.Feedback.Message; !strings.Contains(msg, `question.evidence[1].file_id: got "inventory", which this contract does not declare in files[]`) || !strings.Contains(msg, reportOwnFiles) {
+				t.Errorf("repair feedback = %q", msg)
 			}
 			writeReport(t, call, nil, true)
 		}},
@@ -243,6 +255,10 @@ func TestReport(t *testing.T) {
 				t.Fatalf("outcome = %s: %v", res.Report.Outcome, res.Report.Failure)
 			}
 			report := decodeRef[Report](t, res.Run, reportRef)
+			// The cases that write a bad first candidate must end on the repair.
+			if strings.Contains(report.Answer, "(no images attached)") || len(report.Question.Evidence) != 1 {
+				t.Errorf("accepted the first candidate: %+v", report)
+			}
 			if (report.Completeness == "complete") != tc.complete || (report.Claim.Outcome == "passed") == tc.blocked || len(report.Gaps) == 0 {
 				t.Errorf("report = %+v", report)
 			}
