@@ -246,7 +246,8 @@ func TestReport(t *testing.T) {
 				return ""
 			})
 			if tc.fails != "" {
-				if res.Report.Outcome != engine.Failed || !strings.Contains(res.Report.Failure.Error(), tc.fails) {
+				// A missing report file is not an own file: the hint stays out.
+				if res.Report.Outcome != engine.Failed || !strings.Contains(res.Report.Failure.Error(), tc.fails) || strings.Contains(res.Report.Failure.Error(), reportOwnFiles) {
 					t.Fatalf("outcome = %s failure = %v, want %q", res.Report.Outcome, res.Report.Failure, tc.fails)
 				}
 				return
@@ -255,7 +256,7 @@ func TestReport(t *testing.T) {
 				t.Fatalf("outcome = %s: %v", res.Report.Outcome, res.Report.Failure)
 			}
 			report := decodeRef[Report](t, res.Run, reportRef)
-			// The cases that write a bad first candidate must end on the repair.
+			// The own-file cases must end on the repair, not their first candidate.
 			if strings.Contains(report.Answer, "(no images attached)") || len(report.Question.Evidence) != 1 {
 				t.Errorf("accepted the first candidate: %+v", report)
 			}
