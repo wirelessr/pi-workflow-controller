@@ -19,6 +19,12 @@ import (
 // request, then runs the extracted renderer as the requirements say.
 func writeReport(t *testing.T, call agentCall, change func(*Report), render bool) {
 	t.Helper()
+	writeReportFiles(t, call, change, render, nil)
+}
+
+// writeReportFiles is writeReport with evidence files of the report's own.
+func writeReportFiles(t *testing.T, call agentCall, change func(*Report), render bool, files map[string][]byte) {
+	t.Helper()
 	want := call.Task.Report
 	ticket := []Evidence{cite(call.citable("intake"), "page-0")}
 	v := Report{Request: want.Request, Claim: want.Claim, Question: ReportQuestion{Text: "why does svc fail?", Evidence: ticket}, Answer: "the error comes from svc",
@@ -31,7 +37,7 @@ func writeReport(t *testing.T, call agentCall, change func(*Report), render bool
 	if change != nil {
 		change(&v)
 	}
-	if err := protocol.WriteEnvelope(call.Candidate, call.Request, v, []contract.FileEntry{}); err != nil {
+	if err := protocol.WriteEnvelope(call.Candidate, call.Request, v, call.writeFiles(t, files)); err != nil {
 		t.Fatal(err)
 	}
 	if !render {
@@ -139,6 +145,21 @@ func TestReport(t *testing.T) {
 			}
 			writeReport(t, call, nil, true)
 		}},
+		{name: "a report that declares its own evidence file is repaired", report: func(t *testing.T, call agentCall) {
+			// Live: a report wrote an inventory file of its own to cite.
+			if call.Request.Feedback == nil {
+				writeReportFiles(t, call, func(v *Report) {
+					v.Answer += " (no images attached)"
+					v.Question.Evidence = append(v.Question.Evidence, Evidence{FileID: "inventory", Locator: &Locator{Offset: ptr(int64(0)), Length: ptr(int64(1))}})
+				}, true, map[string][]byte{"inventory": []byte("no images\n")})
+				return
+			}
+			if !strings.Contains(call.Request.Feedback.Message, "files: got [inventory (evidence, evidence/inventory.txt), triage-report (artifact, artifacts/triage-report.md)]; want exactly the renderer's artifact") ||
+				!strings.Contains(call.Request.Feedback.Message, "cite a citable input's file with that input's exact ref instead") {
+				t.Errorf("repair feedback = %q", call.Request.Feedback.Message)
+			}
+			writeReport(t, call, nil, true)
+		}},
 		{name: "a report without the rendered file fails after its repairs", fails: "want exactly the renderer's artifact",
 			report: func(t *testing.T, call agentCall) { writeReport(t, call, nil, false) }},
 	} {
@@ -190,6 +211,9 @@ func TestReport(t *testing.T) {
 				case "report":
 					if !strings.HasSuffix(call.Task.Report.Renderer, "triage-report/render_report.py") || len(call.Task.Skills) != 0 {
 						t.Errorf("report task = %+v", call.Task.Report)
+					}
+					if strings.Contains(call.Task.Requirements, citationRequirements) || !strings.Contains(call.Task.Requirements, reportCitationRequirements) {
+						t.Errorf("report requirements offer own evidence files: %q", call.Task.Requirements)
 					}
 					held := false
 					func() {

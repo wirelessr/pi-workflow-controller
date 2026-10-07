@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"pi-workflow-controller/internal/contract"
@@ -25,6 +26,11 @@ const (
 	ReportFileID = "triage-report"
 	reportDir    = "triage-report"
 )
+
+// reportCitationRequirements replaces the shared citation sentence: the
+// report's only file is the rendered artifact, so it has no evidence files
+// of its own to cite.
+const reportCitationRequirements = `Cite only the citable_inputs of this request, with their refs copied byte-exact; this contract has no evidence files of its own, its only file is the renderer's report.`
 
 //go:embed report/render_report.py
 var reportResources embed.FS
@@ -222,7 +228,11 @@ func checkReport(ctx context.Context, r *engine.Run, ref contract.Ref, want repo
 		return fmt.Errorf("completeness: got complete; want incomplete, since a limit ended the investigation, the claim did not pass verification or a gap is open")
 	}
 	if len(p.Files) != 1 || p.Files[0].ID != ReportFileID || p.Files[0].Kind != "artifact" || p.Files[0].Path != "artifacts/triage-report.md" {
-		return fmt.Errorf("files: want exactly the renderer's artifact %s at artifacts/triage-report.md; run the renderer once", ReportFileID)
+		got := make([]string, 0, len(p.Files))
+		for _, f := range p.Files {
+			got = append(got, fmt.Sprintf("%s (%s, %s)", f.ID, f.Kind, f.Path))
+		}
+		return fmt.Errorf("files: got [%s]; want exactly the renderer's artifact %s at artifacts/triage-report.md; run the renderer once. A report declares no evidence files of its own: cite a citable input's file with that input's exact ref instead", strings.Join(got, ", "), ReportFileID)
 	}
 	var meta struct {
 		Meta json.RawMessage `json:"meta"`
@@ -350,7 +360,7 @@ func runReport(ctx context.Context, r *engine.Run, s0 S0, skills Skills, out Rou
 	_, input := r.WorkflowInput()
 	// Every committed result with recorded gaps: the skills record and
 	// what the rounds handed on, session observations included.
-	t := newTask(r, "report", s0.Ticket, nil, reportRequirements, citationRequirements)
+	t := newTask(r, "report", s0.Ticket, nil, reportRequirements, reportCitationRequirements)
 	t.Citable = append([]LabeledRef{{"skills", skills.Record}}, out.Inputs...)
 	refs := t.inputs()
 	gaps, err := reportGaps(ctx, r, refs)
