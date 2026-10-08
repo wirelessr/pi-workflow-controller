@@ -239,7 +239,7 @@ func TestNoSymlinksNativeProofDeviceNode(t *testing.T) {
 		t.Fatalf("noSymlinks must accept an irregular leaf like the walker: ok=%v unsafe=%v", ok, unsafe)
 	}
 	if f, _, err := openRegular(root, "a/dev"); err == nil {
-		f.Close()
+		_ = f.Close()
 		t.Fatal("openRegular accepted an irregular leaf")
 	} else if err != errUnsafe {
 		t.Fatalf("openRegular irregular leaf error = %v, want errUnsafe", err)
