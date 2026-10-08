@@ -1,6 +1,6 @@
 # Jira triage
 
-`jira-triage` 已註冊（`internal/workflows/triage`）。原本以 Planner 自主派工的版本未通過 alpha，已刪除（可從版本歷史取得）；本文件描述的是取代它的固定階段版本。現況是 alpha：除了匿名結構驗收（真 engine／runtime／RPC protocol，fake Pi 代寫 candidate），已以一張真實票（非 production 環境、票面有候選 stack、沒有附件）用真 Pi、模型與私有 skill 跑過，修正 live 發現的缺陷後連續兩次成功產出報告。尚未 live 驗證：vision、production 環境、沒有候選或候選驗證失敗時的全 stack 搜尋、逾時重跑、額度或時間不足的提前結束、T3。
+`jira-triage` 已註冊（`internal/workflows/triage`）。原本以 Planner 自主派工的版本未通過 alpha，已刪除（可從版本歷史取得）；本文件描述的是取代它的固定階段版本。現況是 alpha：除了匿名結構驗收（真 engine／runtime／RPC protocol，fake Pi 代寫 candidate），已以三張真實票（非 production 環境；含壓縮檔與純文字／JSON 附件；有候選 stack，也有候選驗證失敗後的全 stack 搜尋）用真 Pi、模型與私有 skill 跑過多次，修正 live 發現的缺陷後最近四次都成功產出報告，其中一次以 challenge 上限結束。尚未 live 驗證：vision、production 環境、逾時重跑、session／時間額度不足的提前結束、T3、同一 Step 的第二次修復。
 
 執行：`PWC_TRIAGE_SKILLS_DIR=<私有 skill 目錄> pi-workflow-controller run jira-triage "<TICKET-KEY> 其他提示"`。Prompt 必須以票號開頭；其後的文字只是候選來源，不是授權。模型與限額在 `triage.DefaultConfig()` 與 `triage.RunPolicy()`，數值是保守起點，待 live 調整。
 
@@ -37,4 +37,4 @@ Controller 只負責階段邊界的前置條件、exact committed Refs、確定�
 - 結束條件：T2b pass、blocked，或任一上限（round 數、run 額度、steward challenge、S2 次數）。
 - 報告（S3）：fresh 的 report Step（不載私有 skill）拿到所有已提交結果，必須原樣抄寫 caller prompt 與 Controller 給的 claim 物件（最後一次驗證的 claim、delivery、T2b 與 passed／not-passed／none），對 Controller 從已提交 contract 組出的每個 gap（以 Ref 與 id 指名）恰好給一次處置，並宣告完整性：上限結束、claim 未通過或有 open gap 時必須是 incomplete。報告檔由 run 內展開的 renderer 產生，Go 以內嵌的同一 renderer 對已提交 inputs 重算並逐 byte 比對；結果須來自 closed fresh report session。每個處置為 resolved／not-applicable 的 gap 須附可解析的證據。報告寫給沒跟過調查、要據此行動的讀者：先列票上的問題（附定位）與直接答案、完整性、驗證結果與把握程度，再列從根因到症狀的因果鏈（每步標明屬於通過驗證的 claim、證據直接顯示或推論，並附可解析的定位；claim 未通過時不得標為已驗證）、給負責下一步的人的建議行動，以及未解缺口與後續調查（行動與後續調查不得同時為空）。已處理的缺口、稽核發現、T2a／T2b notes 與 verifier 全文放在後面，候選結論與驗證細節列為附錄。Agent 文字以跳脫方式呈現，不能開出 Markdown 區塊或 HTML。Session 觀測覆蓋不完整時，觀測紀錄以 `audit-coverage-<n>` gap 進入報告的涵蓋清單。Rounds、vision 與驗證的額度檢查都替報告保留一個最壞情況的 Step。舊版報告的 M6 dispositions、budget 段落與 report failures 由 rounds 的 Limit 取代；recovery 紀錄目前只在記憶體中（已列放寬，U10 決定是否提交）。
 
-匿名測試只證明結構與流程；live 驗證的範圍見開頭，一張票的成功不代表調查品質。
+匿名測試只證明結構與流程；live 驗證的範圍見開頭，幾張票的成功不代表調查品質；報告結論仍需操作者對主要來源核對。
