@@ -24,9 +24,10 @@
     "allowed_evidence": {
       "type": "array",
       "items": {
-        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+        "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
+        "description": "A copy of the claim's allowed evidence entry, byte-exact including its ref (never null: a verifier has no files of its own)"
       },
-      "description": "The claim's allowed evidence, copied in order, each entry byte-exact including its ref (never null: a verifier has no files of its own)"
+      "description": "The claim's allowed evidence, copied in order"
     },
     "assessment": {
       "description": "Your declarations with evidence and limitations; strings are not proof or a vote. State missing measurement conditions explicitly, never invent them.",
@@ -56,16 +57,16 @@
         },
         "basis": {
           "type": "array",
-          "description": "Entries copied exactly from allowed_evidence: same ref, file_id and locator, or no locator where the entry has none. Do not add or narrow a locator; name the part of a file you rely on in the text instead",
           "items": {
-            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
+            "description": "An exact copy of one allowed_evidence entry: same ref, file_id and locator, or no locator where that entry has none; never add, narrow or drop a locator"
           }
         },
         "runtime_basis": {
           "type": "array",
-          "description": "Entries copied exactly from allowed_evidence: same ref, file_id and locator, or no locator where the entry has none. Do not add or narrow a locator; name the part of a file you rely on in the text instead",
           "items": {
-            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+            "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
+            "description": "An exact copy of one allowed_evidence entry: same ref, file_id and locator, or no locator where that entry has none; never add, narrow or drop a locator"
           }
         },
         "measurement": {
@@ -114,9 +115,9 @@
               },
               "basis": {
                 "type": "array",
-                "description": "Entries copied exactly from allowed_evidence: same ref, file_id and locator, or no locator where the entry has none. Do not add or narrow a locator; name the part of a file you rely on in the text instead",
                 "items": {
-                  "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
+                  "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
+                  "description": "An exact copy of one allowed_evidence entry: same ref, file_id and locator, or no locator where that entry has none; never add, narrow or drop a locator"
                 }
               }
             }

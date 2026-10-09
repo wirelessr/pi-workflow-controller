@@ -1494,6 +1494,13 @@ func TestCheckVerification(t *testing.T) {
 			e.Ref = nil
 			v.Assessment.Basis = []Evidence{e}
 		}, want: `is not cited exactly as the claim allows it: got ref null`},
+		// Live: verifiers narrowed allowed entries with a locator of their own.
+		{name: "basis with an added locator", change: func(v *Verification, _ contract.Ref) {
+			e := v.AllowedEvidence[0]
+			offset, length := int64(0), int64(10)
+			e.Locator = &Locator{Offset: &offset, Length: &length}
+			v.Assessment.Basis = []Evidence{e}
+		}, want: `with locator offset 0 length 10; want an exact copy of ref attempt `},
 		{name: "basis with a mistyped digest", change: func(v *Verification, _ contract.Ref) {
 			e := v.AllowedEvidence[0]
 			ref := *e.Ref
