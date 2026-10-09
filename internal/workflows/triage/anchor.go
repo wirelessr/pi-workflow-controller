@@ -70,7 +70,14 @@ func checkAnchor(field string, a TimeAnchor, evidence func(string, Evidence) err
 		actual = time.UnixMilli(*a.PairedEpochMillis)
 		var mathErr error
 		if shifted := local.Add(-time.Duration(a.OffsetSeconds) * time.Second); e == nil && !shifted.Equal(actual) {
-			mathErr = fmt.Errorf("%s.offset_seconds: local %q minus %d seconds is %s, but paired_epoch_millis %d is %s (they differ by %s)", field, a.Original, a.OffsetSeconds, shifted.Format(time.RFC3339Nano), *a.PairedEpochMillis, actual.UTC().Format(time.RFC3339Nano), shifted.Sub(actual))
+			got := fmt.Sprintf("local %q minus %d seconds is %s, but paired_epoch_millis %d is %s", a.Original, a.OffsetSeconds, shifted.Format(time.RFC3339Nano), *a.PairedEpochMillis, actual.UTC().Format(time.RFC3339Nano))
+			if diff := shifted.Sub(actual); diff%time.Second == 0 {
+				mathErr = fmt.Errorf("%s.offset_seconds: %s; want offset_seconds %d", field, got, a.OffsetSeconds+int(diff/time.Second))
+			} else {
+				// No whole-second offset closes a sub-second gap; the two
+				// values themselves disagree.
+				mathErr = fmt.Errorf("%s.original: %s; they differ by %s, which no whole-second offset_seconds can close, so original and paired_epoch_millis disagree below one second", field, got, diff)
+			}
 		}
 		if pairErr != nil || mathErr != nil {
 			return errors.Join(pairErr, mathErr)

@@ -203,9 +203,10 @@ func TestCheckAnchor(t *testing.T) {
 		{"local paired", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &paired}, ""},
 		{"local without a pair", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: ev}, "same event"},
 		{"local paired with itself", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &ev}, `got the same file_id "e" and locator as evidence`},
-		{"local paired with itself and a wrong offset", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 3600, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &ev}, "own absolute evidence; want the locator of the same event's absolute timestamp (a separate span, which may be in the same file)\ntime_anchors[0].offset_seconds: local \"2025-01-02T00:30:00\" minus 3600 seconds is 2025-01-01T23:30:00Z"},
-		{"local with a wrong offset", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 3600, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &paired}, "is 2025-01-01T23:30:00Z, but paired_epoch_millis 1735770600000 is 2025-01-01T22:30:00Z (they differ by 1h0m0s)"},
-		{"local milliseconds against a whole-second epoch", TimeAnchor{Original: "2025-01-02T00:30:00.864", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &paired}, "(they differ by 864ms)"},
+		{"local paired with itself and a wrong offset", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 3600, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &ev}, "own absolute evidence; want the locator of the same event's absolute timestamp (a separate span, which may be in the same file)\ntime_anchors[0].offset_seconds: local \"2025-01-02T00:30:00\" minus 3600 seconds is 2025-01-01T23:30:00Z, but paired_epoch_millis 1735770600000 is 2025-01-01T22:30:00Z; want offset_seconds 7200"},
+		{"local with a wrong offset", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 3600, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &paired}, "time_anchors[0].offset_seconds: local \"2025-01-02T00:30:00\" minus 3600 seconds is 2025-01-01T23:30:00Z, but paired_epoch_millis 1735770600000 is 2025-01-01T22:30:00Z; want offset_seconds 7200"},
+		{"local with an offset too large", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 10800, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &paired}, "want offset_seconds 7200"},
+		{"local milliseconds against a whole-second epoch", TimeAnchor{Original: "2025-01-02T00:30:00.864", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &paired}, "time_anchors[0].original: local \"2025-01-02T00:30:00.864\" minus 7200 seconds is 2025-01-01T22:30:00.864Z, but paired_epoch_millis 1735770600000 is 2025-01-01T22:30:00Z; they differ by 864ms"},
 		{"pair on a non-local anchor", TimeAnchor{Original: "1735770600000", Format: "epoch-millis", SourceTZ: "UTC", UTC: "2025-01-01T22:30:00Z", Evidence: ev, PairedEpochMillis: &millis}, "must be null"},
 		{"unparseable original", TimeAnchor{Original: "yesterday", Format: "rfc3339", SourceTZ: "UTC", UTC: "2025-01-01T22:30:00Z", Evidence: ev}, "does not parse"},
 		{"unknown format", TimeAnchor{Original: "x", Format: "iso-week", SourceTZ: "UTC", UTC: "2025-01-01T22:30:00Z", Evidence: ev}, "unsupported"},
@@ -220,6 +221,20 @@ func TestCheckAnchor(t *testing.T) {
 	stop := errors.New("bad citation")
 	if err := checkAnchor("a", TimeAnchor{Format: "rfc3339", Evidence: ev}, func(string, Evidence) error { return stop }); !errors.Is(err, stop) {
 		t.Fatalf("citation failure not reported first: %v", err)
+	}
+	local := TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 3600, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &paired}
+	failPaired := func(field string, _ Evidence) error {
+		if strings.HasSuffix(field, ".paired_evidence") {
+			return stop
+		}
+		return nil
+	}
+	if err := checkAnchor("a", local, failPaired); !errors.Is(err, stop) || strings.Contains(err.Error(), "offset_seconds") {
+		t.Fatalf("paired citation failure = %v, want it alone before the arithmetic", err)
+	}
+	local.PairedEvidence = &ev
+	if err := checkAnchor("a", local, failPaired); err == nil || errors.Is(err, stop) {
+		t.Fatalf("self-paired anchor cited its paired evidence again: %v", err)
 	}
 }
 
