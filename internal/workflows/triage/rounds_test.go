@@ -1502,7 +1502,21 @@ func TestCheckVerification(t *testing.T) {
 			e.Locator = &Locator{Offset: &offset, Length: &length}
 			v.Assessment.Basis = []Evidence{e}
 			v.AllowedEvidence[1].Ref = nil
+		}, want: "allowed_evidence[1].ref: got null; want attempt "},
+		{name: "null ref and an added locator, the locator also listed", change: func(v *Verification, _ contract.Ref) {
+			e := v.AllowedEvidence[0]
+			offset, length := int64(0), int64(10)
+			e.Locator = &Locator{Offset: &offset, Length: &length}
+			v.Assessment.Basis = []Evidence{e}
+			v.AllowedEvidence[1].Ref = nil
 		}, want: "\nassessment.basis[0]: file "},
+		{name: "evidence dropped and a basis outside", change: func(v *Verification, other contract.Ref) {
+			v.AllowedEvidence = v.AllowedEvidence[:1]
+			v.Assessment.Basis = []Evidence{{Ref: &other, FileID: "prompt"}}
+		}, want: "copied in order\nassessment.basis[0]: file \"prompt\""},
+		{name: "blank counterexample with a basis outside", change: func(v *Verification, other contract.Ref) {
+			v.Assessment.Counterexamples = []VerificationIssue{{Statement: "s", Disposition: "\u00a0", Reason: "r", Basis: []Evidence{{Ref: &other, FileID: "prompt"}}}}
+		}, want: "reason must not be blank\nassessment.counterexamples[0].basis[0]: file \"prompt\""},
 		{name: "blank fields in a fixed order", change: func(v *Verification, _ contract.Ref) {
 			v.Assessment.Window, v.Assessment.Support = "\u00a0", "\u00a0"
 		}, want: "assessment.support: got only whitespace; state it, or state that it is unavailable\nassessment.window: "},
