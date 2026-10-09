@@ -71,12 +71,15 @@ func checkAnchor(field string, a TimeAnchor, evidence func(string, Evidence) err
 		var mathErr error
 		if shifted := local.Add(-time.Duration(a.OffsetSeconds) * time.Second); e == nil && !shifted.Equal(actual) {
 			got := fmt.Sprintf("local %q minus %d seconds is %s, but paired_epoch_millis %d is %s", a.Original, a.OffsetSeconds, shifted.Format(time.RFC3339Nano), *a.PairedEpochMillis, actual.UTC().Format(time.RFC3339Nano))
-			if diff := shifted.Sub(actual); diff%time.Second == 0 {
-				mathErr = fmt.Errorf("%s.offset_seconds: %s; want offset_seconds %d", field, got, a.OffsetSeconds+int(diff/time.Second))
-			} else {
-				// No whole-second offset closes a sub-second gap; the two
-				// values themselves disagree.
-				mathErr = fmt.Errorf("%s.original: %s; they differ by %s, which no whole-second offset_seconds can close, so original and paired_epoch_millis disagree below one second", field, got, diff)
+			diff := shifted.Sub(actual)
+			// The schema bounds offset_seconds; past it no offset can close the gap.
+			switch want := a.OffsetSeconds + int(diff/time.Second); {
+			case diff%time.Second == 0 && want >= -86400 && want <= 86400:
+				mathErr = fmt.Errorf("%s.offset_seconds: %s; want offset_seconds %d", field, got, want)
+			case diff > -time.Second && diff < time.Second:
+				mathErr = fmt.Errorf("%s: %s; they differ by %s, below one second, which no whole-second offset_seconds can close, so original and paired_epoch_millis disagree", field, got, diff)
+			default:
+				mathErr = fmt.Errorf("%s: %s; they differ by %s, which no offset_seconds within ±86400 seconds can close, so original and paired_epoch_millis disagree", field, got, diff)
 			}
 		}
 		if pairErr != nil || mathErr != nil {

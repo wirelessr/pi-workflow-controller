@@ -188,6 +188,8 @@ func TestCheckAnchor(t *testing.T) {
 	ev := Evidence{FileID: "e"}
 	paired := Evidence{FileID: "p"}
 	millis := int64(1735770600000)
+	seconds := millis / 1000
+	daysLater := millis + 3*86400*1000
 	ok := func(string, Evidence) error { return nil }
 	for _, tc := range []struct {
 		name string
@@ -206,7 +208,9 @@ func TestCheckAnchor(t *testing.T) {
 		{"local paired with itself and a wrong offset", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 3600, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &ev}, "own absolute evidence; want the locator of the same event's absolute timestamp (a separate span, which may be in the same file)\ntime_anchors[0].offset_seconds: local \"2025-01-02T00:30:00\" minus 3600 seconds is 2025-01-01T23:30:00Z, but paired_epoch_millis 1735770600000 is 2025-01-01T22:30:00Z; want offset_seconds 7200"},
 		{"local with a wrong offset", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 3600, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &paired}, "time_anchors[0].offset_seconds: local \"2025-01-02T00:30:00\" minus 3600 seconds is 2025-01-01T23:30:00Z, but paired_epoch_millis 1735770600000 is 2025-01-01T22:30:00Z; want offset_seconds 7200"},
 		{"local with an offset too large", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 10800, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &paired}, "want offset_seconds 7200"},
-		{"local milliseconds against a whole-second epoch", TimeAnchor{Original: "2025-01-02T00:30:00.864", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &paired}, "time_anchors[0].original: local \"2025-01-02T00:30:00.864\" minus 7200 seconds is 2025-01-01T22:30:00.864Z, but paired_epoch_millis 1735770600000 is 2025-01-01T22:30:00Z; they differ by 864ms"},
+		{"local milliseconds against a whole-second epoch", TimeAnchor{Original: "2025-01-02T00:30:00.864", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &paired}, "time_anchors[0]: local \"2025-01-02T00:30:00.864\" minus 7200 seconds is 2025-01-01T22:30:00.864Z, but paired_epoch_millis 1735770600000 is 2025-01-01T22:30:00Z; they differ by 864ms, below one second"},
+		{"local paired with epoch seconds as millis", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: ev, PairedEpochMillis: &seconds, PairedEvidence: &paired}, "which no offset_seconds within ±86400 seconds can close"},
+		{"local paired with a whole-second gap past the offset range", TimeAnchor{Original: "2025-01-02T00:30:00", Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: ev, PairedEpochMillis: &daysLater, PairedEvidence: &paired}, "which no offset_seconds within ±86400 seconds can close"},
 		{"pair on a non-local anchor", TimeAnchor{Original: "1735770600000", Format: "epoch-millis", SourceTZ: "UTC", UTC: "2025-01-01T22:30:00Z", Evidence: ev, PairedEpochMillis: &millis}, "must be null"},
 		{"unparseable original", TimeAnchor{Original: "yesterday", Format: "rfc3339", SourceTZ: "UTC", UTC: "2025-01-01T22:30:00Z", Evidence: ev}, "does not parse"},
 		{"unknown format", TimeAnchor{Original: "x", Format: "iso-week", SourceTZ: "UTC", UTC: "2025-01-01T22:30:00Z", Evidence: ev}, "unsupported"},
