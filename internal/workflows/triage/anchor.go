@@ -1,6 +1,7 @@
 package triage
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -56,17 +57,23 @@ func checkAnchor(field string, a TimeAnchor, evidence func(string, Evidence) err
 		if a.PairedEpochMillis == nil || a.PairedEvidence == nil {
 			return fmt.Errorf("%s: format local-paired needs paired_epoch_millis and paired_evidence from the same event; an absolute timestamp in another syntax is rfc3339 (normalize original, keep the raw form in event or evidence)", field)
 		}
+		// The pairing and the arithmetic are independent: report both so one
+		// repair can fix them together.
+		var pairErr error
 		if reflect.DeepEqual(a.Evidence, *a.PairedEvidence) {
-			return fmt.Errorf("%s.paired_evidence: the local timestamp cannot be its own absolute evidence", field)
-		}
-		if err := evidence(field+".paired_evidence", *a.PairedEvidence); err != nil {
+			pairErr = fmt.Errorf("%s.paired_evidence: got the same file_id %q and locator as evidence, so the local timestamp would be its own absolute evidence; want the locator of the same event's absolute timestamp (a separate span, which may be in the same file)", field, a.PairedEvidence.FileID)
+		} else if err := evidence(field+".paired_evidence", *a.PairedEvidence); err != nil {
 			return err
 		}
 		local, e := time.Parse("2006-01-02T15:04:05.999999999", a.Original)
 		err = e
 		actual = time.UnixMilli(*a.PairedEpochMillis)
-		if e == nil && !local.Add(-time.Duration(a.OffsetSeconds)*time.Second).Equal(actual) {
-			return fmt.Errorf("%s.offset_seconds: local %q minus %d seconds is not the paired epoch %d", field, a.Original, a.OffsetSeconds, *a.PairedEpochMillis)
+		var mathErr error
+		if shifted := local.Add(-time.Duration(a.OffsetSeconds) * time.Second); e == nil && !shifted.Equal(actual) {
+			mathErr = fmt.Errorf("%s.offset_seconds: local %q minus %d seconds is %s, but paired_epoch_millis %d is %s (they differ by %s)", field, a.Original, a.OffsetSeconds, shifted.Format(time.RFC3339Nano), *a.PairedEpochMillis, actual.UTC().Format(time.RFC3339Nano), shifted.Sub(actual))
+		}
+		if pairErr != nil || mathErr != nil {
+			return errors.Join(pairErr, mathErr)
 		}
 	default:
 		return fmt.Errorf("%s.format: unsupported %q", field, a.Format)
