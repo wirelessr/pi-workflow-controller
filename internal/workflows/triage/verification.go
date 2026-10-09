@@ -174,62 +174,62 @@ func checkVerification(ctx context.Context, r *engine.Run, ref, claimRef contrac
 		return err
 	}
 	v := p.Data
-	if len(p.Files) != 0 {
-		return fmt.Errorf("files: got %d; a verifier writes no files", len(p.Files))
-	}
-	if err := sameRef("claim", v.Claim, claimRef); err != nil {
-		return err
-	}
-	if v.Role != role {
-		return fmt.Errorf("role: got %q; want %q from the request", v.Role, role)
-	}
-	if !reflect.DeepEqual(v.AllowedEvidence, claim.Candidate.AllowedEvidence) {
-		want := claim.Candidate.AllowedEvidence
-		if len(v.AllowedEvidence) != len(want) {
-			return fmt.Errorf("allowed_evidence: got %d entries; want the claim's %d copied in order", len(v.AllowedEvidence), len(want))
+	// The checks are independent: report every violation so one repair can
+	// fix them all instead of meeting them one at a time.
+	var errs []error
+	add := func(err error) {
+		if err != nil {
+			errs = append(errs, err)
 		}
-		for i := range want {
-			if err := sameEvidence(fmt.Sprintf("allowed_evidence[%d]", i), v.AllowedEvidence[i], want[i]); err != nil {
-				return err
+	}
+	if len(p.Files) != 0 {
+		add(fmt.Errorf("files: got %d; a verifier writes no files", len(p.Files)))
+	}
+	add(sameRef("claim", v.Claim, claimRef))
+	if v.Role != role {
+		add(fmt.Errorf("role: got %q; want %q from the request", v.Role, role))
+	}
+	if want := claim.Candidate.AllowedEvidence; !reflect.DeepEqual(v.AllowedEvidence, want) {
+		if len(v.AllowedEvidence) != len(want) {
+			add(fmt.Errorf("allowed_evidence: got %d entries; want the claim's %d copied in order", len(v.AllowedEvidence), len(want)))
+		} else {
+			n := len(errs)
+			for i := range want {
+				add(sameEvidence(fmt.Sprintf("allowed_evidence[%d]", i), v.AllowedEvidence[i], want[i]))
+			}
+			if len(errs) == n {
+				add(fmt.Errorf("allowed_evidence: want the claim's allowed evidence copied in order"))
 			}
 		}
-		return fmt.Errorf("allowed_evidence: want the claim's allowed evidence copied in order")
 	}
 	a := v.Assessment
-	for field, value := range map[string]string{"support": a.Support, "reason": a.Reason, "measurement": a.Measurement, "window": a.Window, "filter": a.Filter, "environment": a.Environment, "release": a.Release} {
-		if !nonblank(value) {
-			return fmt.Errorf("assessment.%s: got only whitespace; state it, or state that it is unavailable", field)
+	for _, f := range []struct{ name, value string }{{"support", a.Support}, {"reason", a.Reason}, {"measurement", a.Measurement}, {"window", a.Window}, {"filter", a.Filter}, {"environment", a.Environment}, {"release", a.Release}} {
+		if !nonblank(f.value) {
+			add(fmt.Errorf("assessment.%s: got only whitespace; state it, or state that it is unavailable", f.name))
 		}
 	}
 	for i, gap := range a.Gaps {
 		if !nonblank(gap) {
-			return fmt.Errorf("assessment.gaps[%d]: got only whitespace", i)
+			add(fmt.Errorf("assessment.gaps[%d]: got only whitespace", i))
 		}
 	}
-	allowed := func(field string, basis []Evidence) error {
+	allowed := func(field string, basis []Evidence) {
 		for i, e := range basis {
 			if !slices.ContainsFunc(claim.Candidate.AllowedEvidence, func(x Evidence) bool { return reflect.DeepEqual(x, e) }) {
-				return fmt.Errorf("%s[%d]: file %q is not cited exactly as the claim allows it: %s", field, i, e.FileID, allowedHint(claim.Candidate.AllowedEvidence, e))
+				add(fmt.Errorf("%s[%d]: file %q is not cited exactly as the claim allows it: %s", field, i, e.FileID, allowedHint(claim.Candidate.AllowedEvidence, e)))
 			}
 		}
-		return nil
 	}
-	if err := allowed("assessment.basis", a.Basis); err != nil {
-		return err
-	}
-	if err := allowed("assessment.runtime_basis", a.RuntimeBasis); err != nil {
-		return err
-	}
+	allowed("assessment.basis", a.Basis)
+	allowed("assessment.runtime_basis", a.RuntimeBasis)
 	for i, issue := range a.Counterexamples {
 		field := fmt.Sprintf("assessment.counterexamples[%d]", i)
 		if !nonblank(issue.Statement) || !nonblank(issue.Disposition) || !nonblank(issue.Reason) {
-			return fmt.Errorf("%s: statement, disposition and reason must not be blank", field)
+			add(fmt.Errorf("%s: statement, disposition and reason must not be blank", field))
 		}
-		if err := allowed(field+".basis", issue.Basis); err != nil {
-			return err
-		}
+		allowed(field+".basis", issue.Basis)
 	}
-	return nil
+	return violations(errs)
 }
 
 // checkVerifierOwner keeps the approved owner rule: the result comes from

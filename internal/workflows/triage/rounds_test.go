@@ -1494,6 +1494,18 @@ func TestCheckVerification(t *testing.T) {
 			e.Ref = nil
 			v.Assessment.Basis = []Evidence{e}
 		}, want: `is not cited exactly as the claim allows it: got ref null`},
+		// Live: a verifier met the null ref and then, after its repair, the
+		// locator; both are reported in one rejection now.
+		{name: "null ref and an added locator together", change: func(v *Verification, _ contract.Ref) {
+			e := v.AllowedEvidence[0]
+			offset, length := int64(0), int64(10)
+			e.Locator = &Locator{Offset: &offset, Length: &length}
+			v.Assessment.Basis = []Evidence{e}
+			v.AllowedEvidence[1].Ref = nil
+		}, want: "\nassessment.basis[0]: file "},
+		{name: "blank fields in a fixed order", change: func(v *Verification, _ contract.Ref) {
+			v.Assessment.Window, v.Assessment.Support = "\u00a0", "\u00a0"
+		}, want: "assessment.support: got only whitespace; state it, or state that it is unavailable\nassessment.window: "},
 		// Live: verifiers narrowed allowed entries with a locator of their own.
 		{name: "basis with an added locator", change: func(v *Verification, _ contract.Ref) {
 			e := v.AllowedEvidence[0]
