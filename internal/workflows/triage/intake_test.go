@@ -184,6 +184,26 @@ func TestCheckIntakePublication(t *testing.T) {
 	}
 }
 
+func TestCheckAnchorWholeSecondHint(t *testing.T) {
+	ev, paired := Evidence{FileID: "e"}, Evidence{FileID: "p"}
+	ok := func(string, Evidence) error { return nil }
+	for _, tc := range []struct {
+		name, original string
+		millis         int64
+	}{
+		{"epoch with milliseconds", "2025-01-02T00:30:00.864", 1735770600500},
+		{"local below a whole-second epoch", "2025-01-02T00:29:59.864", 1735770600000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			millis := tc.millis
+			err := checkAnchor("a", TimeAnchor{Original: tc.original, Format: "local-paired", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: ev, PairedEpochMillis: &millis, PairedEvidence: &paired}, ok)
+			if err == nil || strings.Contains(err.Error(), "whole-second precision") {
+				t.Fatalf("error = %v, want a rejection without the whole-second hint", err)
+			}
+		})
+	}
+}
+
 func TestCheckAnchor(t *testing.T) {
 	ev := Evidence{FileID: "e"}
 	paired := Evidence{FileID: "p"}
