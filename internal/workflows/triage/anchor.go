@@ -77,7 +77,13 @@ func checkAnchor(field string, a TimeAnchor, evidence func(string, Evidence) err
 			case diff%time.Second == 0 && want >= -86400 && want <= 86400:
 				mathErr = fmt.Errorf("%s.offset_seconds: %s; want offset_seconds %d", field, got, want)
 			case diff > -time.Second && diff < time.Second:
-				mathErr = fmt.Errorf("%s: %s; they differ by %s, below one second, which no whole-second offset_seconds can close, so original and paired_epoch_millis disagree", field, got, diff)
+				hint := ""
+				if diff > 0 && *a.PairedEpochMillis%1000 == 0 {
+					// A whole-second epoch carries no fraction to pair with; the
+					// local fraction stays in the event text or evidence.
+					hint = fmt.Sprintf("; paired_epoch_millis has whole-second precision, so give original at whole-second precision (%q) and keep the fraction in event or evidence", local.Truncate(time.Second).Format("2006-01-02T15:04:05"))
+				}
+				mathErr = fmt.Errorf("%s: %s; they differ by %s, below one second, which no whole-second offset_seconds can close, so original and paired_epoch_millis disagree%s", field, got, diff, hint)
 			default:
 				mathErr = fmt.Errorf("%s: %s; they differ by %s, which no offset_seconds within ±86400 seconds can close, so original and paired_epoch_millis disagree", field, got, diff)
 			}
