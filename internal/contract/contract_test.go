@@ -741,6 +741,33 @@ func TestStoreFileReferences(t *testing.T) {
 	}
 }
 
+func TestFileReferenceProblem(t *testing.T) {
+	ids, paths := map[string]bool{"seen": true}, map[string]bool{"evidence/seen": true}
+	for _, tc := range []struct {
+		name string
+		file FileEntry
+		want string
+	}{
+		{"valid", FileEntry{ID: "a", Kind: "evidence", Path: "evidence/a"}, ""},
+		{"duplicate id", FileEntry{ID: "seen", Kind: "evidence", Path: "evidence/b"}, "duplicate id"},
+		{"duplicate path", FileEntry{ID: "b", Kind: "evidence", Path: "evidence/seen"}, "duplicate path"},
+		{"backslash", FileEntry{ID: "b", Kind: "evidence", Path: `evidence\b`}, "contains a backslash or NUL"},
+		{"absolute", FileEntry{ID: "b", Kind: "evidence", Path: "/tmp/b"}, "want a path relative to the attempt directory"},
+		{"unclean", FileEntry{ID: "b", Kind: "evidence", Path: "evidence/./b"}, `want the clean form "evidence/b"`},
+		{"wrong directory for kind", FileEntry{ID: "b", Kind: "artifact", Path: "evidence/b"}, "a kind=artifact file goes under artifacts/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prefix := "evidence/"
+			if tc.file.Kind == "artifact" {
+				prefix = "artifacts/"
+			}
+			if got := fileReferenceProblem(tc.file, prefix, ids, paths); got != tc.want {
+				t.Fatalf("fileReferenceProblem = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestStoreLimits(t *testing.T) {
 	cases := []struct {
 		name      string

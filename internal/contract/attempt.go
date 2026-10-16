@@ -211,8 +211,8 @@ func (s *Store) validate(raw []byte, a *Attempt) (*envelope, error) {
 		if file.Kind == "artifact" {
 			prefix = "artifacts/"
 		}
-		if !filepath.IsLocal(file.Path) || filepath.ToSlash(filepath.Clean(file.Path)) != file.Path || !strings.HasPrefix(file.Path, prefix) || strings.ContainsAny(file.Path, "\\\x00") || ids[file.ID] || paths[file.Path] {
-			return nil, failure(ContractInvalid, "files", a.id, fmt.Errorf("invalid or duplicate file reference %q", file.Path))
+		if why := fileReferenceProblem(file, prefix, ids, paths); why != "" {
+			return nil, failure(ContractInvalid, "files", a.id, fmt.Errorf("file %q path %q: %s", file.ID, file.Path, why))
 		}
 		ids[file.ID] = true
 		paths[file.Path] = true
@@ -283,4 +283,24 @@ func (staged *Staged) Discard() error {
 		a.staged = nil
 	}
 	return nil
+}
+
+// fileReferenceProblem names what is wrong with one files[] entry, so a
+// repair can fix that and nothing else.
+func fileReferenceProblem(file FileEntry, prefix string, ids, paths map[string]bool) string {
+	switch {
+	case ids[file.ID]:
+		return "duplicate id"
+	case paths[file.Path]:
+		return "duplicate path"
+	case strings.ContainsAny(file.Path, "\\\x00"):
+		return "contains a backslash or NUL"
+	case !filepath.IsLocal(file.Path):
+		return "want a path relative to the attempt directory"
+	case filepath.ToSlash(filepath.Clean(file.Path)) != file.Path:
+		return fmt.Sprintf("want the clean form %q", filepath.ToSlash(filepath.Clean(file.Path)))
+	case !strings.HasPrefix(file.Path, prefix):
+		return "a kind=" + file.Kind + " file goes under " + prefix
+	}
+	return ""
 }
