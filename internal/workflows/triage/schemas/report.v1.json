@@ -191,6 +191,7 @@
       }
     },
     "completeness": {
+      "description": "complete only when no limit ended the investigation, the claim passed verification and no gap stays open",
       "enum": [
         "complete",
         "incomplete"

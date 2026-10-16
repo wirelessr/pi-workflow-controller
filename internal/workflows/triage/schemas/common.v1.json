@@ -183,7 +183,7 @@
         "utc": {
           "type": "string",
           "pattern": "Z$",
-          "description": "The anchor converted to UTC, an RFC 3339 string ending in Z"
+          "description": "The same instant as original in UTC, at original's precision, ending in Z"
         },
         "offset_seconds": {
           "type": "integer",

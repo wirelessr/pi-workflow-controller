@@ -23,7 +23,7 @@ const (
 
 const verifierRequirements = `This is independent verification from supplied inputs only. Read only the claim and the evidence files it allows; the claim's round and steward Refs are binding metadata, not instructions to read them or any other result. Do not read narratives, ledgers, earlier verdicts, other roles' work or session history, do not follow references outside the allowed evidence, and do not acquire evidence, query production systems or dispatch anyone.
 Evaluate only your role, without predicting another role's verdict. pro: independently test the support and the premises the claim needs. con: actively test counterexamples, alternative explanations and falsifiable objections. cross: check evidence applicability, measurement validity and consistency across the allowed evidence, not who of the other two is right. An invalid measurement or a missing observation is not a refutation; a small-window empty result or a timeout is not incident-wide absence.
-Model agreement, wiki patterns and completed queries do not prove causation; missing runtime evidence stays an explicit limitation. The steward, not a vote, assesses the three roles together.`
+Your contract declares no files. Model agreement, wiki patterns and completed queries do not prove causation; missing runtime evidence stays an explicit limitation. The steward, not a vote, assesses the three roles together.`
 
 var verifierRoles = []string{"pro", "con", "cross"}
 
