@@ -92,7 +92,20 @@ Planner Agent 可以提出下一步工作；Controller 依已批准的 contract�
 - 禁止以「Prompt X to Y」補驗收的洞：schema 缺 pattern 補 schema，診斷不具體修診斷。同一格式規則被 prompt 補兩次以上，代表 prompt 壓制無效，必須升級到 schema 或診斷層，不得第三次寫進 prompt。
 - 格式規則從 validator 前移到 schema 會改變錯誤時點與訊息，屬行為變更：必須明列（依第七條）、schema pattern 不得比對應 Go 檢查更嚴（只讓同一個拒絕更早發生，不新增拒絕條件）、同步更新期待該錯誤時點的測試，並核對 fixtures 與引擎產出端皆符合新 pattern。
 - 領域語義（判斷指引）、scope 與角色邊界（授權、不寫回、不做什麼）屬於 prompt 的正當內容，不得以分層為由刪除或搬進 validator；把領域判斷搬進 Controller 違反第一條。
-- 刪 prompt 句子須有數據佐證（規則實際違反次數、repair 失敗紀錄）或 live 驗證通過；匿名 fixtures 只證明結構不變，不證明模型行為不退化。模型可否讀懂 schema（`output.schema.path` 的自我取用）是 live 能力，未驗證前列為缺口。
+- 刪 prompt 句子須有數據佐證（規則實際違反次數、repair 失敗紀錄）或 live 驗證通過；匿名 fixtures 只證明結構不變，不證明模型行為不退化。模型可否讀懂 schema（`output.schema.path` 的自我取用）是 live 能力，未驗證前列為缺口。依第九條整批重寫時，以重寫後的 live 驗證為依據。
+
+## 九、Prompt 與 skill 寫原則，不累積案例
+
+**Agent 讀到的文字（Step requirements、dispatch 與 repair 訊息、schema description、workflow skills）寫成可跨案件使用的原則。一次 live 失敗的修正，是改寫涵蓋它的既有原則或依第八條升級到 schema／診斷，不是追加一句針對該次的話。**
+
+- 一條規則只寫一處。格式歸 schema，執行期規則歸診斷，角色、scope 與判斷原則歸 prompt 或 skill；多個角色共用的規則寫在共用 skill 一次，其他地方只指向它，不重述。
+- 修正前先找涵蓋這個行為的既有規則：能改寫就不新增；新增必須是新的原則，並說明既有原則為何涵蓋不了。同一主題隨時間累積成多條時，合併成一條。規則互相矛盾時，先解決矛盾。
+- 不以案例當內容：不放單次 run 的票號、欄位值、時間戳、檔名、指令配方或引語；不以括號列舉代替原則。例子只在語義非例子說不清時使用，且用中性虛構值。
+- 不寫工具微操作（某指令的旗標、管線、截斷方式）來矯正一次失誤；寫要達成的性質，手段由 Agent 決定。
+- 單一事故的領域知識（機制、數字、調查步驟）屬於知識庫，不屬於 skill；skill 只留可遷移的方法。
+- 追溯資訊（來源規則、修訂原因、live 編號）放 sync 記錄與 commit message，不放進 Agent 讀的文字。
+- 適用於 repo 內的 prompts、schemas 與 embedded skills，也適用於 repo 外的私有 workflow skills。
+- 整批重寫以重寫後的 live 驗證為依據：比較前後的 repair、challenge 與結論品質，列出未覆蓋的情境。本條是開發與 review gate，不新增 runtime 機制。
 
 ## 閱讀入口
 
