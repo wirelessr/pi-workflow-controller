@@ -719,6 +719,9 @@ func TestStoreFileReferences(t *testing.T) {
 				if staged != nil {
 					t.Fatal("unsafe files staged")
 				}
+				if tc.setup == "missing" && !strings.Contains(err.Error(), `files[] entry "file-0" (path "evidence/a")`) {
+					t.Fatalf("missing file error = %v, want it to name the files[] entry", err)
+				}
 				storeTestUnpublished(t, a)
 				return
 			}
@@ -752,7 +755,7 @@ func TestFileReferenceProblem(t *testing.T) {
 		{"duplicate id", FileEntry{ID: "seen", Kind: "evidence", Path: "evidence/b"}, "duplicate id"},
 		{"duplicate path", FileEntry{ID: "b", Kind: "evidence", Path: "evidence/seen"}, "duplicate path"},
 		{"backslash", FileEntry{ID: "b", Kind: "evidence", Path: `evidence\b`}, "contains a backslash or NUL"},
-		{"absolute", FileEntry{ID: "b", Kind: "evidence", Path: "/tmp/b"}, "want a path relative to the attempt directory"},
+		{"absolute", FileEntry{ID: "b", Kind: "evidence", Path: "/tmp/b"}, "want a path inside the attempt directory"},
 		{"unclean", FileEntry{ID: "b", Kind: "evidence", Path: "evidence/./b"}, `want the clean form "evidence/b"`},
 		{"wrong directory for kind", FileEntry{ID: "b", Kind: "artifact", Path: "evidence/b"}, "a kind=artifact file goes under artifacts/"},
 	} {

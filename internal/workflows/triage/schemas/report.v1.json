@@ -255,6 +255,7 @@
       }
     },
     "new_gaps": {
+      "description": "Gaps found while writing the report that no input records",
       "type": "array",
       "items": {
         "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"

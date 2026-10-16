@@ -48,12 +48,6 @@ const repairBudget = 2
 // and each repair. Budget reservations count Steps with it.
 const attemptsPerStep = repairBudget + 1
 
-// RunTaskStep allows up to repairBudget repair retries covering both
-// contract-shape (schema) failures and, when Validate is supplied, semantic
-// acceptance failures. A rejected contract returns to the same session with the exact
-// validator diagnostic as feedback; the repaired contract must pass the same
-// gates in full. Execution failures (timeout, cancellation, provider) are
-// never retried here.
 // repairMessage asks for the named violations to be fixed, and only those:
 // some violations require a change of substance (a completeness value, a
 // basis label), so the rest of the contract is what stays.
@@ -61,6 +55,12 @@ func repairMessage(stage, violations string) string {
 	return "Previous contract was rejected by " + stage + " validation. Fix the reported violations and republish; keep everything they do not name: " + violations
 }
 
+// RunTaskStep allows up to repairBudget repair retries covering both
+// contract-shape (schema) failures and, when Validate is supplied, semantic
+// acceptance failures. A rejected contract returns to the same session with the exact
+// validator diagnostic as feedback; the repaired contract must pass the same
+// gates in full. Execution failures (timeout, cancellation, provider) are
+// never retried here.
 func RunTaskStep(ctx context.Context, r *engine.Run, t TaskStep) (contract.Ref, error) {
 	ts, err := OpenTaskSession(ctx, r, t)
 	if err != nil {

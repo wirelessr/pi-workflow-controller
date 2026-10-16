@@ -87,6 +87,12 @@ func (a *Attempt) stage(ctx context.Context) (_ *Staged, err error) {
 		sourcePath := filepath.Join(a.rel, entry.Path)
 		source, before, e := openRegular(s.root, sourcePath)
 		if e != nil {
+			// Name the files[] entry, so a repair knows which declaration
+			// points at no regular file; the cause and its code are kept.
+			var typed *Error
+			if !errors.As(e, &typed) {
+				e = fmt.Errorf("files[] entry %q (path %q): %w", entry.ID, entry.Path, e)
+			}
 			return nil, a.sourceError(ctx, "files", e, false)
 		}
 		if e = source.Close(); e != nil {
@@ -296,7 +302,7 @@ func fileReferenceProblem(file FileEntry, prefix string, ids, paths map[string]b
 	case strings.ContainsAny(file.Path, "\\\x00"):
 		return "contains a backslash or NUL"
 	case !filepath.IsLocal(file.Path):
-		return "want a path relative to the attempt directory"
+		return "want a path inside the attempt directory"
 	case filepath.ToSlash(filepath.Clean(file.Path)) != file.Path:
 		return fmt.Sprintf("want the clean form %q", filepath.ToSlash(filepath.Clean(file.Path)))
 	case !strings.HasPrefix(file.Path, prefix):

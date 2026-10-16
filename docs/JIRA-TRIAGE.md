@@ -1,6 +1,6 @@
 # Jira triage
 
-`jira-triage` 已註冊（`internal/workflows/triage`）。原本以 Planner 自主派工的版本未通過 alpha，已刪除（可從版本歷史取得）；本文件描述的是取代它的固定階段版本。現況是 alpha：除了匿名結構驗收（真 engine／runtime／RPC protocol，fake Pi 代寫 candidate），已以四張真實票（非 production 環境；含壓縮檔與純文字／JSON 附件；有候選 stack，也有候選驗證失敗後與沒有候選時的全 stack 搜尋）用真 Pi、模型與私有 skill 跑過多次，最近三次都成功產出報告，較早一次成功的 run 以 challenge 上限結束；同一 Step 的第二次修復已在 live 出現並修好。尚未 live 驗證：vision、production 環境、逾時重跑、session／時間額度不足的提前結束、T3。
+`jira-triage` 已註冊（`internal/workflows/triage`）。原本以 Planner 自主派工的版本未通過 alpha，已刪除（可從版本歷史取得）；本文件描述的是取代它的固定階段版本。現況是 alpha：除了匿名結構驗收（真 engine／runtime／RPC protocol，fake Pi 代寫 candidate），已以五張真實票（非 production 環境；含壓縮檔、純文字／JSON 附件與截圖；有候選 stack，也有候選驗證失敗後與沒有候選時的全 stack 搜尋）用真 Pi、模型與私有 skill 跑過多次，vision Step 已在 live 讀過截圖；同一 Step 的第二次修復已在 live 出現並修好。依憲法第九條整批重寫後的 Controller prompts、schema descriptions 與私有 skills 尚未 live 驗證，特別是 report、intake、vision 與 verifier 的移除句、以及 scripts 改放 run workspace。另外尚未 live 驗證：production 環境、逾時重跑、session／時間額度不足的提前結束、T3。
 
 執行：`PWC_TRIAGE_SKILLS_DIR=<私有 skill 目錄> pi-workflow-controller run jira-triage "<TICKET-KEY> 其他提示"`。Prompt 必須以票號開頭；其後的文字只是候選來源，不是授權。模型與限額在 `triage.DefaultConfig()` 與 `triage.RunPolicy()`，數值是保守起點，待 live 調整。
 
