@@ -15,7 +15,7 @@ import (
 
 const StewardSchema = "triage.steward.v1"
 
-const stewardRequirements = `You are the steward at trigger %s (the steward rules, Triggers). Read the committed results in the inputs and return a pass or one challenge; you do not investigate, query production systems or decide what happens next. You may search and read the wiki: copy each page you rely on into this contract's own evidence files.`
+const stewardRequirements = `You are the steward at trigger %s (the steward rules, Triggers). Read the committed results in the inputs and return a pass or one challenge; you do not investigate, query production systems or decide what happens next. You may search and read the wiki.`
 
 const stewardUnconfirmed = `The home stack is not confirmed: flag what that means for the work ahead.`
 

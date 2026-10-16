@@ -54,6 +54,13 @@ const attemptsPerStep = repairBudget + 1
 // validator diagnostic as feedback; the repaired contract must pass the same
 // gates in full. Execution failures (timeout, cancellation, provider) are
 // never retried here.
+// repairMessage asks for the named violations to be fixed, and only those:
+// some violations require a change of substance (a completeness value, a
+// basis label), so the rest of the contract is what stays.
+func repairMessage(stage, violations string) string {
+	return "Previous contract was rejected by " + stage + " validation. Fix the reported violations and republish; keep everything they do not name: " + violations
+}
+
 func RunTaskStep(ctx context.Context, r *engine.Run, t TaskStep) (contract.Ref, error) {
 	ts, err := OpenTaskSession(ctx, r, t)
 	if err != nil {
@@ -147,7 +154,7 @@ func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engin
 			if ve := validate(ctx, out.Output); ve == nil {
 				break
 			} else if repairCount < repairBudget {
-				lastFeedback = &engine.Feedback{Message: "Previous contract was published but rejected by acceptance validation. Fix exactly the reported violations and republish the same contract; do not change substance: " + ve.Error()}
+				lastFeedback = &engine.Feedback{Message: repairMessage("acceptance", ve.Error())}
 				repairCount++
 				continue
 			} else {
@@ -160,7 +167,7 @@ func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engin
 			err = e
 			break
 		}
-		lastFeedback = &engine.Feedback{Message: "Previous contract rejected by schema validation. Fix exactly the reported violations and republish the same contract; do not change substance: " + failure.Message, SourceAttemptID: failure.AttemptID, SourceCode: string(failure.Code)}
+		lastFeedback = &engine.Feedback{Message: repairMessage("schema", failure.Message), SourceAttemptID: failure.AttemptID, SourceCode: string(failure.Code)}
 		repairCount++
 	}
 	if err != nil {

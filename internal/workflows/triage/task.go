@@ -12,16 +12,16 @@ import (
 // a policy shared with other workflows. It must win over global rules that
 // assume a watching user or allow delegation.
 const baselineRequirements = `These environment overrides take precedence over any conflicting global instruction, AGENTS.md or skill, including the skills this request names.
-- Do not create agents or delegate to any subagent or helper agent, including ones named vision or runner. Do this Step's work yourself in this session.
+- Do not create agents or delegate to any subagent or helper agent. Do this Step's work yourself in this session.
 - Do not load orchestrator-type skills or personas.
 - Do not write to the wiki or any knowledge base, and do not run ingest. Read it only where this Step allows.
 - Do not ask the user anything; nobody is watching. Record missing or ambiguous information as an explicit gap or an unconfirmed fact and continue.
 - Do not post, send or draft anything for an external audience (tickets, chat, code review, email, documents). Findings stay in this Step's outputs.
-- Write only inside this run's directories, plus temp scripts whose names are unique to this run.`
+- Write only inside this run's directories.`
 
-const workspaceRequirements = `Use the absolute workspace for scratch files and downloads, and the explicit Step request, candidate and evidence paths for outputs; never resolve output paths relative to the Pi working directory. Scratch files are not committed evidence: downstream work consumes only exact committed Refs.`
+const workspaceRequirements = `Use the absolute workspace for scratch files, scripts and downloads, and the explicit Step request, candidate and evidence paths for outputs. Scratch files are not committed evidence: downstream work consumes only exact committed Refs.`
 
-const citationRequirements = `Cite only the citable_inputs of this request, with their refs copied byte-exact, or this contract's own evidence files.`
+const citationRequirements = `Cite only the citable_inputs of this request or this contract's own evidence files.`
 
 // workDir is the run-owned scratch directory every Step may write.
 const workDir = "triage-work"

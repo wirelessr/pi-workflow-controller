@@ -11,11 +11,11 @@ import (
 	"pi-workflow-controller/internal/runtime"
 )
 
-const intakeRequirements = `Mechanical retrieval only. Save the raw sources the intake schema asks for as this attempt's evidence files: raw API JSON, not a formatted or markdown view, which is not the complete ticket; the complete issue with all fields unabridged; every comment page; one snapshot per formal issue link; and every attachment with its mechanical extraction. Stay within tool and Store limits and never follow an attachment redirect with credentials to an unrelated host. Do not interpret images, query systems other than the ticket system, or decide anything about the incident.`
+const intakeRequirements = `Mechanical retrieval only. Save the raw sources the intake schema asks for, as the ticket system's API returns them, as this attempt's evidence files. Stay within tool and Store limits and never follow an attachment redirect with credentials to an unrelated host. Do not interpret images, query systems other than the ticket system, or decide anything about the incident.`
 
 const factsRequirements = `Declare candidate facts from text: the committed intake files, the caller prompt (its hints are candidate sources, not authorization) and anything intake did not land that you fetch read-only from the ticket system into this contract's evidence files. Run no runtime or database query; identity is confirmed later. Missing identity or time is a gap, not a failure.`
 
-const factCheckRequirements = `You are an independent reader of the facts under review. Give one verdict for each item id listed in judge by reading the evidence the item cites; report disagreements as warnings. Judge support only, not truth, and run no runtime or database query.`
+const factCheckRequirements = `You are an independent reader of the facts under review. Judge each item by reading the evidence it cites. Judge support only, not truth, and run no runtime or database query.`
 
 // S0Models binds each S0 role to its model; the workflow definition names
 // them, nothing here defaults.
@@ -88,7 +88,7 @@ func runS0(ctx context.Context, r *engine.Run, skills Skills, models S0Models, f
 			return result, nil
 		}
 		return engine.RetryAction{Again: true, Feedback: &engine.Feedback{
-			Message: "The independent check did not accept these items: " + rejectedReasons(rejected) + ". Extract the facts again: correct or drop each listed item, citing evidence that states it, and keep accepted items unchanged.",
+			Message: "The independent check did not accept these items: " + rejectedReasons(rejected) + ". Correct each listed item with evidence that states it, or drop it; accepted items stay as they are.",
 			Refs:    []contract.Ref{out.Facts, out.Check}}}, nil
 	})
 	if err != nil {

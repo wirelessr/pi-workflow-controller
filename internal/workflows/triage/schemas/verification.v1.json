@@ -25,12 +25,12 @@
       "type": "array",
       "items": {
         "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
-        "description": "A copy of the claim's allowed evidence entry, byte-exact including its ref (never null: a verifier has no files of its own)"
+        "description": "One allowed_evidence entry of the claim, copied exactly"
       },
       "description": "The claim's allowed evidence, copied in order"
     },
     "assessment": {
-      "description": "Your declarations with evidence and limitations; strings are not proof or a vote. State missing measurement conditions explicitly, never invent them.",
+      "description": "The verifier's assessment; each condition is stated, or stated as unavailable",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -59,14 +59,14 @@
           "type": "array",
           "items": {
             "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
-            "description": "An exact copy of one allowed_evidence entry: same ref, file_id and locator, or no locator where that entry has none; never add, narrow or drop a locator"
+            "description": "An exact copy of one allowed_evidence entry"
           }
         },
         "runtime_basis": {
           "type": "array",
           "items": {
             "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
-            "description": "An exact copy of one allowed_evidence entry: same ref, file_id and locator, or no locator where that entry has none; never add, narrow or drop a locator"
+            "description": "An exact copy of one allowed_evidence entry"
           }
         },
         "measurement": {
@@ -117,7 +117,7 @@
                 "type": "array",
                 "items": {
                   "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence",
-                  "description": "An exact copy of one allowed_evidence entry: same ref, file_id and locator, or no locator where that entry has none; never add, narrow or drop a locator"
+                  "description": "An exact copy of one allowed_evidence entry"
                 }
               }
             }

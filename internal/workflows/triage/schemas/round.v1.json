@@ -205,7 +205,7 @@
                   "identifiers",
                   "reason"
                 ],
-                "description": "An identity decision; confirmed values must equal the cited row (home_pop equals the lookup's stack)",
+                "description": "An identity decision resting on one lookup row",
                 "properties": {
                   "id": {
                     "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
@@ -388,7 +388,7 @@
             "items": {
               "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
             },
-            "description": "Evidence the UTC window or snapshot time was taken from; a window needs at least one"
+            "description": "Evidence the UTC window or snapshot time was taken from"
           },
           "status": {
             "enum": [
@@ -783,7 +783,7 @@
         "ref",
         "id"
       ],
-      "description": "An earlier gap, named by the exact input that owns it and its id; never copy its text",
+      "description": "An earlier gap, named by the input that owns it and its id",
       "properties": {
         "ref": {
           "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref"

@@ -18,7 +18,7 @@ const (
 	VisionBatchSchema = "triage.visionbatch.v1"
 )
 
-const visionRequirements = `Read the image file yourself with the read tool: you can see images. Transcribe the visible text that bears on the question into this contract's own evidence file and answer the question from what is visible only: no analysis, no conclusions about the incident, no guesses about text that is cut off or unreadable (record those as gaps).`
+const visionRequirements = `Read the image file with the read tool. Transcribe the visible text that bears on the question and answer it from what is visible only: no analysis, no conclusions about the incident, no guesses about text that is cut off or unreadable.`
 
 // VisionPolicy bounds the vision Steps; the workflow definition names every
 // value.

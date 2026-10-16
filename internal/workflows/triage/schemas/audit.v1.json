@@ -12,7 +12,7 @@
   "properties": {
     "round": {
       "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref",
-      "description": "The round under audit, copied byte-exact from the request"
+      "description": "The round under audit"
     },
     "findings": {
       "type": "array",

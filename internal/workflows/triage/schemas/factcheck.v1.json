@@ -13,7 +13,7 @@
   "properties": {
     "subject": {
       "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref",
-      "description": "The facts contract under review, copied byte-exact from the request"
+      "description": "The facts contract under review"
     },
     "items": {
       "type": "array",
@@ -37,7 +37,7 @@
               "unsupported",
               "insufficient"
             ],
-            "description": "supported: the text at the cited place states it; unsupported: it does not, or the only basis is a name or hostname; insufficient: the evidence given cannot decide it"
+            "description": "supported: the text at the cited place states it; unsupported: it does not; insufficient: the evidence given cannot decide it"
           },
           "reason": {
             "type": "string",

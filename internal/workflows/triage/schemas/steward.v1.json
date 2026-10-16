@@ -103,7 +103,7 @@
             "items": {
               "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/evidence"
             },
-            "description": "Copies of the pages relied on, in this contract's own evidence files"
+            "description": "Copies of the pages relied on"
           }
         }
       }

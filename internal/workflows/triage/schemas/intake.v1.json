@@ -53,7 +53,7 @@
     },
     "url": {
       "type": "string",
-      "description": "Canonical browse URL https://<host>/browse/<ticket>, never a REST API endpoint"
+      "description": "Canonical browse URL of the ticket"
     },
     "fetched_at": {
       "type": "string",
@@ -66,7 +66,7 @@
     },
     "fields": {
       "$ref": "https://pi-workflow-controller.local/schemas/triage/intake.v1.json#/$defs/source",
-      "description": "Field metadata saved as a bare top-level JSON array of objects with id and name"
+      "description": "Field metadata: a JSON array of objects with id and name"
     },
     "comments": {
       "type": "array",
@@ -129,7 +129,7 @@
           },
           "analysis": {
             "$ref": "https://pi-workflow-controller.local/schemas/triage/intake.v1.json#/$defs/source",
-            "description": "When the file type needs no mechanical extraction (plain text, a single JSON document, an image), the content itself is the analysis: status available with the content's file_id. unsupported is for a file that needs extraction which cannot be done"
+            "description": "Mechanical extraction of the content; when none is needed, the content itself (available, with its file_id); unsupported when extraction is needed and cannot be done"
           }
         }
       }
@@ -140,7 +140,6 @@
     },
     "gaps": {
       "type": "array",
-      "description": "Retrieval work that remains undone or failed; a genuine absence (no comments, no links, no attachments) is not a gap",
       "items": {
         "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/gap"
       }

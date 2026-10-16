@@ -13,7 +13,7 @@
         "sha256",
         "manifest_sha256"
       ],
-      "description": "Exact committed Ref; copy every field byte-exact from the request, never retype or shorten it",
+      "description": "Exact committed Ref of an input, copied from the request",
       "properties": {
         "run_id": {
           "type": "string"
@@ -30,12 +30,12 @@
         "sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
-          "description": "Full lowercase 64-hex-character sha256 of the referenced contract"
+          "description": "sha256 of the referenced contract"
         },
         "manifest_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
-          "description": "Full lowercase 64-hex-character sha256 of the referenced manifest"
+          "description": "sha256 of the referenced manifest"
         }
       }
     },
@@ -61,7 +61,7 @@
         "file_id": {
           "type": "string",
           "minLength": 1,
-          "description": "Bare files[] id, never a path or a name with an added extension"
+          "description": "The cited file's files[] id"
         },
         "locator": {
           "type": "object",
@@ -156,13 +156,12 @@
       ],
       "properties": {
         "id": {
-          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id",
-          "description": "Anchor id, unique within the contract"
+          "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/id"
         },
         "event": {
           "type": "string",
           "pattern": "\\S",
-          "description": "The observed event this timestamp belongs to; Jira activity timestamps are not incident anchors"
+          "description": "The incident event this timestamp belongs to"
         },
         "original": {
           "type": "string",
@@ -179,7 +178,7 @@
         "source_tz": {
           "type": "string",
           "pattern": "\\S",
-          "description": "Bare zone name of the source timestamp, such as UTC or Asia/Taipei"
+          "description": "Zone name of the source timestamp"
         },
         "utc": {
           "type": "string",
@@ -231,7 +230,7 @@
             "properties": {
               "original": {
                 "pattern": "(Z|[+-]\\d\\d:\\d\\d)$",
-                "description": "Complete RFC 3339 timestamp with an explicit zone or numeric offset suffix (e.g. 2026-10-01T05:21:20.298Z), never a time-only fragment or a zone-less date-time. An absolute timestamp in another syntax (e.g. '2026-10-01 05:21:58 UTC') is still rfc3339: normalize original to RFC 3339 syntax (2026-10-01T05:21:58Z) instead of switching format to local-paired; local-paired is only for zone-less local timestamps"
+                "description": "RFC 3339 timestamp with an explicit zone or offset; an absolute time written in another syntax is normalized to RFC 3339 here"
               }
             }
           }
@@ -251,7 +250,7 @@
             "properties": {
               "original": {
                 "pattern": "^\\d+$",
-                "description": "Bare integer epoch-seconds value, digits only, never the full surrounding string"
+                "description": "Epoch seconds"
               }
             }
           }
@@ -271,7 +270,7 @@
             "properties": {
               "original": {
                 "pattern": "^\\d+$",
-                "description": "Bare integer epoch-millis value, digits only, never the full surrounding string"
+                "description": "Epoch milliseconds"
               }
             }
           }
@@ -290,15 +289,15 @@
           "then": {
             "properties": {
               "original": {
-                "description": "Zone-less local timestamp (e.g. 2025-01-02T00:30:00). local-paired requires a same-event absolute pair: paired_epoch_millis must be a nonnull integer and paired_evidence a nonnull evidence entry. Without a same-event absolute epoch value in committed evidence, local-paired can never validate: instead combine the time-of-day with the date established by same-day evidence and record format rfc3339 with the normalized RFC 3339 original"
+                "description": "Zone-less local date-time of an event whose absolute time is paired in paired_epoch_millis"
               },
               "paired_epoch_millis": {
                 "type": "integer",
-                "description": "Same-event absolute epoch millis; never null when format is local-paired"
+                "description": "The same event's absolute epoch millis"
               },
               "paired_evidence": {
                 "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/located_evidence",
-                "description": "Evidence of the paired absolute timestamp; never null when format is local-paired"
+                "description": "Evidence of the paired absolute timestamp"
               }
             }
           }
@@ -342,7 +341,7 @@
             "user",
             "other"
           ],
-          "description": "home_pop is a candidate only; never derive it from a hostname or tenant name"
+          "description": "What the value identifies"
         },
         "value": {
           "type": "string",

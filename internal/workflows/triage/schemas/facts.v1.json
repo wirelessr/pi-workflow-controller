@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pi-workflow-controller.local/schemas/triage/facts.v1.json",
-  "description": "Candidate facts from text sources (the committed intake and the caller prompt), each citing where it was read; no runtime queries",
+  "description": "Candidate facts from text sources, each citing where it was read",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -15,11 +15,11 @@
   "properties": {
     "intake": {
       "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref",
-      "description": "The intake input, copied byte-exact from the request"
+      "description": "The intake input"
     },
     "prompt": {
       "$ref": "https://pi-workflow-controller.local/schemas/triage/common.v1.json#/$defs/ref",
-      "description": "The caller prompt input, copied byte-exact from the request"
+      "description": "The caller prompt input"
     },
     "facts": {
       "type": "array",

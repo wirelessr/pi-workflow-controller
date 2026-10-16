@@ -30,7 +30,7 @@ const (
 // reportCitationRequirements replaces the shared citation sentence: the
 // report's only file is the rendered artifact, so it has no evidence files
 // of its own to cite.
-const reportCitationRequirements = `Cite only the citable_inputs of this request, with their refs copied byte-exact; this contract has no evidence files of its own, its only file is the renderer's report.`
+const reportCitationRequirements = `Cite only the citable_inputs of this request; this contract's only file is the renderer's report.`
 
 // reportOwnFiles tells a report that cites or declares a file of its own
 // where its evidence comes from instead.
@@ -39,7 +39,7 @@ const reportOwnFiles = "a report has no evidence files of its own, so cite a cit
 //go:embed report/render_report.py
 var reportResources embed.FS
 
-const reportRequirements = `You write the report of this investigation from its committed results, for a reader who did not follow it and has to act on it; you state no new claim or verdict. Write its prose in Traditional Chinese; identifiers, code, quotes and technical terms stay as they are. State the ticket's question in the ticket's own words, quoted, not translated, and answer it directly first; if the investigation could not answer it, or the claim did not pass verification, say so in the answer and what is missing. Then give the chain from root cause or established mechanism to the observed symptom, in order, marking each step as part of the verified claim, shown directly by its evidence, or your own inference; never present more than the verified claim as verified. Say how sure the answer is and why. Name the concrete actions for the people who own the next move (a fix, a decision, a reply, a test change), apart from further investigation, which goes in next steps. Copy request and claim exactly as this request gives them. Give every gap the request lists one disposition with a note, add gaps you find, and say how complete the investigation is: incomplete whenever a limit ended it, the claim did not pass verification, or a gap stays open. Write the candidate, then run python3 -B with the renderer and the absolute request.json and candidate.json paths; the renderer adds the report file, so do not create it yourself.`
+const reportRequirements = `You write the report of this investigation from its committed results, for a reader who did not follow it and has to act on it; you state no new claim or verdict, and never present more than the verified claim as verified. Write its prose in Traditional Chinese; identifiers, code, quotes and technical terms stay as they are. Quote the ticket's question in its own words, not translated, and answer it first; if the investigation could not answer it, or the claim did not pass verification, say so in the answer. The report schema defines each field. Write the candidate, then run python3 -B with the renderer and the absolute request.json and candidate.json paths; the renderer adds the report file.`
 
 type ReportClaim struct {
 	Claim    *contract.Ref `json:"claim"`

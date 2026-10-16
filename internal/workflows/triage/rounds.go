@@ -521,7 +521,7 @@ func judgeRound(ctx context.Context, r *engine.Run, skills Skills, s0 S0, model 
 	if len(rejected) == 0 {
 		return check, status, supported, nil, failures, nil
 	}
-	message := fmt.Sprintf("The independent check of round %d did not accept: %s. Do not rely on these items; correct them with evidence that states them, or leave them.", n, rejectedReasons(rejected))
+	message := fmt.Sprintf("The independent check of round %d did not accept: %s. Do not rely on these items; correct each with evidence that states it, or leave it.", n, rejectedReasons(rejected))
 	if len(fs.Gaps) > 0 {
 		message += fmt.Sprintf(" %d of them reached the rejection limit and are recorded absent in the round %d fact status.", len(fs.Gaps), n)
 	}

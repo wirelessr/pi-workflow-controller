@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pi-workflow-controller.local/schemas/triage/claim.v1.json",
-  "description": "The Controller's claim for verification: a round's candidate, unchanged except that its own evidence is cited through the round's Ref, bound to the round and the steward's T2a pass, or to no steward when the challenge limit skipped T2a",
+  "description": "The Controller's claim for verification: a round's candidate with its own evidence cited through the round's Ref",
   "type": "object",
   "additionalProperties": false,
   "required": [
