@@ -48,11 +48,12 @@ const repairBudget = 2
 // and each repair. Budget reservations count Steps with it.
 const attemptsPerStep = repairBudget + 1
 
-// repairMessage asks for the named violations to be fixed, and only those:
-// some violations require a change of substance (a completeness value, a
-// basis label), so the rest of the contract is what stays.
+// repairMessage asks for this attempt's contract with the named violations
+// fixed. Some violations require a change of substance (a completeness
+// value, a basis label), so what stays is the rest of the content; the
+// identity is always this attempt's own.
 func repairMessage(stage, violations string) string {
-	return "Previous contract was rejected by " + stage + " validation. Fix the reported violations and republish; keep everything they do not name: " + violations
+	return "Previous contract was rejected by " + stage + " validation. Write this attempt's contract, with this request's identity, fixing the reported violations; the content they do not name stays as it was: " + violations
 }
 
 // RunTaskStep allows up to repairBudget repair retries covering both
