@@ -32,12 +32,16 @@
 | Published／checkout 二次讀檔 | `contract.ReadBounded`；review `readCheckFile`／`readPublishedFile`、triage `rawFile` | R3 已接線：共用 bounded loop，root/open/identity 與錯誤政策留 adapter；Store `copyStable` 的雙 digest 不合併 |
 | RPC 測試 transport | `testutil/protocol.NewHost`／`Host.Events`／`Event.Reply`／`Host.Close`、`RegisterCleanup` 及 `WriteEnvelope` | review workflow/check integration、triage RPC driver 共用 host 與 late-bound cancel/close/join；原 domain scenarios 與 Store-only 分層不變 |
 | Skill extraction／report renderer | `contract/reportresource.ExtractFresh`／embedded `pwc_report_io.py`；review `ExtractSkills`／renderer 與 triage `ExtractReport`／report Step | R5：兩個真 consumer 共用機械，業務模板／report binding 各自保留 |
+| Workflow 組合單元 | 規劃中（R6）：由 `review` 抽出的參數化、可重入普通 Go 單元 | 未實作前，新 workflow 不得呼叫或 import review 私有實作；不新增引擎層 sub-workflow 原語 |
+| gh／git 命令執行與 bare clone | 規劃中（R7）：目前在 `review/acquire.go`，將抽到 runtime 責任層 | 未實作前，新 workflow 與 PR 狀態 adapter 不得複製或 import review 私有實作 |
+| 私有 skill 目錄展開 | 規劃中（R8）：目前在 `triage.PrepareSkills`，將抽成中性入口 | 未實作前，新 workflow 不得 import triage 私有實作 |
+| Contract repair 迴圈 | 規劃中（R9）：目前在 `triage.TaskSession.Run`，將抽成中性機械 | 未實作前，新 workflow 不得複製或 import triage 私有實作 |
 
 表中的 triage consumers 指已刪除的舊版 Planner triage；共用入口仍由其他 consumers 使用。v2（`internal/workflows/triage`）目前使用 `engine.ReadContract`＋`contract.DecodePublication`（`readAccepted`、citation 檢查）、`contract.ReadBounded`（`rawFile`，與舊版相同的二次讀取 adapter）、`reportresource.ExtractFresh`（`PrepareSkills`）、`contract.ReadStable`，以及 `Scope.Attach`、`StepSpec.Observe`。上述相對路徑均位於 `internal/`。角色模型、PR Pin、code-location Evidence、investigation Ref/file Evidence、Source status 及 verdict 不屬於通用登記項，保留 workflow-specific 語義。
 
 ## 3. 共用 refactor 單元與順序
 
-預設順序為 **R1 → R2 → R3 → R4，再進 triage M1**。每項是可獨立 review／驗收的最小單元，不合成一次大重構。R4 可為前面單元的測試需求先行，但須記錄順序調整，不能因此改變依賴或跳過 R1–R3。R5 延至 M6，不預造第二個 renderer。
+預設順序為 **R1 → R2 → R3 → R4，再進 triage M1**；R6、R7、R8、R9 服務 code-change（R7 先於 R6），與 triage 的 milestones 互相獨立。每項是可獨立 review／驗收的最小單元，不合成一次大重構。R4 可為前面單元的測試需求先行，但須記錄順序調整，不能因此改變依賴或跳過 R1–R3。R5 延至 M6，不預造第二個 renderer。
 
 ### R1：共用 persisted-start preflight
 
@@ -125,6 +129,58 @@ Triage producer 每個 Ref 用局部 ExitStack，讀完即關閉；candidate/req
 R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入口接 adaptive yield、歷史 failure 處置、預留額度與最終 outcome，舊 M5 state-only 出口未改。以下保留 R5 完成要求：
 
 **完成出口：** 原 review 仍能使用同一機械能力，triage 報告也實際接入；模板、Pin／claim、verdict及追溯資料保持各自 contracts。保留 exclusive output、大小／路徑／identity檢查與已提交 Ref 驗收。沒有第二 consumer 時保持延後，不建立 renderer plugins、installer 或新 final registry。
+
+### R7：gh／git 命令執行與 bare clone 機械共用（規劃中，尚未實作）
+
+服務 [CODE-CHANGE](CODE-CHANGE.md)。以其 P0 為前置，先於 R6（兩者都改 `review/acquire.go`）。
+
+`review/acquire.go` 內有政策無關的機械：固定 argv 的 gh／git 命令執行、deadline、stdout 上限、stderr 不落地、憑證以 `-c` 逐次帶入而不寫入 config，以及 bare repository 加 pinned fetch（`git init --bare`、`git config remote.*`、指定 SHA 的 fetch）。其 consumers 將是 review 的 acquire、新的 PR 狀態唯讀 adapter（check runs、commit statuses、review threads）與寫入型 worktree。唯讀 PR 取得的政策（禁用 hooks 與 git config、detached）屬 review，不共用；寫入型 worktree 的政策（是否啟用 hooks 與 config）另行明列。
+
+- 範圍：只限 `gh` 與 `git` 兩個固定執行檔的命令執行，不提供任意執行檔的 `Command(exe, args)`；ADDING 與 DESIGN 明確不要泛用 command executor。
+- 責任層：process 執行（命令、deadline、輸出上限）放 runtime；bare repository 與 worktree 的 ownership／SameFile cleanup 不屬 process 執行，於核對後另定所屬 package。兩者都不留在 review package 讓他人 import。
+- Controller 不為 Agent 配置 push 憑證，不寫入憑證相關 config；push 與開 PR 由 Agent 使用其既有認證。bare repository 內的 remote 設定與 fetch 屬機械，不算憑證。這不是 credential broker。
+- 寫入型 worktree 需要 fetch 可變的 default branch，acquire 明文只 fetch 指定 SHA；這是政策差異，須列入矩陣，不默默放寬 review 的限制。
+- PR 狀態 adapter 需要 GraphQL 查詢（review threads 的 resolved 狀態），現有執行固定為 REST GET。矩陣須加「GraphQL 查詢」一列；「唯讀」定義為不改變外部狀態的查詢，不是只限某個 HTTP method。
+- 差異矩陣須逐項列：取消、錯誤分類、ownership（cleanup 的 SameFile 等檢查）、path／symlink、限額、穩定性、生命週期。不得挑較弱版本統一，也不得把唯讀版更強的檢查默默套到寫入版。
+
+**完成出口：** review 實際使用共用機械，舊副本移除；既有 acquire 的錯誤分類、限額與 cleanup 保證不變。只交付政策無關的核心；可寫 worktree 的 fetch 政策與 GraphQL 查詢在 code-change 第一個使用它們的單元落地並驗收，不在本單元預造。
+
+### R6：review 流程成為可組合單元（規劃中，尚未實作）
+
+服務 [CODE-CHANGE](CODE-CHANGE.md)。以其 P0 與 R7 為前置。
+
+**目標與責任層：** 在 `review` package 內，把 Prepare、三位 reviewer、Validate 抽成以 PR 參數、子 scope 與明示限額呼叫的普通 Go 單元；`code-review` 自身遷移到該單元。單元是原擁有者匯出的完整流程層級 API，呼叫端不得 import `review` 的其他業務型別或 helper。不新增引擎層 sub-workflow 原語、registry 或 DSL。第二個 consumer 為 code-change 的 PR 後審閱階段。
+
+**開工前必補的差異矩陣：** 輸入來源、目錄與資源名稱、scope 名稱（Decision、Child、Parallel、Retry 共用一組，Step 與 Attach 共用另一組）、預期 head、Run 限額會計、啟動前環境檢查的位置、report 與 branch error 並存的結果語義、模型來源、取消與 cleanup 所有權，以及 path／symlink、錯誤分類、穩定性、生命週期。
+
+- 不降低既有保證。改變錯誤時點、會計或拒絕條件之處須明列並驗收，不稱零行為 refactor。
+- 預設模型變更是獨立單元，不與抽取同批；它改變產品行為，須同步 `docs/CODE-REVIEW.md`、新增釘住模型 binding 的測試與 live 驗證。
+
+**完成出口：** `code-review` 實際使用新單元，舊內聯副本移除；既有 workflow 契約與測試不變；新增可與外層名稱共存、巢狀 scope 與外層限額的回歸。以 code-change 組合該單元的接線在其 C3 單元驗收，不在本單元預造。
+
+### R8：私有 skill 目錄展開中性化（規劃中，尚未實作）
+
+服務 [CODE-CHANGE](CODE-CHANGE.md)。以其 P0 為前置。
+
+`triage.PrepareSkills` 目前綁 triage 的角色名與上游比對。新 workflow 不得 import triage 的私有實作，所以先核對其職責：讀來源（`contract.ReadStable`）、展開到 run 內（`reportresource.ExtractFresh`）、記錄 digest、排除同步材料，以及 triage 專屬的上游比對與缺口。共用機械放 contract 責任層（`reportresource` 或相鄰的中性 package），角色名與環境變數由各 workflow 宣告。
+
+- 差異矩陣須逐項列：取消、錯誤分類、ownership、path／symlink、限額（檔案數與大小）、穩定性、生命週期，並決定 manifest 必填與上游比對屬中性還是 triage 專屬；code-change 的私有 skill 同樣由原 command 衍生，是否需要上游比對也要決定。
+- 不得默默套用更強或更弱的檢查，triage 保留原錯誤字串、期限與缺口語義。
+
+**完成出口：** triage 實際使用中性入口，舊內聯副本移除；新 consumer 的角色集合與環境變數由其 workflow 自行宣告。
+
+### R9：contract repair 迴圈中性化（規劃中，尚未實作）
+
+服務 [CODE-CHANGE](CODE-CHANGE.md)。以其 P0 為前置，與 R6、R7、R8 彼此獨立。
+
+兩個真 consumer：triage 的 `TaskSession.Run`（經 `RunTaskStep` 與 `rounds.go` 兩個入口呼叫，含 `repairBudget = 2`、每次 repair 的 `contract-repair-*` 子 scope、同一 handle、schema 與 acceptance 兩種診斷、已發布 Ref 的保留）與 code-change 的寫入型 Step。`review` 刻意沒有內容修正迴圈（見 `docs/CODE-REVIEW.md`），不是 consumer，也不在此遷移。
+
+- 只抽政策無關的核心：預算內的同 handle 重派、診斷作為 Feedback、子 scope 命名、執行類失敗（timeout、cancel、provider）不重試。triage 專屬的角色命名（`triage-` 前綴）、`TaskFailure` 與 recovery 型別、observation 回調留在 triage。
+- 差異矩陣須逐項列：取消、錯誤分類、ownership（repair 被取消時已發布 Ref 的保留）、限額（每 Step 的 attempts 上界）、穩定性、生命週期。不得改變 triage 的錯誤字串、預算與 attempts 會計，也不得默默套用其他語義。
+- 寫入型 Step 的外部副作用不由此機械處理；它不知道副作用存在。身分與 receipt 核對在迴圈接受最終 contract 之後由 consumer 執行一次，不進 `Validate`，因此核心不需要「不可 repair 的驗收錯誤」；若 consumer 把它放進 `Validate`，會被 repair，違反第四條。
+- 矩陣另列：repair 時 Feedback 的 Refs 是否保留（現行 repair 以不含 Refs 的新 Feedback 取代原 Feedback，A3 的 findings Refs 走 Feedback，必須保留，這對 triage 是行為差異，須明列並驗收）。
+
+**完成出口：** triage 實際使用中性核心，舊內聯副本移除；既有 triage 測試與錯誤字串不變。只交付政策無關的核心；寫入型 Step 的回歸在 code-change 第一個使用它的單元驗收，不在本單元預造。
 
 ## 4. 後續 triage milestones 的依賴鎖
 
