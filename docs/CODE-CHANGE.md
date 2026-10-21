@@ -1,6 +1,6 @@
 # Code change workflow 規劃（草案）
 
-**狀態：規劃，尚未實作。** 第 9 節的憲法修訂案確認前，本文件的施工單元不開工。`code-change` 只是暫用名稱。
+**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；其餘單元依第 8 節的順序施工。`code-change` 只是暫用名稱。
 
 Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，經實作、發 PR 前審閱、發 PR、PR 後深度審閱、自行 triage 修正、收斂 PR，到最後清理，交付一個已開出的 PR。這是第一個會寫本機 repository 並對外部系統產生副作用的 workflow；現有 workflows 都只讀或只寫自有 artifacts。
 
@@ -213,7 +213,7 @@ CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（AD
 | 單元 | 內容 | 相依 |
 |---|---|---|
 | P0 | 憲法修訂與 `WORKFLOW-REUSE.md` 登記更新（只改文件，文字待確認） | 無 |
-| R7 | gh／git 命令執行與 bare clone 機械的共用：核對 `acquire.go`，列差異矩陣，抽到 runtime 責任層，review 遷移；consumers 包含 review、PR 狀態 adapter 與新 worktree | P0 |
+| R7 | gh／git 命令執行與 bare repository 機械的共用：核對 `acquire.go`，列差異矩陣；process 執行放 runtime，bare repository 與 worktree 的 ownership 放另一個中性 package；review 遷移；consumers 包含 review、PR 狀態 adapter 與新 worktree | P0 |
 | R6 | 抽出 review 流程為可組合單元，遷移 code-review 自身，完成差異矩陣回歸 | P0、R7（兩者都改 `acquire.go`，R7 先） |
 | R9 | contract repair 迴圈的中性化：由 `triage.TaskSession.Run` 抽出不綁 triage 角色名與 recovery 型別的核心，triage 遷移 | P0 |
 | R8 | 私有 skill 目錄展開中性化：由 `triage.PrepareSkills` 抽出不綁角色名的入口，triage 遷移 | P0 |

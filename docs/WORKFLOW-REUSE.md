@@ -33,7 +33,7 @@
 | RPC 測試 transport | `testutil/protocol.NewHost`／`Host.Events`／`Event.Reply`／`Host.Close`、`RegisterCleanup` 及 `WriteEnvelope` | review workflow/check integration、triage RPC driver 共用 host 與 late-bound cancel/close/join；原 domain scenarios 與 Store-only 分層不變 |
 | Skill extraction／report renderer | `contract/reportresource.ExtractFresh`／embedded `pwc_report_io.py`；review `ExtractSkills`／renderer 與 triage `ExtractReport`／report Step | R5：兩個真 consumer 共用機械，業務模板／report binding 各自保留 |
 | Workflow 組合單元 | 規劃中（R6）：由 `review` 抽出的參數化、可重入普通 Go 單元 | 未實作前，新 workflow 不得呼叫或 import review 私有實作；不新增引擎層 sub-workflow 原語 |
-| gh／git 命令執行與 bare clone | 規劃中（R7）：目前在 `review/acquire.go`，將抽到 runtime 責任層 | 未實作前，新 workflow 與 PR 狀態 adapter 不得複製或 import review 私有實作 |
+| gh／git 命令執行與 bare clone | 規劃中（R7）：目前在 `review/acquire.go`，process 執行將抽到 runtime，bare repository 機械另放中性 package | 未實作前，新 workflow 與 PR 狀態 adapter 不得複製或 import review 私有實作 |
 | 私有 skill 目錄展開 | 規劃中（R8）：目前在 `triage.PrepareSkills`，將抽成中性入口 | 未實作前，新 workflow 不得 import triage 私有實作 |
 | Contract repair 迴圈 | 規劃中（R9）：目前在 `triage.TaskSession.Run`，將抽成中性機械 | 未實作前，新 workflow 不得複製或 import triage 私有實作 |
 
@@ -136,7 +136,7 @@ R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入�
 
 `review/acquire.go` 內有政策無關的機械：固定 argv 的 gh／git 命令執行、deadline、stdout 上限、stderr 不落地、憑證以 `-c` 逐次帶入而不寫入 config，以及 bare repository 加 pinned fetch（`git init --bare`、`git config remote.*`、指定 SHA 的 fetch）。其 consumers 將是 review 的 acquire、新的 PR 狀態唯讀 adapter（check runs、commit statuses、review threads）與寫入型 worktree。唯讀 PR 取得的政策（禁用 hooks 與 git config、detached）屬 review，不共用；寫入型 worktree 的政策（是否啟用 hooks 與 config）另行明列。
 
-- 範圍：只限 `gh` 與 `git` 兩個固定執行檔的命令執行，不提供任意執行檔的 `Command(exe, args)`；ADDING 與 DESIGN 明確不要泛用 command executor。
+- 範圍：只限 `gh` 與 `git` 兩個固定執行檔的命令執行，不提供任意執行檔的 `Command(exe, args)`；ADDING 第 3 節與 IMPLEMENTATION 第 2 節明確不要泛用 command executor。
 - 責任層：process 執行（命令、deadline、輸出上限）放 runtime；bare repository 與 worktree 的 ownership／SameFile cleanup 不屬 process 執行，於核對後另定所屬 package。兩者都不留在 review package 讓他人 import。
 - Controller 不為 Agent 配置 push 憑證，不寫入憑證相關 config；push 與開 PR 由 Agent 使用其既有認證。bare repository 內的 remote 設定與 fetch 屬機械，不算憑證。這不是 credential broker。
 - 寫入型 worktree 需要 fetch 可變的 default branch，acquire 明文只 fetch 指定 SHA；這是政策差異，須列入矩陣，不默默放寬 review 的限制。
