@@ -59,7 +59,7 @@ func newReportFixture(t *testing.T) *reportFixture {
 			t.Error(err)
 		}
 	})
-	paths, err := ExtractSkills(reportTempDir(t))
+	paths, err := ExtractSkills(reportTempDir(t), "review-skills")
 	if err != nil {
 		t.Fatal(err)
 	}

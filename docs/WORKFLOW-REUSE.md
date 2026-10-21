@@ -2,7 +2,7 @@
 
 本文件落實 [專案憲法第七條](../AGENTS.md)，是開發、review 與接手的必要入口。規範共用機制的收斂順序，不新增 WorkflowBase、DSL、工具權限框架或外部 workflow config。
 
-**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，R2 已提供共用 report 判定，R3 已共用 publication 投影與 bounded-read loop，R4 已遷移指定 host transport consumers，R7 已將 gh／git 命令執行接入 runtime、bare repository 機械接入 gitrepo，實際入口見下表，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
+**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，R2 已提供共用 report 判定，R3 已共用 publication 投影與 bounded-read loop，R4 已遷移指定 host transport consumers，R7 已將 gh／git 命令執行接入 runtime、bare repository 機械接入 gitrepo，R6 已將 review 流程抽成可組合單元，實際入口見下表，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
 
 ## 1. 單一規範來源與接手 gate
 
@@ -32,7 +32,8 @@
 | Published／checkout 二次讀檔 | `contract.ReadBounded`；review `readCheckFile`／`readPublishedFile`、triage `rawFile` | R3 已接線：共用 bounded loop，root/open/identity 與錯誤政策留 adapter；Store `copyStable` 的雙 digest 不合併 |
 | RPC 測試 transport | `testutil/protocol.NewHost`／`Host.Events`／`Event.Reply`／`Host.Close`、`RegisterCleanup` 及 `WriteEnvelope` | review workflow/check integration、triage RPC driver 共用 host 與 late-bound cancel/close/join；原 domain scenarios 與 Store-only 分層不變 |
 | Skill extraction／report renderer | `contract/reportresource.ExtractFresh`／embedded `pwc_report_io.py`；review `ExtractSkills`／renderer 與 triage `ExtractReport`／report Step | R5：兩個真 consumer 共用機械，業務模板／report binding 各自保留 |
-| Workflow 組合單元 | 規劃中（R6）：由 `review` 抽出的參數化、可重入普通 Go 單元 | 未實作前，新 workflow 不得呼叫或 import review 私有實作；不新增引擎層 sub-workflow 原語 |
+| Workflow 組合單元 | `review.Run(ctx, r, scope, name, prURL)`；`code-review` 的 `execute` 以 `r.Root()`、`"review"` 呼叫它 | R6 已接線：舊內聯副本移除；呼叫者只用 `review.Run`，不 import review 其他業務型別或 helper；不新增引擎層 sub-workflow 原語。預期 head 與外層准入留 C3 |
+| Node TLS 前置檢查 | `runtime.CheckNodeTLS`（`runtime/preflight.go`） | R6 已接線：需要此檢查的 workflow 在第一個副作用前呼叫（目前為 code-review；code-change 是規劃中的第二個 consumer）；不屬於 Pi 啟動，triage 與 smoke-echo 不呼叫 |
 | gh／git 命令執行與 bare clone | `runtime.GitHubGET`／`runtime.Git`（`runtime/command.go`）；`gitrepo.Reserve` 與 `Repo.Init`／`AddRemote`／`FetchPinned`／`Cleanup`；review `acquire`、`Verify`、`Checkout.Cleanup` 使用 | R7 已接線：review 舊副本移除；只限固定 gh REST GET 與 git，不提供任意執行檔；唯讀政策留 review；可寫 fetch 與 GraphQL 由第一個使用它的 C 單元加入，不 import review 私有實作 |
 | 私有 skill 目錄展開 | 規劃中（R8）：目前在 `triage.PrepareSkills`，將抽成中性入口 | 未實作前，新 workflow 不得 import triage 私有實作 |
 | Contract repair 迴圈 | 規劃中（R9）：目前在 `triage.TaskSession.Run`，將抽成中性機械 | 未實作前，新 workflow 不得複製或 import triage 私有實作 |
@@ -157,11 +158,26 @@ R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入�
 
 **完成出口：** review 實際使用共用機械，舊副本移除；既有 acquire 的錯誤分類、限額與 cleanup 保證不變。只交付政策無關的核心；可寫 worktree 的 fetch 政策與 GraphQL 查詢在 code-change 第一個使用它們的單元落地並驗收，不在本單元預造。
 
-### R6：review 流程成為可組合單元（規劃中，尚未實作）
+### R6：review 流程成為可組合單元
 
 服務 [CODE-CHANGE](CODE-CHANGE.md)。以其 P0 與 R7 為前置。
 
-**目標與責任層：** 在 `review` package 內，把 Prepare、三位 reviewer、Validate 抽成以 PR 參數、子 scope 與明示限額呼叫的普通 Go 單元；`code-review` 自身遷移到該單元。單元是原擁有者匯出的完整流程層級 API，呼叫端不得 import `review` 的其他業務型別或 helper。不新增引擎層 sub-workflow 原語、registry 或 DSL。第二個 consumer 為 code-change 的 PR 後審閱階段。
+**已實作接線：** `review.Run(ctx, r, scope, name, prURL)` 承接原本內聯的 Prepare、三位 reviewer、Validate 本體，舊副本已移除；`code-review` 的 `execute` 以 `r.Root()`、`"review"`、`in.Prompt` 呼叫 `review.Run`。測試只經未匯出的 `run` 替換外部 Git 與 remote。`ExtractSkills(runDir, name)` 改收目錄名。scope、`name` 規則與衍生名稱、拒絕順序、Run 額度用量與結果語義的契約以 `review.Run` 的 doc comment 為準，本文不重述。`code-review` 的目錄、cleanup、scope path、`FinalDelivery.Scope`、Outputs、session 角色名、模型、prompt、Step deadline、Run policy 與其他錯誤字串不變。單元不讀 `Run.Snapshot` 做准入或預留，額度由外層 Run policy 承擔，不足時是 run-scope `LimitExceeded`。
+
+**明列的行為差異：**
+
+- TLS 錯誤字串：舊 `code-review blocked: Node TLS verification is disabled; launch with NODE_TLS_REJECT_UNAUTHORIZED=1`，新 `TLS preflight blocked: Node TLS verification is disabled; launch with NODE_TLS_REJECT_UNAUTHORIZED=1`。位置不變：URL 錯誤仍先於 TLS 錯誤，兩者都在任何目錄、session 或 gh／git 呼叫之前。
+- Validate session 關閉：舊版從未由 workflow 關閉，留給 run finalization。新版在成功與 incomplete 路徑於 `report-accepted` Decision 之後由單元關閉，`SessionClosed` 事件因此早於 `RunFinalizing`。關閉失敗時：
+  - 成功路徑由「Succeeded、交付 Final 加 cleanup error（exit 1）」變為 workflow error：只回傳關閉錯誤，outcome Failed、exit 1、不交付 Final。
+  - incomplete 路徑由「交付 incomplete report 加 cleanup error」變為不交付 Final；回傳的錯誤以 reviewer 錯誤為 cause，只附上關閉錯誤的訊息，關閉錯誤不在錯誤鏈中，因此分類與 outcome 仍是 reviewer 的原分類（未分類的語義驗收錯誤仍為 WorkflowFailed）。
+  - 兩者的 report Ref 仍在 Outputs；finalization 仍以 cleanup error 再回報同一個關閉結果。錯誤路徑不關閉，已開 handles 照舊由 run cleanup 處理。
+- 新拒絕條件只對新呼叫者：不合格的 `name`（含結尾為 `-skills` 或 `-work`，避免一次呼叫的衍生名稱等於另一次的 checkout root）在任何副作用前以 `invalid review name "<name>"` 拒絕；`code-review` 傳 `"review"`，不觸發。不擋 engine 自用的目錄名，名稱與既有項目衝突時沿既有 Mkdir、`ExtractFresh` 或 `AddCleanup` 錯誤失敗，分類不變（skills 保留失敗仍是 StorageFailed）。
+
+**剩餘缺口：** 預期 head（相等或祖先規則、compare 查詢、X 與 Y 不同時的釘選與限制）連同單元簽名變更在 C3 加入，R6 不預造參數。外層准入與預留、code-change 組合接線同在 C3 驗收。巢狀時 checkout 存活到外層 run 結束，單元返回後的 checkout 變動不再由 `Verify` 偵測。未被測試覆蓋：`execute` 傳入的 `r.Root()` 與 production remote 字面值（到達需要真網路，由 live 驗證），以及同一 Run 內以不同 `name` 實際呼叫兩次 `review.Run`。Go 層仍可 import review 的其他匯出 helper，「只用 `review.Run`」靠 review gate。對呼叫者的後果：同一 Run 可以不同 `name`、各自專用的 scope 多次呼叫 `review.Run`，同一 `name` 不得重複或並行呼叫；巢狀呼叫回傳的 Final 為 nil 時，單元可能留下最多 3 個呼叫者無法關閉的 live slots，呼叫者須結束其 Run，不再開 session。
+
+以下保留目標與完成條件。
+
+**目標與責任層：** 在 `review` package 內，把 Prepare、三位 reviewer、Validate 抽成以 PR 參數與子 scope 呼叫、Run 額度用量明文記載並由外層 Run policy 承擔的普通 Go 單元；`code-review` 自身遷移到該單元。單元是原擁有者匯出的完整流程層級 API，呼叫端不得 import `review` 的其他業務型別或 helper。不新增引擎層 sub-workflow 原語、registry 或 DSL。第二個 consumer 為 code-change 的 PR 後審閱階段。
 
 **開工前必補的差異矩陣：** 輸入來源、目錄與資源名稱、scope 名稱（Decision、Child、Parallel、Retry 共用一組，Step 與 Attach 共用另一組）、預期 head、Run 限額會計、啟動前環境檢查的位置、report 與 branch error 並存的結果語義、模型來源、取消與 cleanup 所有權，以及 path／symlink、錯誤分類、穩定性、生命週期。
 

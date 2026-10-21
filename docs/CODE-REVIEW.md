@@ -45,7 +45,7 @@ Schema 唯一來源是 `internal/workflows/review/schemas/`，embed 後由 Go re
 - `incomplete`：必要 reviewer failed/missing。CollectAll 保留 siblings，run 仍活動時嘗試 Validation 產出不完整 report，最後仍傳回原始 branch failure，不能 exit 0。取消、run-fatal、run deadline 不再開 Validation。
 - PR `conclusion`：有 confirmed findings 為 `findings`；完整且無 confirmed findings 為 `no_confirmed_findings`；其餘為 `undetermined`。有缺陷的完整 report 本身不是 workflow failure。
 - Metadata/pinned code 取得失敗、schema/identity/semantic acceptance 失敗、partial startup 等是 execution failure，保留已取得的 history/Refs。未產出合法 Validation 時，不偽造 final report。
-- Cleanup/持久化錯誤與 outcome 分離，既有 exit precedence、StatePersisted=false、sticky run-fatal 與 provenance 不變。
+- Validation session 在 report 驗收後、workflow 返回前關閉；關閉失敗是 execution failure，不交付 final，report Ref 保留為 history；incomplete 時錯誤分類仍是原始 branch failure。其餘 Cleanup/持久化錯誤與 outcome 分離，既有 exit precedence、StatePersisted=false、sticky run-fatal 與 provenance 不變。
 
 ## 資源、安全與保留
 

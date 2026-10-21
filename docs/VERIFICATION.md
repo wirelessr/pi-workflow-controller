@@ -192,6 +192,7 @@ PWC_LIVE_PI=1 go test -race -count=1 ./internal/engine \
 - Partial fetch fixture 真正支援 blob filtering/lazy hydration；tracked/untracked/ignored/snapshot mutation 拒絕。Submodule gitlink 保留但不執行外部 transport，LFS pointer 不當作外部內容。
 - Git config/hooks/external diff/textconv/submodule recursion 安全限制（含 HOME／XDG 下的全域 config 不生效）、metadata command 失敗與 deadline 的錯誤包裝及 cause、partial acquisition cancellation/Wait 及 AddCleanup 失敗責任。Stdout cap 與 checkout ownership/replacement 拒絕的機械 gate 分屬上方 Runtime 與 Git repository 節。
 - Deterministic renderer 在同一 Validation Step 執行，JSON identity/files/artifact ID、symlink/collision、完整原 statement/Refs 與 Go 逐值附錄驗收一致。異 cwd／binary 離 source 的完整 embed tree 可讀。
+- 組合單元 `review.Run`：外層在 root 佔用同名 Step/Attach key、Decision/Parallel 名、run 目錄與 cleanup 名時仍能在 Child scope 完成；外層 Run 限額恰需 5 sessions、3 live、5 attempts，任一不足為 run-scope LimitExceeded；不合格 name（含 `-skills`／`-work` 結尾）、URL 與停用的 Node TLS 依序在任何目錄、session、gh／git 呼叫前拒絕；Validation session 由單元在 report 驗收後關閉，關閉失敗不交付 final，incomplete 路徑保留 reviewer 的原分類。
 - Timeout 分層：縮短外部 runtime context 的 fixture 可驗 branch failure/incomplete，但不冒稱等過產品完整 Step timer；真正 Step timer 另由 engine bundled/live gate 驗。
 - 此 workflow 的真 Pi/provider/獲授權 PR E2E 另行進行，不能以 smoke-echo 或 substitute 代替。範例目標使用 `https://github.com/owner/repo/pull/123`，執行時的真目標只記 repo 外。
 - 真 E2E 核對所有角色/read skills/resources/refs/report/cleanup、global resources 不變、未執行被審 code/tests/build/scripts 或外部 writes。這是採證方法，不是 OS sandbox／全面 syscall/network 稽核或模型推理正確率保證。

@@ -344,7 +344,7 @@ func resourceTestExtractedTree(t *testing.T) {
 	if err := os.Mkdir("run", 0700); err != nil {
 		t.Fatal(err)
 	}
-	paths, err := ExtractSkills("run")
+	paths, err := ExtractSkills("run", "review-skills")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func resourceTestExtractedTree(t *testing.T) {
 	if actualFiles != expectedFiles {
 		t.Fatalf("unexpected extracted files: got %d, want %d", actualFiles, expectedFiles)
 	}
-	if got, err := ExtractSkills(filepath.Dir(root)); err == nil || got != nil {
+	if got, err := ExtractSkills(filepath.Dir(root), "review-skills"); err == nil || got != nil {
 		t.Fatalf("second extraction overwrote files: %v %v", got, err)
 	}
 }
@@ -478,7 +478,7 @@ func TestExtractReviewSkillsNeverOverwrites(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := ExtractSkills(run)
+			got, err := ExtractSkills(run, "review-skills")
 			if !errors.Is(err, os.ErrExist) || got != nil {
 				t.Fatalf("existing content accepted: %v %v", got, err)
 			}
@@ -500,7 +500,7 @@ func TestExtractReviewSkillsNeverOverwrites(t *testing.T) {
 		})
 	}
 	for _, path := range []string{"", filepath.Join(t.TempDir(), "absent")} {
-		if got, err := ExtractSkills(path); err == nil || got != nil {
+		if got, err := ExtractSkills(path, "review-skills"); err == nil || got != nil {
 			t.Fatalf("invalid run directory accepted: %q: %v %v", path, got, err)
 		}
 	}

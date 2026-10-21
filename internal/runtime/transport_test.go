@@ -85,6 +85,34 @@ func TestCloseSlowObserverRemovesDiscoveryBeforeObserverStops(t *testing.T) {
 	}
 }
 
+func TestCheckNodeTLS(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		unset       bool
+		blocked     bool
+	}{
+		{name: "unset", unset: true},
+		{name: "enabled", value: "1"},
+		{name: "disabled", value: "0", blocked: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("NODE_TLS_REJECT_UNAUTHORIZED", tc.value)
+			if tc.unset {
+				if err := os.Unsetenv("NODE_TLS_REJECT_UNAUTHORIZED"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := CheckNodeTLS()
+			if !tc.blocked && err != nil {
+				t.Fatalf("unexpected block: %v", err)
+			}
+			if tc.blocked && (err == nil || err.Error() != "TLS preflight blocked: Node TLS verification is disabled; launch with NODE_TLS_REJECT_UNAUTHORIZED=1") {
+				t.Fatalf("disabled TLS not blocked with the fixed message: %v", err)
+			}
+		})
+	}
+}
+
 func TestPreflightDiscoveryReadOnly(t *testing.T) {
 	child := exec.Command("/usr/bin/true")
 	if err := child.Run(); err != nil {

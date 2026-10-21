@@ -182,22 +182,22 @@ CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（AD
 
 ## 7. 重用抽取：code-review 成為可組合單元
 
-`review.execute` 目前是單一函式，且包含以下綁定，直接呼叫會違反憲法第七條，也無法放進較大的 Run：
+R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼叫會違反憲法第七條，也無法放進較大的 Run。下表「現況」欄為 R6 前的狀態，已實作的接線見 [WORKFLOW-REUSE](WORKFLOW-REUSE.md) R6：
 
 | 面向 | 現況 | 抽取後須明列的變化 |
 |---|---|---|
-| 輸入 | `in.Prompt` 即 PR URL，由 `ParsePRURL` 解析 | 改為參數；code-review 入口自行解析並傳入 |
-| 目錄與資源名稱 | 固定 `r.Dir()/review`、`review-work`、skills 目錄 `review-skills`、cleanup 名稱 `review-checkout`；重複會 Mkdir 失敗或被拒為重名資源 | 以呼叫者提供的前綴命名，使其能與外層資源共存 |
-| Scope 名稱 | 固定 Step key `prepare`、`review`、`validate`、Parallel `reviewers`、Decision `context-accepted`／`report-accepted`，都在 `r.Root()`。Decision、Child、Parallel、Retry 共用一組名稱；Step 與 Attach 共用另一組 | 放到子 scope 下，避免與外層兩組名稱衝突 |
-| 預期 head | acquire 每次自行取得當下 PR head，checkout、diff、Pin、ContextID 與每階段 `Verify` 都綁在這個值上 | 新增由呼叫者傳入的預期 head X，核對規則為相等或為 PR 當下 head Y 的祖先（新增一次唯讀 compare 查詢）；有預期值時，checkout、diff、Pin 與 ContextID 釘 X，metadata snapshot 保留 Y，兩者不同成為 review 的明列限制；`code-review` 入口傳入空值，行為不變 |
+| 輸入 | `in.Prompt` 即 PR URL，由 `ParsePRURL` 解析 | 參數 `prURL`；`code-review` 入口傳入 `in.Prompt`，單元開頭依序檢查前綴、URL、TLS，巢狀呼叫者傳錯也在副作用前被拒 |
+| 目錄與資源名稱 | 固定 `r.Dir()/review`、`review-work`、skills 目錄 `review-skills`、cleanup 名稱 `review-checkout`；重複會 Mkdir 失敗或被拒為重名資源 | 以呼叫者提供的前綴命名，使其能與外層資源共存；前綴以保守字元集在任何副作用前檢查，不得逃出 run 目錄，也不得以 `-skills`、`-work` 結尾（避免推導名稱在兩次呼叫之間互撞） |
+| Scope 名稱 | Step key `prepare`、`validate`、Parallel `reviewers`、Decision `context-accepted`／`report-accepted` 在 `r.Root()`；`review` 在各 reviewer 的 branch scope。Decision、Child、Parallel、Retry 共用一組名稱；Step 與 Attach 共用另一組 | 單元放在呼叫者傳入的專用 scope 下（`code-review` 傳 `r.Root()`，scope path 不變），避免與外層兩組名稱衝突 |
+| 預期 head | acquire 每次自行取得當下 PR head，checkout、diff、Pin、ContextID 與每階段 `Verify` 都綁在這個值上 | 預期 head X 的參數與核對（相等或為 PR 當下 head Y 的祖先，新增一次唯讀 compare 查詢；X 不等於 Y 時 checkout、diff、Pin 與 ContextID 釘 X，metadata snapshot 保留 Y，兩者不同成為 review 的明列限制）屬 code-change 才需要的政策分支，在 C3 加入，R6 不預造；C3 會連帶修改單元簽名與 `code-review` 的一行呼叫 |
 | 限額 | Definition 內 Run policy：3 live、5 sessions、5 attempts、120 分鐘 | 組合後由外層 workflow 的 policy 承擔，須重新核算 |
-| 前置檢查 | `NODE_TLS_REJECT_UNAUTHORIZED` 檢查在 `execute` 開頭，任何副作用之前，錯誤字串寫死 `code-review blocked` | 抽成單元匯出的同一個檢查函式，`code-review` 在原位置呼叫；code-change 在 A1 之前呼叫同一函式，不得等到 B 才檢查（那時 PR 已開出）。錯誤訊息改為不綁 workflow 名稱，屬明列的字串變更 |
+| 前置檢查 | `NODE_TLS_REJECT_UNAUTHORIZED` 檢查在 `execute` 開頭，任何副作用之前，錯誤字串寫死 `code-review blocked` | 抽成 `runtime.CheckNodeTLS`（中性檢查函式，不自動套用到每次 Pi 啟動），review 單元在原位置呼叫（`ParsePRURL` 之後、任何副作用之前）；code-change 在 A1 之前呼叫同一函式，不得等到 B 才檢查（那時 PR 已開出）。這樣 code-change 不 import review 的 helper。錯誤訊息改為不綁 workflow 名稱，屬明列的字串變更 |
 | 結果 | 回傳 `Outputs`、`Final`，並可同時回傳 branch error | 單元需把「report 與 branch error 並存」的語義明確交給呼叫者 |
 | 模型 | 內部 `model(role)` 寫死 | 維持單元內常數，由 M-model 單元變更；呼叫者不傳入 |
-| 取消與 cleanup | `AddCleanup` 註冊 checkout | 沿用，所有權不變 |
+| 取消與 cleanup | `AddCleanup` 註冊 checkout；validate session 從未由 workflow 關閉 | checkout 所有權不變。單元在成功與 incomplete 的返回路徑關閉 validate session，使巢狀呼叫者不被留下一個 live slot；對 `code-review` 是明列的行為變更：關閉失敗由「Succeeded、交付 Final 加 cleanup error」變為 workflow error（Failed，不交付 Final，report Ref 仍保留在 Outputs；exit code 同為 1）。incomplete 路徑關閉失敗時，原本交付的 incomplete report 也不再交付，失敗分類維持 reviewer 的原始錯誤。Final 為 nil 時單元可能留下最多 3 個 live session，呼叫者須結束它的 Run |
 | path／symlink、錯誤分類、穩定性、生命週期 | root 驗證、保留路徑與 SameFile cleanup 在 `internal/gitrepo`；checkout 與 snapshot 的 rooted no-follow 讀取和錯誤分類在 `check.go`、`safety.go`、`acquire.go` | 呼叫者提供的前綴不得放寬既有路徑檢查；錯誤碼、phase 與 cleanup 時點逐項對照，不變 |
 
-抽取是行為保持的 refactor：code-review 自己必須遷移到新單元，既有 workflow 與測試的契約不變，舊副本移除。這裡的「可重入」指單元能放在外層 scope 下與外層名稱共存，不是同一 Run 內重複呼叫。改變錯誤時點、會計或拒絕條件之處（例如預期 head 的核對）須明列並驗收。
+抽取是行為保持的 refactor：code-review 自己必須遷移到新單元，既有 workflow 與測試的契約不變，舊副本移除。這裡的「可重入」指單元能放在外層 scope 下與外層名稱共存；同一 Run 內也可以不同前綴、各自專用的 scope 多次呼叫，同一前綴不得重複或並行呼叫。改變錯誤時點、會計或拒絕條件之處（例如預期 head 的核對）須明列並驗收。
 
 **為什麼不做 engine 層的 sub-workflow 原語。** 現在 workflow 的 `Execute` 就是普通的 Go 函式，組合已經可行：問題不在引擎不能呼叫，而在 review 沒有被設計成可被呼叫的單元，簽名綁死 `Input` 全文、`Root()` 與固定名稱。若加一個引擎層的「呼叫已註冊 Definition」原語，仍然要處理同樣的輸入參數化、命名空間、限額會計與結果映射，所以參數化抽取是無論如何都要做的前置。抽取完成後，組合就是一次普通的 Go 函式呼叫，沒有新增框架概念。是否再把這個慣例提升為引擎原語，等出現第三個組合者再依憲法第七條評估。
 
@@ -221,7 +221,7 @@ CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（AD
 | M-model | 更換 review 預設模型與文件、測試 | R6 |
 | C1 | `code-change` 骨架：輸入解析、權限與 TLS 前置檢查、worktree、receipt 核對、A1 與 gap 出口 | P0、R7、R9 |
 | C2 | A2 平行審閱與 A3 更正加發佈 | C1 |
-| C3 | 接 B，並加上 C 的 triage 與修正 | C2、R6 |
+| C3 | 接 B，並加上 C 的 triage 與修正。含 B 的預期 head 參數與核對（第 7 節，連帶修改 `review.Run` 簽名與 `code-review` 的呼叫）；呼叫 `review.Run` 時外層不得有 live session，且須把單元回傳的 Outputs 以自己的名稱重映射再併入；Final 為 nil 時結束 Run | C2、R6 |
 | C4 | D 的 Controller 迴圈、PR 狀態 adapter、每輪私有 skill、E、品質掃描 skipped 語義 | C3、R7、R8 |
 | C5 | 實際整合驗收（需一次性測試 repo 與憑證，留在 repo 外；ticket 轉移見第 11 節） | C4、M-model |
 

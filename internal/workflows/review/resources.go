@@ -39,9 +39,9 @@ func Schemas() []contract.SchemaDefinition {
 	}
 }
 
-// ExtractSkills reserves a fresh directory in an existing run. Failed partial
-// extractions remain reserved rather than risking deletion of replaced content.
-func ExtractSkills(runDir string) (map[string]string, error) {
+// ExtractSkills reserves the fresh directory name in an existing run. Failed
+// partial extractions remain reserved rather than risking deletion of replaced content.
+func ExtractSkills(runDir, name string) (map[string]string, error) {
 	if runDir == "" {
 		return nil, errors.New("review skill run directory is empty")
 	}
@@ -49,7 +49,7 @@ func ExtractSkills(runDir string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	root, err := reportresource.ExtractFresh(runDir, "review-skills", skills, reportresource.Common)
+	root, err := reportresource.ExtractFresh(runDir, name, skills, reportresource.Common)
 	if err != nil {
 		return nil, err
 	}
