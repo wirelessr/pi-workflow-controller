@@ -207,9 +207,18 @@ func (f *acquisitionFixture) configureAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(executable, "'") {
+		t.Fatalf("test binary path cannot be quoted: %s", executable)
+	}
+	// The fixed gh entry point resolves gh on PATH; this wrapper keeps the
+	// GitHub boundary a real subprocess of the test binary.
+	bin := t.TempDir()
+	fixtureWrite(t, filepath.Join(bin, "gh"), []byte("#!/bin/sh\nexec '"+executable+"' -test.run='^TestAcquisitionGHHelper$' -- \"$@\"\n"))
+	if err := os.Chmod(filepath.Join(bin, "gh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("PWC_ACQUIRE_FIXTURE", f.dir)
-	f.source.gh = executable
-	f.source.ghPrefix = []string{"-test.run=^TestAcquisitionGHHelper$", "--"}
 }
 
 func (f *acquisitionFixture) saveMetadata(t *testing.T) {
@@ -737,7 +746,9 @@ func TestAcquirePartialFetchHydratesOnlyNeededBlobs(t *testing.T) {
 }
 
 func TestAcquireMetadataCommandBoundaries(t *testing.T) {
-	for _, scenario := range []string{"unavailable", "oversized", "deadline"} {
+	// Runtime's command tests cover the output limit; these pin the metadata
+	// wrapping, cause preservation and that nothing is retained or published.
+	for _, scenario := range []string{"unavailable", "deadline"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newExternalGitFixture(t)
 			f.source.gitOutput = func(_ context.Context, _ string, args []string) ([]byte, error) {
@@ -759,11 +770,8 @@ func TestAcquireMetadataCommandBoundaries(t *testing.T) {
 				t.Fatalf("metadata failure: %+v %v", c, err)
 			}
 			wantErr := "PR metadata: acquisition command failed"
-			switch scenario {
-			case "deadline":
+			if scenario == "deadline" {
 				wantErr = "PR metadata: " + context.DeadlineExceeded.Error()
-			case "oversized":
-				wantErr = "PR metadata: " + errAcquisitionOutputLimit.Error()
 			}
 			if scenario == "unavailable" && errors.Is(err, syscall.EPERM) {
 				wantErr = "PR metadata: acquisition process group cleanup failed: " + syscall.EPERM.Error()
@@ -774,9 +782,6 @@ func TestAcquireMetadataCommandBoundaries(t *testing.T) {
 			if scenario == "deadline" && !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("deadline lost: %v", err)
 			}
-			if scenario == "oversized" && !errors.Is(err, errAcquisitionOutputLimit) {
-				t.Fatalf("output limit lost: %v", err)
-			}
 			if _, err := os.Stat(filepath.Join(f.root, "checkout")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("failed metadata checkout retained: %v", err)
 			}
@@ -784,68 +789,6 @@ func TestAcquireMetadataCommandBoundaries(t *testing.T) {
 				t.Fatalf("invalid metadata published: %v", err)
 			}
 		})
-	}
-}
-
-func TestCleanupRejectsReplacementWorktree(t *testing.T) {
-	f := newAcquisitionFixture(t)
-	c, err := f.acquire(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	original := c.Worktree
-	moved := filepath.Join(f.root, "moved")
-	if err := os.Rename(original, moved); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(original, 0700); err != nil {
-		t.Fatal(err)
-	}
-	fixtureWrite(t, filepath.Join(original, "foreign"), []byte("keep"))
-	if err := c.Cleanup(context.Background()); err == nil {
-		t.Fatal("cleanup accepted replacement inode")
-	}
-	if _, err := os.Stat(filepath.Join(original, "foreign")); err != nil {
-		t.Fatal("replacement removed")
-	}
-	if err := os.RemoveAll(original); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(moved, original); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := c.Cleanup(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled cleanup: %v", err)
-	}
-	if err := c.Cleanup(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestAcquireReapsSuccessfulCommandGroup(t *testing.T) {
-	f := newAcquisitionFixture(t)
-	fixtureWrite(t, filepath.Join(f.dir, "metadata-mode"), []byte("background"))
-	c, err := f.acquire(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func(c *Checkout, ctx context.Context) { _ = c.Cleanup(ctx) }(c, context.Background())
-	data, err := os.ReadFile(filepath.Join(f.dir, "background"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid, err := strconv.Atoi(string(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for syscall.Kill(pid, 0) == nil {
-		if time.Now().After(deadline) {
-			t.Fatalf("successful command left descendant %d alive", pid)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -958,6 +901,22 @@ func TestAcquireSanitizesGitConfiguration(t *testing.T) {
 	f.metadata["head"].(map[string]any)["sha"] = f.head
 	f.saveMetadata(t)
 	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	// Runtime drops inherited GIT_*, so without review's gitEnv Git would read
+	// the global files under HOME and XDG_CONFIG_HOME.
+	home, xdg := filepath.Join(outside, "home"), filepath.Join(outside, "xdg")
+	for _, dir := range []string{home, filepath.Join(xdg, "git")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	globalConfig, err := os.ReadFile(global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureWrite(t, filepath.Join(home, ".gitconfig"), globalConfig)
+	fixtureWrite(t, filepath.Join(xdg, "git", "config"), globalConfig)
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
 	t.Setenv("GIT_CONFIG_VALUE_0", hooks)
@@ -1025,11 +984,9 @@ func TestAcquisitionGitResultAdapter(t *testing.T) {
 				t.Fatalf("SUT did not record snapshot hash %s: %v", key, err)
 			}
 		}
-		for path, info := range map[string]os.FileInfo{c.root: c.rootInfo, c.repository: c.repositoryInfo, c.worktree: c.worktreeInfo} {
-			actual, err := os.Stat(path)
-			if err != nil || info == nil || !os.SameFile(actual, info) {
-				t.Fatalf("SUT did not record reserved path ownership: %s: %v", path, err)
-			}
+		// Identity recording of the reserved paths is pinned in gitrepo.
+		if c.repo.Root() != f.root || c.repo.Dir() != filepath.Join(f.root, "repository.git") || c.repo.Worktree() != filepath.Join(f.root, "checkout") || c.Worktree != c.repo.Worktree() {
+			t.Fatalf("SUT did not reserve paths under its root: %q %q %q", c.repo.Root(), c.repo.Dir(), c.repo.Worktree())
 		}
 		for key, want := range map[string]string{"diff": externalGitDiff, "changed-files": `["binary.dat","odd\nname.txt","shared.txt"]`, "issues": `[{"id":1},{"id":2}]`, "inline": `[]`} {
 			if raw, err := os.ReadFile(c.Snapshots[key]); err != nil || string(raw) != want {
@@ -1039,7 +996,7 @@ func TestAcquisitionGitResultAdapter(t *testing.T) {
 		if raw, err := output(ctx, c.Worktree, []string{"-c", "core.hooksPath=/dev/null", "rev-parse", "HEAD"}); err != nil || strings.TrimSpace(string(raw)) != externalGitHead {
 			t.Fatalf("independent fixed HEAD query: %q %v", raw, err)
 		}
-		verifyHead := []string{"--git-dir=" + filepath.Join(c.repository, "worktrees", "checkout"), "--work-tree=" + c.worktree, "rev-parse", "HEAD"}
+		verifyHead := []string{"--git-dir=" + c.repo.WorktreeGitDir(), "--work-tree=" + c.repo.Worktree(), "rev-parse", "HEAD"}
 		beforeArgs := append([]string{}, verifyHead...)
 		if raw, err := c.git(ctx, verifyHead...); err != nil || strings.TrimSpace(string(raw)) != externalGitHead {
 			t.Fatalf("valid HEAD query rejected: %q %v", raw, err)
@@ -1054,7 +1011,7 @@ func TestAcquisitionGitResultAdapter(t *testing.T) {
 			}
 		}
 		command := []string{"-c", "core.hooksPath=/dev/null", "rev-parse", "HEAD"}
-		if raw, err := output(ctx, c.root, command); err == nil || raw != nil {
+		if raw, err := output(ctx, c.repo.Root(), command); err == nil || raw != nil {
 			t.Fatalf("HEAD query accepted wrong cwd: %q %v", raw, err)
 		}
 		if !reflect.DeepEqual(beforeCalls, f.gitCalls(t)) {
@@ -1065,7 +1022,7 @@ func TestAcquisitionGitResultAdapter(t *testing.T) {
 		if !reflect.DeepEqual(beforeCalls, f.gitCalls(t)) {
 			t.Fatal("snapshot verification was bypassed")
 		}
-		registration := filepath.Join(c.repository, "worktrees", "checkout")
+		registration := filepath.Join(f.root, "repository.git", "worktrees", "checkout")
 		if info, err := os.Stat(registration); err != nil || !info.IsDir() {
 			t.Fatalf("cleanup registration never existed: %v", err)
 		}
@@ -1231,11 +1188,10 @@ func (f *acquisitionFixture) gitOutput(ctx context.Context, cwd string, args []s
 	fixed := []string{
 		"--no-pager", "--git-dir=" + repository,
 		"-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null",
-		"-c", "core.fsmonitor=false", "-c", "core.autocrlf=false", "-c", "core.sparseCheckout=false",
-		"-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
-		"-c", "credential.interactive=false", "-c", "http.sslVerify=true", "-c", "http.followRedirects=false",
+		"-c", "core.autocrlf=false", "-c", "core.sparseCheckout=false",
+		"-c", "http.sslVerify=true", "-c", "http.followRedirects=false",
 		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.http.allow=always",
-		"-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "submodule.recurse=false",
+		"-c", "submodule.recurse=false",
 	}
 	steps := []struct {
 		args   []string
@@ -1405,25 +1361,7 @@ func TestAcquisitionGHHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	if key == "metadata" {
-		mode, _ := os.ReadFile(filepath.Join(dir, "metadata-mode"))
-		switch string(mode) {
-		case "background":
-			child := exec.Command("/bin/sleep", "60")
-			if child.Start() != nil {
-				os.Exit(2)
-			}
-			if os.WriteFile(filepath.Join(dir, "background"), []byte(strconv.Itoa(child.Process.Pid)), 0600) != nil {
-				os.Exit(2)
-			}
-		case "oversized":
-			block := bytes.Repeat([]byte{'x'}, 1<<20)
-			for i := 0; i < 65; i++ {
-				if _, err := os.Stdout.Write(block); err != nil {
-					os.Exit(2)
-				}
-			}
-			os.Exit(0)
-		case "deadline":
+		if mode, _ := os.ReadFile(filepath.Join(dir, "metadata-mode")); string(mode) == "deadline" {
 			time.Sleep(time.Minute)
 			os.Exit(2)
 		}

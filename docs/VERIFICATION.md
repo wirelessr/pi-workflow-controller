@@ -61,7 +61,7 @@ Gate：各必要 case 的預期行為成立，無 race；實際執行交付 bina
 
 ### Runtime／RPC／process
 
-入口：[runtime_test.go](../internal/runtime/runtime_test.go)、[transport_test.go](../internal/runtime/transport_test.go)、[codec_test.go](../internal/runtime/codec_test.go)。共用外部 fixture：[protocol](../internal/testutil/protocol/protocol.go)。
+入口：[runtime_test.go](../internal/runtime/runtime_test.go)、[transport_test.go](../internal/runtime/transport_test.go)、[codec_test.go](../internal/runtime/codec_test.go)、[command_test.go](../internal/runtime/command_test.go)。共用外部 fixture：[protocol](../internal/testutil/protocol/protocol.go)。
 
 | 方法／情境 | 必須成立的 gate |
 |---|---|
@@ -75,6 +75,18 @@ Gate：各必要 case 的預期行為成立，無 race；實際執行交付 bina
 | Context-owned pipe deadline 先於 context timer 公布；真正較早 RPC timeout | 前者保留 context typed cause，後者仍為 RPCUnresponsive |
 | Health probe 關閉／真 protocol fault、慢 observer、stderr 滿 | Intentional lifetime cancellation 不製造假 fatal；真 fault 不吞，reader/probe/observer/drain 有界且可 join |
 | Concurrent Close、active native tool、foreign sentinel、ownership mismatch／recovering | 唯一 Wait；確認退出後先刪自有 discovery 再 bounded observer drain；他人資源保留，未確認項目明列 |
+| gh／git 命令：繼承的 `GIT_*`／`GH_*` env、固定 argv 與 git 固定 `-c`（credential、gc、maintenance、fsmonitor）、空或以 `-` 開頭的 endpoint、非零 exit、stdout 超限、deadline、取消、成功後殘留子孫 | 繼承 env 被移除，固定值與 caller env 在後；不合法 endpoint 在啟動 gh 前拒絕；錯誤不含 argv／stderr；超限、deadline 與 cause 保留；process group 在 Wait 前被殺 |
+
+### Git repository
+
+入口：[gitrepo_test.go](../internal/gitrepo/gitrepo_test.go)。以真 temp filesystem 與真 git 建立 worktree；只有失敗與輸入拒絕的情境以記錄型 Runner 代替 git。
+
+| 方法／情境 | 必須成立的 gate |
+|---|---|
+| Root 為相對、不存在、檔案、symlink、group／world 可存取，或 `repository.git`／`checkout` 已存在 | 拒絕且既有內容不變；中途失敗只保留本次已建立的 `repository.git`；symlink 祖先正規化後記錄 identity |
+| Pinned fetch 的 SHA 非 40 位小寫 hex、ref 不以 `refs/` 開頭、remote 為空或以 `-` 開頭 | 在任何 git 執行前拒絕；Runner 錯誤原樣回傳；fetch 後 commit 不符即失敗 |
+| Root、`repository.git`、`checkout` 被替換或 `checkout` 換成 symlink | 回 ownership mismatch，不刪替換內容或外部檔案；還原後可完成 cleanup |
+| Cleanup 前已取消、兩次刪除之間取消、重複呼叫、`checkout` 已不存在 | 保留 cause；再次呼叫完成剩餘 registration；成功後冪等；repository objects 與其他歷史保留 |
 
 ### Store／JSON／schema
 
@@ -178,7 +190,7 @@ PWC_LIVE_PI=1 go test -race -count=1 ./internal/engine \
 - Pin/base/head/unique merge-base/diff/context ID、exact Prepare Ref、role、來源 snapshot 原 bytes、requirements ID 全覆蓋、evidence 的 head 路徑與 inclusive 行範圍必須一致。
 - Findings 全有 disposition，confirmed target 須自我 confirmed，merged 不能指 excluded 或自行循環。需求的原 statement 不縮為較弱子命題，未確認前提不能假稱 satisfied。
 - Partial fetch fixture 真正支援 blob filtering/lazy hydration；tracked/untracked/ignored/snapshot mutation 拒絕。Submodule gitlink 保留但不執行外部 transport，LFS pointer 不當作外部內容。
-- Git config/hooks/external diff/textconv/submodule recursion 安全限制、command deadline/stdout cap、partial acquisition cancellation/Wait、checkout ownership/replacement 拒絕及 AddCleanup 失敗責任。
+- Git config/hooks/external diff/textconv/submodule recursion 安全限制（含 HOME／XDG 下的全域 config 不生效）、metadata command 失敗與 deadline 的錯誤包裝及 cause、partial acquisition cancellation/Wait 及 AddCleanup 失敗責任。Stdout cap 與 checkout ownership/replacement 拒絕的機械 gate 分屬上方 Runtime 與 Git repository 節。
 - Deterministic renderer 在同一 Validation Step 執行，JSON identity/files/artifact ID、symlink/collision、完整原 statement/Refs 與 Go 逐值附錄驗收一致。異 cwd／binary 離 source 的完整 embed tree 可讀。
 - Timeout 分層：縮短外部 runtime context 的 fixture 可驗 branch failure/incomplete，但不冒稱等過產品完整 Step timer；真正 Step timer 另由 engine bundled/live gate 驗。
 - 此 workflow 的真 Pi/provider/獲授權 PR E2E 另行進行，不能以 smoke-echo 或 substitute 代替。範例目標使用 `https://github.com/owner/repo/pull/123`，執行時的真目標只記 repo 外。

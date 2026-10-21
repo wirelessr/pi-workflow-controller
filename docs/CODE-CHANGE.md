@@ -135,7 +135,7 @@ CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（AD
 ### 寫入型 worktree 政策（初值）
 
 - Remote 名稱 `origin`，URL 為目標 repo 的 https 位址，不含憑證；bare repository 加 `blob:none` 的 promisor partial fetch，與 review 的做法一致。fetch 的對象是 default branch tip（review 只 fetch 指定 SHA，這是政策差異，列入 R7 矩陣）。
-- 啟用使用者的全域 git config，因為 Agent 需要其 git identity；Controller 不安裝 hooks，也不設定 credential helper，push 與開 PR 使用 Agent 既有的認證。
+- 啟用使用者的全域 git config，因為 Agent 需要其 git identity；Controller 不安裝 hooks，也不把 credential helper 寫入 config；它自己的 git 呼叫經 `runtime.Git` 逐次以 `-c` 帶入 gh 的 helper，不落地。Agent 的 push 與開 PR 使用 Agent 既有的認證。
 - Branch 與 upstream tracking 由 Agent 依 git 流程 skill 建立，Controller 不預設。
 
 ### Step requirements 常數
@@ -172,7 +172,8 @@ CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（AD
 | Controller 產出資料的 committed Ref | `Scope.Attach`（`engine/attach.go`） | 直接重用：design doc、快照、final summary；每次計入 total attempts，key 與 Step 共用命名空間 |
 | 本 workflow 專屬 embedded skills | `reportresource.ExtractFresh` | 直接重用 |
 | 私有 skill 目錄展開 | `triage.PrepareSkills` | 綁 triage 的角色名與上游比對；抽成中性入口並遷移 triage（R8） |
-| gh／git 命令執行與 bare repository 加 pinned fetch | `review/acquire.go` | 唯讀、禁用 hooks 與 git config、detached、只 fetch 指定 SHA；其 consumers 將包含 PR 狀態 adapter 與新 worktree（R7） |
+| gh／git 命令執行 | `runtime.GitHubGET`、`runtime.Git`（R7 已抽出） | 直接重用；PR 狀態 adapter 的 REST 查詢走 `GitHubGET`，GraphQL 於 C4 新增固定入口 |
+| bare repository 保留、init／remote／pinned fetch、SameFile cleanup | `internal/gitrepo`（R7 已抽出） | 直接重用；可寫 worktree 的 default branch fetch 於 C1 在此新增，不預造 |
 | GitHub PR 狀態讀取（check runs、commit statuses、review threads） | 無 | 缺口：新的唯讀 adapter，底層 gh 執行共用 R7 |
 | 可寫 worktree | 無 | 缺口：run 內由 bare repository 加 fetch default branch 建立（acquire 明文不 fetch 可變 branch，政策不同），可建 branch、commit；憑證由 Agent 既有 gh／git 認證處理，Controller 不寫入憑證相關 config（R7） |
 | 測試 host transport | `testutil/protocol` | 直接重用 |
@@ -194,7 +195,7 @@ CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（AD
 | 結果 | 回傳 `Outputs`、`Final`，並可同時回傳 branch error | 單元需把「report 與 branch error 並存」的語義明確交給呼叫者 |
 | 模型 | 內部 `model(role)` 寫死 | 維持單元內常數，由 M-model 單元變更；呼叫者不傳入 |
 | 取消與 cleanup | `AddCleanup` 註冊 checkout | 沿用，所有權不變 |
-| path／symlink、錯誤分類、穩定性、生命週期 | 目錄與 checkout 的 no-follow 與錯誤分類在 `acquire.go` 與 `check.go` | 呼叫者提供的前綴不得放寬既有路徑檢查；錯誤碼、phase 與 cleanup 時點逐項對照，不變 |
+| path／symlink、錯誤分類、穩定性、生命週期 | root 驗證、保留路徑與 SameFile cleanup 在 `internal/gitrepo`；checkout 與 snapshot 的 rooted no-follow 讀取和錯誤分類在 `check.go`、`safety.go`、`acquire.go` | 呼叫者提供的前綴不得放寬既有路徑檢查；錯誤碼、phase 與 cleanup 時點逐項對照，不變 |
 
 抽取是行為保持的 refactor：code-review 自己必須遷移到新單元，既有 workflow 與測試的契約不變，舊副本移除。這裡的「可重入」指單元能放在外層 scope 下與外層名稱共存，不是同一 Run 內重複呼叫。改變錯誤時點、會計或拒絕條件之處（例如預期 head 的核對）須明列並驗收。
 

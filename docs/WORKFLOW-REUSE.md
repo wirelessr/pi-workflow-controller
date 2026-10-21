@@ -2,7 +2,7 @@
 
 本文件落實 [專案憲法第七條](../AGENTS.md)，是開發、review 與接手的必要入口。規範共用機制的收斂順序，不新增 WorkflowBase、DSL、工具權限框架或外部 workflow config。
 
-**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，R2 已提供共用 report 判定，R3 已共用 publication 投影與 bounded-read loop，R4 已遷移指定 host transport consumers，實際入口見下表，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
+**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，R2 已提供共用 report 判定，R3 已共用 publication 投影與 bounded-read loop，R4 已遷移指定 host transport consumers，R7 已將 gh／git 命令執行接入 runtime、bare repository 機械接入 gitrepo，實際入口見下表，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
 
 ## 1. 單一規範來源與接手 gate
 
@@ -33,7 +33,7 @@
 | RPC 測試 transport | `testutil/protocol.NewHost`／`Host.Events`／`Event.Reply`／`Host.Close`、`RegisterCleanup` 及 `WriteEnvelope` | review workflow/check integration、triage RPC driver 共用 host 與 late-bound cancel/close/join；原 domain scenarios 與 Store-only 分層不變 |
 | Skill extraction／report renderer | `contract/reportresource.ExtractFresh`／embedded `pwc_report_io.py`；review `ExtractSkills`／renderer 與 triage `ExtractReport`／report Step | R5：兩個真 consumer 共用機械，業務模板／report binding 各自保留 |
 | Workflow 組合單元 | 規劃中（R6）：由 `review` 抽出的參數化、可重入普通 Go 單元 | 未實作前，新 workflow 不得呼叫或 import review 私有實作；不新增引擎層 sub-workflow 原語 |
-| gh／git 命令執行與 bare clone | 規劃中（R7）：目前在 `review/acquire.go`，process 執行將抽到 runtime，bare repository 機械另放中性 package | 未實作前，新 workflow 與 PR 狀態 adapter 不得複製或 import review 私有實作 |
+| gh／git 命令執行與 bare clone | `runtime.GitHubGET`／`runtime.Git`（`runtime/command.go`）；`gitrepo.Reserve` 與 `Repo.Init`／`AddRemote`／`FetchPinned`／`Cleanup`；review `acquire`、`Verify`、`Checkout.Cleanup` 使用 | R7 已接線：review 舊副本移除；只限固定 gh REST GET 與 git，不提供任意執行檔；唯讀政策留 review；可寫 fetch 與 GraphQL 由第一個使用它的 C 單元加入，不 import review 私有實作 |
 | 私有 skill 目錄展開 | 規劃中（R8）：目前在 `triage.PrepareSkills`，將抽成中性入口 | 未實作前，新 workflow 不得 import triage 私有實作 |
 | Contract repair 迴圈 | 規劃中（R9）：目前在 `triage.TaskSession.Run`，將抽成中性機械 | 未實作前，新 workflow 不得複製或 import triage 私有實作 |
 
@@ -130,9 +130,21 @@ R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入�
 
 **完成出口：** 原 review 仍能使用同一機械能力，triage 報告也實際接入；模板、Pin／claim、verdict及追溯資料保持各自 contracts。保留 exclusive output、大小／路徑／identity檢查與已提交 Ref 驗收。沒有第二 consumer 時保持延後，不建立 renderer plugins、installer 或新 final registry。
 
-### R7：gh／git 命令執行與 bare clone 機械共用（規劃中，尚未實作）
+### R7：gh／git 命令執行與 bare clone 機械共用
 
 服務 [CODE-CHANGE](CODE-CHANGE.md)。以其 P0 為前置，先於 R6（兩者都改 `review/acquire.go`）。
+
+**已實作接線：** runtime `command.go` 承接原 acquisition 的 process 執行：`gh`／`git` 自 PATH 啟動、每命令 20 分鐘 deadline、stdout 64 MiB 上限（cause 為 `ErrCommandOutputLimit`）、stderr 丟棄；移除繼承的 `GIT_*`、`GH_*`（保留 `GH_TOKEN`、`GH_CONFIG_DIR`）與 GitHub URL env，process group 在唯一 Wait 前 SIGKILL。錯誤仍是 untyped，字串不變，不含 argv 或 stderr。`GitHubGET` 只組固定 REST GET argv；`Git` 每次前置固定 `-c`：gh credential helper 三項，以及 `gc.auto=0`、`maintenance.auto=false`、`core.fsmonitor=false`。後三項防止 git 啟動 process-group kill 收不到的 detached 背景子孫，任何 Controller 端 git 都需要，與是否啟用全域 git config 無關。不寫入任何 git config，caller env 附在固定值之後。`internal/gitrepo` 只 import stdlib：`Reserve` 在 private root 下獨占建立 `repository.git` 與 `checkout` 並記錄 identity；`Init`／`AddRemote`／`FetchPinned` 經 caller 的 `Runner` 執行固定 git 序列，錯誤原樣回傳；`Cleanup` 以 SameFile 只刪保留的 worktree 與其 registration。Review 的唯讀 `-c` 清單、隔離 git config 的 env、detached worktree、remote 名與 URL、comments 分頁驗收、快照與 `Verify` 留在 review，`Checkout.Cleanup` 只轉送。測試的假 gh 改由 PATH wrapper 提供，仍是真 subprocess。URL userinfo 拒絕與傳輸 `-c` 未納入共用層。
+
+**明列的行為差異：**
+
+- Git argv：上述六個固定 `-c` 移到 argv 最前，review 的 `-c` 清單不再含它們，語義等價（`credential.helper` 的空值重設仍先於 gh helper；review 不另設 credential、gc、maintenance、fsmonitor 鍵）。它們由 runtime tests 釘住。Review 的 `gitOutput` 測試 seam 位在 `runtime.Git` 之前，所以 seam 收到的 argv 中這六項是消失，不是換位置。
+- 新拒絕條件：`FetchPinned` 在執行任何 git 前拒絕非 40 位小寫 hex 的 SHA、不以 `refs/` 開頭的 ref、空或以 `-` 開頭的 remote；`GitHubGET` 在啟動 gh 前拒絕空或以 `-` 開頭的 endpoint。Review 的 remote 名、`refs/review/*` 與 `repos/...` endpoint 不會觸發。Review 在呼叫前已把 metadata 的 SHA 轉成小寫，所以對現有 caller 這些條件都不會觸發，沒有行為差異。
+- 不可達路徑：沒有 repo 的 `Checkout` 字面值若呼叫 `Verify` 或快照寫入會 nil panic。Production 只經 `acquire` 建構 `Checkout`；`check_test.go` 的字面值不呼叫這兩者；`Cleanup` 對沒有 repo 的 `Checkout` 仍回 nil。
+
+**後續：** 失敗命令目前只回報 `acquisition command failed`，不帶 exit code 或 stdout。第一個需要它們的 C 單元新增 typed exit error，並明列錯誤分類的變化；R7 不預造。
+
+以下保留目標與完成條件。
 
 `review/acquire.go` 內有政策無關的機械：固定 argv 的 gh／git 命令執行、deadline、stdout 上限、stderr 不落地、憑證以 `-c` 逐次帶入而不寫入 config，以及 bare repository 加 pinned fetch（`git init --bare`、`git config remote.*`、指定 SHA 的 fetch）。其 consumers 將是 review 的 acquire、新的 PR 狀態唯讀 adapter（check runs、commit statuses、review threads）與寫入型 worktree。唯讀 PR 取得的政策（禁用 hooks 與 git config、detached）屬 review，不共用；寫入型 worktree 的政策（是否啟用 hooks 與 config）另行明列。
 

@@ -26,8 +26,7 @@ func (c *Checkout) Verify(ctx context.Context) error {
 			return fmt.Errorf("acquisition snapshot %s changed", key)
 		}
 	}
-	gitdir := filepath.Join(c.repository, "worktrees", "checkout")
-	args := []string{"--git-dir=" + gitdir, "--work-tree=" + c.worktree}
+	args := []string{"--git-dir=" + c.repo.WorktreeGitDir(), "--work-tree=" + c.repo.Worktree()}
 	head, err := c.git(ctx, append(args, "rev-parse", "HEAD")...)
 	if err != nil {
 		return err
