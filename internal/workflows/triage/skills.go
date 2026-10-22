@@ -11,15 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
-	"testing/fstest"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"pi-workflow-controller/internal/contract"
-	"pi-workflow-controller/internal/contract/reportresource"
+	"pi-workflow-controller/internal/contract/skilldir"
 	"pi-workflow-controller/internal/engine"
 )
 
@@ -31,9 +27,6 @@ const SkillsSchema = "triage.skills.v1"
 var skillDirs = []string{"core", "intake", "identity", "investigator", "steward", "validator"}
 
 const (
-	skillFileLimit    = 1 << 20
-	skillTotalLimit   = 8 << 20
-	skillFileCount    = 128
 	upstreamFileLimit = 4 << 20
 	manifestSchema    = "pwc-triage-skills/manifest/v1"
 	skillsExtractName = "triage-skills"
@@ -42,10 +35,9 @@ const (
 	gapPathLimit      = 20
 )
 
-// Deadlines and the directory opener are variables only so tests can
-// shorten them and simulate a blocking filesystem.
+// The upstream deadline and the directory opener are variables only so tests
+// can shorten it and simulate a blocking filesystem.
 var (
-	skillReadTimeout    = time.Minute
 	upstreamReadTimeout = 30 * time.Second
 	openRoot            = os.OpenRoot
 )
@@ -65,14 +57,9 @@ func (s Skills) Entry(role string) string { return filepath.Join(s.Dir, role, "S
 // SkillsRecord lists the expanded files and their digest, so a run's skill
 // version can be compared with another run's. Staleness appears only as gaps.
 type SkillsRecord struct {
-	Digest string      `json:"digest"`
-	Files  []SkillFile `json:"files"`
-	Gaps   []Gap       `json:"gaps"`
-}
-
-type SkillFile struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
+	Digest string          `json:"digest"`
+	Files  []skilldir.File `json:"files"`
+	Gaps   []Gap           `json:"gaps"`
 }
 
 // PrepareSkills copies the allow-listed skill subtrees of source into the
@@ -88,14 +75,11 @@ func PrepareSkills(ctx context.Context, r *engine.Run, scope *engine.Scope, sour
 	if !filepath.IsAbs(source) {
 		return Skills{}, fmt.Errorf("PWC_TRIAGE_SKILLS_DIR must be an absolute path, got %q", source)
 	}
-	read, err := abandonable(ctx, skillReadTimeout, fmt.Errorf("reading the skill directory took longer than %s (a cloud placeholder may not be downloaded; use a local copy)", skillReadTimeout), func(ctx context.Context) (skillSource, error) {
-		return readSkillSource(ctx, source)
-	})
+	src, err := skilldir.Read(ctx, source, skillDirs, []string{"manifest.json"})
 	if err != nil {
 		return Skills{}, err
 	}
-	files := read.files
-	upstream, err := parseManifest(read.manifest)
+	upstream, err := parseManifest(src.Sidecar("manifest.json"))
 	if err != nil {
 		return Skills{}, err
 	}
@@ -103,129 +87,16 @@ func PrepareSkills(ctx context.Context, r *engine.Run, scope *engine.Scope, sour
 	if err != nil {
 		return Skills{}, err
 	}
-	tree := fstest.MapFS{}
-	record := SkillsRecord{Files: []SkillFile{}, Gaps: gaps}
-	var lines strings.Builder
-	names := make([]string, 0, len(files))
-	for name := range files {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		sum := sha256.Sum256(files[name])
-		file := SkillFile{Path: name, SHA256: hex.EncodeToString(sum[:])}
-		record.Files = append(record.Files, file)
-		fmt.Fprintf(&lines, "%s  %s\n", file.SHA256, file.Path)
-		tree[name] = &fstest.MapFile{Data: files[name]}
-	}
-	sum := sha256.Sum256([]byte(lines.String()))
-	record.Digest = hex.EncodeToString(sum[:])
-	dir, err := reportresource.ExtractFresh(r.Dir(), skillsExtractName, tree)
+	expansion, err := src.Expand(r.Dir(), skillsExtractName)
 	if err != nil {
 		return Skills{}, err
 	}
+	record := SkillsRecord{Digest: expansion.Digest, Files: expansion.Files, Gaps: gaps}
 	ref, err := scope.Attach(ctx, engine.AttachSpec{Key: "skills", Output: contract.Spec{SchemaID: SkillsSchema}, Data: record})
 	if err != nil {
 		return Skills{}, err
 	}
-	return Skills{Dir: dir, Record: ref}, nil
-}
-
-type skillSource struct {
-	files    map[string][]byte
-	manifest []byte
-}
-
-// abandonable bounds read. A directory on a synced cloud drive can block in
-// open or read on a placeholder that is not downloaded, which no context
-// check interrupts, so read runs on its own goroutine and is abandoned at the
-// deadline. That goroutine only reads, never touches the run, and exits when
-// its blocked call returns; it may outlive the run.
-func abandonable[T any](ctx context.Context, timeout time.Duration, cause error, read func(context.Context) (T, error)) (T, error) {
-	ctx, cancel := context.WithTimeoutCause(ctx, timeout, cause)
-	defer cancel()
-	type result struct {
-		value T
-		err   error
-	}
-	done := make(chan result, 1)
-	go func() {
-		v, err := read(ctx)
-		done <- result{v, err}
-	}()
-	select {
-	case r := <-done:
-		return r.value, r.err
-	case <-ctx.Done():
-		var zero T
-		return zero, context.Cause(ctx)
-	}
-}
-
-func readSkillSource(ctx context.Context, source string) (skillSource, error) {
-	root, err := openRoot(source)
-	if err != nil {
-		return skillSource{}, fmt.Errorf("open skill directory: %w", err)
-	}
-	defer func() { _ = root.Close() }()
-	files := map[string][]byte{}
-	var total int64
-	for _, dir := range skillDirs {
-		// WalkDir follows a symlinked start directory, so check it first.
-		info, err := root.Lstat(dir)
-		if err != nil {
-			return skillSource{}, fmt.Errorf("skill directory %s: %w", dir, err)
-		}
-		if !info.IsDir() {
-			return skillSource{}, fmt.Errorf("skill entry %s is not a directory", dir)
-		}
-		err = fs.WalkDir(root.FS(), dir, func(name string, entry fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if cause := context.Cause(ctx); cause != nil {
-				return cause
-			}
-			// Editor and sync clients leave dot files; they are not skill content.
-			if name != dir && strings.HasPrefix(entry.Name(), ".") {
-				if entry.IsDir() {
-					return fs.SkipDir
-				}
-				return nil
-			}
-			if !utf8.ValidString(name) || strings.IndexFunc(name, func(r rune) bool { return !unicode.IsGraphic(r) }) >= 0 {
-				return fmt.Errorf("skill entry %q has a name that is not printable UTF-8", name)
-			}
-			switch {
-			case entry.IsDir():
-				return nil
-			case !entry.Type().IsRegular():
-				return fmt.Errorf("skill entry %s is not a regular file or directory (%s)", name, entry.Type())
-			case len(files) >= skillFileCount:
-				return fmt.Errorf("skill directory has more than %d files", skillFileCount)
-			}
-			raw, err := contract.ReadStable(ctx, root, filepath.FromSlash(name), skillFileLimit)
-			if err != nil {
-				return fmt.Errorf("skill file %s: %w", name, err)
-			}
-			if total += int64(len(raw)); total > skillTotalLimit {
-				return fmt.Errorf("skill files exceed %d bytes", skillTotalLimit)
-			}
-			files[name] = raw
-			return nil
-		})
-		if err != nil {
-			return skillSource{}, err
-		}
-		if _, ok := files[dir+"/SKILL.md"]; !ok {
-			return skillSource{}, fmt.Errorf("skill directory %s has no SKILL.md", dir)
-		}
-	}
-	manifest, err := contract.ReadStable(ctx, root, "manifest.json", skillFileLimit)
-	if err != nil {
-		return skillSource{}, fmt.Errorf("read skill manifest.json: %w", err)
-	}
-	return skillSource{files, manifest}, nil
+	return Skills{Dir: expansion.Dir, Record: ref}, nil
 }
 
 type upstreamFiles struct {
@@ -295,7 +166,7 @@ func checkUpstream(ctx context.Context, u upstreamFiles) ([]Gap, error) {
 		root = filepath.Join(home, rest)
 	}
 	type result struct{ changed, unreadable []string }
-	r, err := abandonable(ctx, upstreamReadTimeout, errors.New("upstream read timed out"), func(ctx context.Context) (result, error) {
+	r, err := skilldir.Abandon(ctx, upstreamReadTimeout, errors.New("upstream read timed out"), func(ctx context.Context) (result, error) {
 		var r result
 		dir, err := openRoot(root)
 		if err != nil {

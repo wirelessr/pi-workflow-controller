@@ -149,7 +149,7 @@ CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（AD
 | Contract | 產生者 | 下游 | 重點 |
 |---|---|---|---|
 | design doc snapshot | Controller（Attach） | 所有 stage | 輸入檔案的 exact bytes |
-| 私有 skills 記錄 | R8 的展開（Attach） | Controller | digest 與展開結果 |
+| 私有 skills 記錄 | 本 workflow 以 R8 中性入口取得的 digest 與檔案清單寫成 Attach（Attach 與其 schema 由各 workflow 自有） | Controller | digest 與展開結果 |
 | intake / readiness | A1 | A2、A3 | readiness（ready 或 gaps）、輸入 Refs、gap 清單、實作計畫、實作報告、local head |
 | pre-PR findings（兩種角色） | A2 | A3 | 與 B 的 reviewer findings 分開，不套用 PR Pin |
 | PR receipt | A3 | Controller、B、C、D、E | URL、branch、head SHA，Controller 核對 |
@@ -171,7 +171,7 @@ CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（AD
 | Shared-discovery preflight、strict close | `runtime/` | 沿用，不另寫 |
 | Controller 產出資料的 committed Ref | `Scope.Attach`（`engine/attach.go`） | 直接重用：design doc、快照、final summary；每次計入 total attempts，key 與 Step 共用命名空間 |
 | 本 workflow 專屬 embedded skills | `reportresource.ExtractFresh` | 直接重用 |
-| 私有 skill 目錄展開 | `triage.PrepareSkills` | 綁 triage 的角色名與上游比對；抽成中性入口並遷移 triage（R8） |
+| 私有 skill 目錄展開 | `internal/contract/skilldir`（R8；triage 經 `PrepareSkills` 呼叫） | R8 抽出中性的讀取與展開入口（角色集合、環境變數、Attach 與 schema 由各 workflow 宣告）。上游比對與缺口紀錄留在 triage；code-change 依第 2 節只展開並記錄 digest，不做上游比對（私有版由原 command 衍生、兩邊不自動同步），日後若要偵測過期再於 C4 評估 |
 | gh／git 命令執行 | `runtime.GitHubGET`、`runtime.Git`（R7 已抽出） | 直接重用；PR 狀態 adapter 的 REST 查詢走 `GitHubGET`，GraphQL 於 C4 新增固定入口 |
 | bare repository 保留、init／remote／pinned fetch、SameFile cleanup | `internal/gitrepo`（R7 已抽出） | 直接重用；可寫 worktree 的 default branch fetch 於 C1 在此新增，不預造 |
 | GitHub PR 狀態讀取（check runs、commit statuses、review threads） | 無 | 缺口：新的唯讀 adapter，底層 gh 執行共用 R7 |

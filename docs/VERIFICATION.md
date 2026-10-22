@@ -100,6 +100,7 @@ Gate：各必要 case 的預期行為成立，無 race；實際執行交付 bina
 - Root alias/WIP symlink 正規化後 request/Ref/renderer 一致，LaunchCWD 不變；attempt/artifact no-follow 不放寬。Exclusive rename 不覆蓋既有 published，即使空目錄也拒絕。
 - 雙 digest、identity、canonical path、file digests 都檢查；重算 manifest 不能繞過 Ref anchor。Manifest read limit 依實際生成 bytes，不能因 escaping 或 policy 算式溢位拒絕合法輸入。
 - Temp file 在 Write/Sync/Close/rename 故障時只清自有檔案；caller 的 typed cancellation 保留。用 OS filesystem fault/barrier，而非 mock read/write helpers；另以 constructor SyncFile DI 補驗 Sync 結果傳遞、descriptor Close、temp ownership 與失敗不授權，不把 synthetic 成功當成斷電 durability 證明。ID/token/attempt number 預約失敗不重用，並行 Store/attempt 不互相污染。
+- 私有 skill 目錄（[skilldir_test.go](../internal/contract/skilldir/skilldir_test.go)，真 temp filesystem 與真 FIFO）：空的或不是單一路徑段、重複的子樹宣告，以及位於子樹內的 sidecar，必須在任何 filesystem 存取前拒絕；不是單一路徑段的展開名稱在任何寫入前拒絕；非絕對路徑、缺子樹或其 `SKILL.md`、symlink 子樹／檔案／sidecar、FIFO、非 printable（含控制字元）名稱、超過單檔／總量／檔數上限必須拒絕；恰在上限、sidecar 不計入總量與檔數須接受；`.` 開頭項目整個略過，未宣告的子樹與檔案不讀入；展開依 byte order、固定小樹的寫死 digest 與 0700／0600 權限；預設期限為 1 分鐘，阻塞的開啟在期限回原訊息，外層取消回外層 cause。既有展開目錄不覆蓋由 triage 的 `TestPrepareSkillsKeepsExistingExpansion` 端到端驗證。
 
 ### Engine／persistence／finalization
 

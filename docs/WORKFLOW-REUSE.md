@@ -35,10 +35,10 @@
 | Workflow 組合單元 | `review.Run(ctx, r, scope, name, prURL)`；`code-review` 的 `execute` 以 `r.Root()`、`"review"` 呼叫它 | R6 已接線：舊內聯副本移除；呼叫者只用 `review.Run`，不 import review 其他業務型別或 helper；不新增引擎層 sub-workflow 原語。預期 head 與外層准入留 C3 |
 | Node TLS 前置檢查 | `runtime.CheckNodeTLS`（`runtime/preflight.go`） | R6 已接線：需要此檢查的 workflow 在第一個副作用前呼叫（目前為 code-review；code-change 是規劃中的第二個 consumer）；不屬於 Pi 啟動，triage 與 smoke-echo 不呼叫 |
 | gh／git 命令執行與 bare clone | `runtime.GitHubGET`／`runtime.Git`（`runtime/command.go`）；`gitrepo.Reserve` 與 `Repo.Init`／`AddRemote`／`FetchPinned`／`Cleanup`；review `acquire`、`Verify`、`Checkout.Cleanup` 使用 | R7 已接線：review 舊副本移除；只限固定 gh REST GET 與 git，不提供任意執行檔；唯讀政策留 review；可寫 fetch 與 GraphQL 由第一個使用它的 C 單元加入，不 import review 私有實作 |
-| 私有 skill 目錄展開 | 規劃中（R8）：目前在 `triage.PrepareSkills`，將抽成中性入口 | 未實作前，新 workflow 不得 import triage 私有實作 |
+| 私有 skill 目錄展開 | `contract/skilldir` 的 `Read`／`Source.Expand`／`Abandon`；triage `PrepareSkills` 使用 | R8 已接線：triage 舊內聯副本移除；子樹清單、環境變數、展開目錄名、Attach 與 record schema 由各 workflow 宣告；manifest 與上游比對留在 triage |
 | Contract repair 迴圈 | `engine.Scope.StepWithRepair`；triage `TaskSession.Run` 使用 | R9 已接線：triage 舊內聯迴圈移除；規則見該方法的 doc comment |
 
-表中的 triage consumers 指已刪除的舊版 Planner triage；共用入口仍由其他 consumers 使用。v2（`internal/workflows/triage`）目前使用 `engine.ReadContract`＋`contract.DecodePublication`（`readAccepted`、citation 檢查）、`contract.ReadBounded`（`rawFile`，與舊版相同的二次讀取 adapter）、`reportresource.ExtractFresh`（`PrepareSkills`）、`contract.ReadStable`，以及 `Scope.Attach`、`Scope.StepWithRepair`、`StepSpec.Observe`。上述相對路徑均位於 `internal/`。角色模型、PR Pin、code-location Evidence、investigation Ref/file Evidence、Source status 及 verdict 不屬於通用登記項，保留 workflow-specific 語義。
+表中的 triage consumers 指已刪除的舊版 Planner triage；共用入口仍由其他 consumers 使用。v2（`internal/workflows/triage`）目前使用 `engine.ReadContract`＋`contract.DecodePublication`（`readAccepted`、citation 檢查）、`contract.ReadBounded`（`rawFile`，與舊版相同的二次讀取 adapter）、`reportresource.ExtractFresh`（`runReport`）、`skilldir.Read`／`Source.Expand`（`PrepareSkills`）、`contract.ReadStable`＋`skilldir.Abandon`（上游比對），以及 `Scope.Attach`、`Scope.StepWithRepair`、`StepSpec.Observe`。上述相對路徑均位於 `internal/`。角色模型、PR Pin、code-location Evidence、investigation Ref/file Evidence、Source status 及 verdict 不屬於通用登記項，保留 workflow-specific 語義。
 
 ## 3. 共用 refactor 單元與順序
 
@@ -186,11 +186,32 @@ R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入�
 
 **完成出口：** `code-review` 實際使用新單元，舊內聯副本移除；既有 workflow 契約與測試不變；新增可與外層名稱共存、巢狀 scope 與外層限額的回歸。以 code-change 組合該單元的接線在其 C3 單元驗收，不在本單元預造。
 
-### R8：私有 skill 目錄展開中性化（規劃中，尚未實作）
+### R8：私有 skill 目錄展開中性化
 
 服務 [CODE-CHANGE](CODE-CHANGE.md)。以其 P0 為前置。
 
-`triage.PrepareSkills` 目前綁 triage 的角色名與上游比對。新 workflow 不得 import triage 的私有實作，所以先核對其職責：讀來源（`contract.ReadStable`）、展開到 run 內（`reportresource.ExtractFresh`）、記錄 digest、排除同步材料，以及 triage 專屬的上游比對與缺口。共用機械放 contract 責任層（`reportresource` 或相鄰的中性 package），角色名與環境變數由各 workflow 宣告。
+**已實作接線：** 新 package `internal/contract/skilldir`（只 import `contract`、`contract/reportresource`，不 import engine 或 runtime）承接原本在 `triage.PrepareSkills` 內聯的來源讀取、放棄式期限與展開。`Read(ctx, source, dirs, sidecars)` 在同一次開啟、同一個 1 分鐘期限內讀 caller 宣告的子樹與 sidecar 檔；`Source.Expand(runDir, name)` 計算 digest 並以 `reportresource.ExtractFresh` 展開；`Abandon` 是原放棄式期限，triage 的上游比對也使用它。限額固定為單檔 1 MiB、子樹檔案總量 8 MiB、128 檔，不由 caller 參數化。讀取規則與 digest 公式以這些宣告的 doc comment 為準，本文不重述。Triage 的 `PrepareSkills` 簽名、兩句前置錯誤字串、子樹清單、manifest 解析與上游比對、gap ID／文字、展開目錄名、Attach key 與 `triage.skills.v1` schema 不變；`Read` 與 `Expand` 分開，使 manifest 解析與上游比對仍在展開之前，被拒的來源不展開、不產生 record。`SkillsRecord.Files` 的元素型別改為 `skilldir.File`，JSON 形狀不變。Code-change 不使用 sidecar，也不做上游比對，依據是 [CODE-CHANGE](CODE-CHANGE.md) 第 2 節對私有 skill 只記錄展開與 digest；它的子樹清單、環境變數、展開目錄名與 record schema 在 C4 落地。
+
+**明列的行為差異：**
+
+- 新拒絕條件只對新呼叫者，都在任何 filesystem 存取前：`Read` 拒絕非絕對路徑（含空字串）、空的 `dirs`、不是單一路徑段的 dir（空字串、`.`、`..` 或含分隔符）、重複的 dir，以及位於某個宣告 dir 之內的 sidecar（因此 sidecar 不會同時被當 sidecar 讀又被展開）；`Expand` 拒絕不是單一路徑段的 `name`，在任何寫入前。Triage 先以原字串拒絕空值與相對路徑，其固定的六個子樹、根目錄的 `manifest.json` 與 `triage-skills` 都不觸發其他新條件。
+- 其他錯誤字串、期限與訊息、取消、限額與計數、dot 項目略過、名稱檢查、regular-only、每子樹 `SKILL.md`、`ReadStable` 穩定讀取、錯誤分類（仍不包成 `contract.Error`）、錯誤時點與 Attach 會計不變。
+- Ownership 不變：展開仍由 `ExtractFresh` 保留新目錄，既有目錄不覆蓋；展開中途失敗時，部分展開的目錄維持保留，不刪除。
+- 生命週期不變：被放棄的讀取 goroutine 在阻塞呼叫返回前不結束，可能比 run 活得久。
+- 測試面：來源的讀取規則、限額、名稱與 FIFO 拒絕、逾時（含 1 分鐘預設值）與外層取消的測試在 `skilldir`；triage 只保留一個代表性的來源拒絕（缺角色目錄，端到端驗證不展開、不產生 record、run 為 Failed）、自己的兩句前置字串、manifest 與上游比對的 cases，以及上游的外層取消。
+
+**剩餘缺口：**
+
+- 走訪期間的取消檢查只讓被放棄的讀取 goroutine 提早結束，對呼叫者不可觀察，沒有測試覆蓋（遷移前亦然）。
+- 整個目錄沒有一致性快照，檔案之間與檔案和 sidecar 之間不保證同一時點。
+- 來源內的 hard link 不偵測，當作一般檔案複製。
+- 展開的檔案一律為 0600，scripts 失去執行位元。
+- `Expand` 不接 ctx，展開中不檢查取消；需要時由 caller 在呼叫前檢查（triage 沒有另加此檢查，與遷移前相同）。
+- 阻塞的開啟（FIFO 或未下載的雲端 placeholder）在被釋放前，持有被放棄的 goroutine、其 file descriptor 與已讀入的記憶體（至多到讀取上限）。
+
+以下保留目標與完成條件。
+
+R8 前，`triage.PrepareSkills` 綁 triage 的角色名與上游比對。新 workflow 不得 import triage 的私有實作，所以先核對其職責：讀來源（`contract.ReadStable`）、展開到 run 內（`reportresource.ExtractFresh`）、記錄 digest、排除同步材料，以及 triage 專屬的上游比對與缺口。共用機械放 contract 責任層（`reportresource` 或相鄰的中性 package），角色名與環境變數由各 workflow 宣告。
 
 - 差異矩陣須逐項列：取消、錯誤分類、ownership、path／symlink、限額（檔案數與大小）、穩定性、生命週期，並決定 manifest 必填與上游比對屬中性還是 triage 專屬；code-change 的私有 skill 同樣由原 command 衍生，是否需要上游比對也要決定。
 - 不得默默套用更強或更弱的檢查，triage 保留原錯誤字串、期限與缺口語義。
@@ -228,7 +249,7 @@ R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入�
 
 ## 4. 後續 triage milestones 的依賴鎖
 
-> **現況：**以下 M1–M7 是舊版 Planner triage 的歷史接線；該 workflow 未通過 alpha，已自 registry 移除，程式碼也已刪除（可從版本歷史取得）。v2 以新 package 改寫；v2 的共用項與相依於落地時更新本文件，下表不再是施工順序。目前 `internal/workflows/triage` 已承接 typed recovery（`Recoverable`、`ConfirmTaskRecovery`、`RetryInputs` 等）與 fresh-session task Step（`RunTaskStep`／`TaskSession.Close`），錯誤字串不變；S0（caller prompt 以 Attach 記錄、intake、facts、獨立 fact-check validator、未通過的事實以 Controller 記錄降級為缺口）已在 `runS0`，intake 驗收移植自舊版初始 intake，去掉 revision 欄位。外部 skill 目錄的展開（`triage.PrepareSkills`）以 `contract.ReadStable`（Store 既有的 no-symlink／regular-file／NONBLOCK／大小上限／讀取期間穩定檢查，僅新增匯出）讀入記憶體，再交給既有 `reportresource.ExtractFresh`（只展開六個角色子樹，略過 `.` 開頭的項目，每個角色必須有 `SKILL.md`；讀來源與比對上游各有期限，前者逾時為執行失敗，後者逾時記為未檢查的缺口）；`ExtractFresh` 本身與其 embed consumers 不變。`runtime/preflight.go` 的 discovery 讀取不遷移：它在 runtime 層（不 import contract）、讀的是他人 process 寫的 discovery 檔，只做唯讀判斷，政策是最後一段 NOFOLLOW、1 MiB、不需要讀取期間穩定檢查，與 run 內複製的信任邊界不同。
+> **現況：**以下 M1–M7 是舊版 Planner triage 的歷史接線；該 workflow 未通過 alpha，已自 registry 移除，程式碼也已刪除（可從版本歷史取得）。v2 以新 package 改寫；v2 的共用項與相依於落地時更新本文件，下表不再是施工順序。目前 `internal/workflows/triage` 已承接 typed recovery（`Recoverable`、`ConfirmTaskRecovery`、`RetryInputs` 等）與 fresh-session task Step（`RunTaskStep`／`TaskSession.Close`），錯誤字串不變；S0（caller prompt 以 Attach 記錄、intake、facts、獨立 fact-check validator、未通過的事實以 Controller 記錄降級為缺口）已在 `runS0`，intake 驗收移植自舊版初始 intake，去掉 revision 欄位。外部 skill 目錄的展開（`triage.PrepareSkills`）經 R8 的 `contract/skilldir`，以 `contract.ReadStable`（Store 既有的 no-symlink／regular-file／NONBLOCK／大小上限／讀取期間穩定檢查，僅新增匯出）讀入記憶體，再交給既有 `reportresource.ExtractFresh`（triage 只展開六個角色子樹，略過 `.` 開頭的項目，每個角色必須有 `SKILL.md`；讀來源與比對上游各有期限，前者逾時為執行失敗，後者逾時記為未檢查的缺口）；`ExtractFresh` 本身與其 embed consumers 不變。`runtime/preflight.go` 的 discovery 讀取不遷移：它在 runtime 層（不 import contract）、讀的是他人 process 寫的 discovery 檔，只做唯讀判斷，政策是最後一段 NOFOLLOW、1 MiB、不需要讀取期間穩定檢查，與 run 內複製的信任邊界不同。
 
 R1–R4 的匿名驗收與 consumer 遷移完成後才啟動 M1，不因某個 helper 尚未共用就在 triage 寫私有替代品。Live 驗收是 M7 的獨立 gate，不阻止已授權的匿名實作，也不因匿名通過被解除。
 
