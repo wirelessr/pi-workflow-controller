@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -164,11 +165,13 @@ type recordedGit struct {
 	failAt  int
 	err     error
 	outputs []string
+	args    [][]string
 }
 
-func (g *recordedGit) run(_ context.Context, _ ...string) ([]byte, error) {
+func (g *recordedGit) run(_ context.Context, args ...string) ([]byte, error) {
 	i := g.calls
 	g.calls++
+	g.args = append(g.args, append([]string(nil), args...))
 	if g.err != nil && i == g.failAt {
 		return []byte("partial output"), g.err
 	}
@@ -225,6 +228,67 @@ func TestRepoGitSequences(t *testing.T) {
 			}
 			if git.calls != tc.calls {
 				t.Fatalf("git calls: %d, want %d", git.calls, tc.calls)
+			}
+		})
+	}
+}
+
+// No other fixture pins FetchBranch's argv, so the successful sequence is pinned here.
+func TestFetchBranchSequence(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	cause := fmt.Errorf("git step: %w", errors.New("external git failure"))
+	success := [][]string{
+		{"check-ref-format", "refs/heads/main"},
+		{"fetch", "--filter=blob:none", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "origin", "refs/heads/main:refs/remotes/origin/main"},
+		{"rev-parse", "--verify", "refs/remotes/origin/main^{commit}"},
+	}
+	for _, tc := range []struct {
+		name, remote, branch, ref string
+		git                       recordedGit
+		calls                     int
+		want                      string
+	}{
+		{"success", "origin", "main", "refs/remotes/origin/main", recordedGit{outputs: []string{"", "", sha + "\n"}}, 3, ""},
+		{"ref-format-error", "origin", "main", "refs/remotes/origin/main", recordedGit{failAt: 0, err: cause}, 1, ""},
+		{"fetch-error", "origin", "main", "refs/remotes/origin/main", recordedGit{failAt: 1, err: cause}, 2, ""},
+		{"verify-error", "origin", "main", "refs/remotes/origin/main", recordedGit{failAt: 2, err: cause}, 3, ""},
+		{"short-result", "origin", "main", "refs/remotes/origin/main", recordedGit{outputs: []string{"", "", sha[:39] + "\n"}}, 3, "fetched branch is not a full commit SHA"},
+		{"uppercase-result", "origin", "main", "refs/remotes/origin/main", recordedGit{outputs: []string{"", "", strings.Repeat("A", 40) + "\n"}}, 3, "fetched branch is not a full commit SHA"},
+		{"empty-remote", "", "main", "refs/remotes/origin/main", recordedGit{}, 0, "branch fetch remote must be a name"},
+		{"option-remote", "--upload-pack=/bin/false", "main", "refs/remotes/origin/main", recordedGit{}, 0, "branch fetch remote must be a name"},
+		{"empty-branch", "origin", "", "refs/remotes/origin/main", recordedGit{}, 0, "branch fetch branch must be a name"},
+		{"option-branch", "origin", "--upload-pack=/bin/false", "refs/remotes/origin/main", recordedGit{}, 0, "branch fetch branch must be a name"},
+		{"ref-outside-refs", "origin", "main", "remotes/origin/main", recordedGit{}, 0, "branch fetch ref must start with refs/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := Reserve(privateDir(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			git := tc.git
+			got, err := r.FetchBranch(context.Background(), git.run, tc.remote, tc.branch, tc.ref)
+			switch {
+			case tc.git.err != nil:
+				// The Runner error is returned as-is, never re-wrapped.
+				if err != tc.git.err || got != "" {
+					t.Fatalf("got %q %v, want the Runner error itself", got, err)
+				}
+			case tc.want != "":
+				if err == nil || err.Error() != tc.want || got != "" {
+					t.Fatalf("got %q %v, want %q", got, err, tc.want)
+				}
+			default:
+				if err != nil || got != sha {
+					t.Fatalf("got %q %v, want %s", got, err, sha)
+				}
+			}
+			if git.calls != tc.calls {
+				t.Fatalf("git calls: %d, want %d", git.calls, tc.calls)
+			}
+			for i, args := range git.args {
+				if !reflect.DeepEqual(args, success[i]) {
+					t.Fatalf("git call %d: %q, want %q", i, args, success[i])
+				}
 			}
 		})
 	}
@@ -415,4 +479,78 @@ func TestRepoCleanup(t *testing.T) {
 		requireMissing(t, f.repo.WorktreeGitDir())
 		f.requireHistory(t)
 	})
+}
+
+func TestFetchBranchRealGit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	source := privateDir(t)
+	sourceGit := func(args ...string) string {
+		t.Helper()
+		out, err := runGit(ctx, source, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	sourceGit("init", "--template=", "-b", "main")
+	writeFile(t, filepath.Join(source, "tracked.txt"), "first\n")
+	sourceGit("add", "tracked.txt")
+	sourceGit("commit", "-m", "first")
+	first := sourceGit("rev-parse", "HEAD")
+	repo, err := Reserve(privateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls [][]string
+	git := func(ctx context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		return runGit(ctx, repo.Root(), append([]string{"--git-dir=" + repo.Dir()}, args...)...)
+	}
+	if err := repo.Init(ctx, git); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AddRemote(ctx, git, "origin", "file://"+source); err != nil {
+		t.Fatal(err)
+	}
+	refOf := func(ref string) string {
+		t.Helper()
+		out, err := runGit(ctx, repo.Root(), "--git-dir="+repo.Dir(), "rev-parse", "--verify", "--quiet", ref)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if got, err := repo.FetchBranch(ctx, git, "origin", "main", "refs/remotes/origin/main"); err != nil || got != first || refOf("refs/remotes/origin/main") != first {
+		t.Fatalf("first fetch: %q %v", got, err)
+	}
+	writeFile(t, filepath.Join(source, "tracked.txt"), "second\n")
+	sourceGit("commit", "-am", "second")
+	second := sourceGit("rev-parse", "HEAD")
+	if got, err := repo.FetchBranch(ctx, git, "origin", "main", "refs/remotes/origin/main"); err != nil || got != second || refOf("refs/remotes/origin/main") != second {
+		t.Fatalf("tip was not refetched: %q %v, want %s", got, err, second)
+	}
+	t.Run("missing-branch", func(t *testing.T) {
+		if got, err := repo.FetchBranch(ctx, git, "origin", "absent", "refs/remotes/origin/absent"); err == nil || got != "" || refOf("refs/remotes/origin/absent") != "" {
+			t.Fatalf("missing branch fetched: %q %v", got, err)
+		}
+	})
+	// Git, not a local pattern, decides ref-name validity; a refspec in the
+	// branch name never reaches fetch.
+	for _, tc := range []struct{ name, branch string }{
+		{"refspec", "main:refs/heads/injected"}, {"dot-dot", "main..other"}, {"glob", "ma*n"}, {"reflog", "main@{1}"}, {"lock", "main.lock"},
+	} {
+		t.Run("invalid-"+tc.name, func(t *testing.T) {
+			calls = nil
+			if got, err := repo.FetchBranch(ctx, git, "origin", tc.branch, "refs/remotes/origin/x"); err == nil || got != "" {
+				t.Fatalf("invalid branch accepted: %q %v", got, err)
+			}
+			if len(calls) != 1 || calls[0][0] != "check-ref-format" {
+				t.Fatalf("git ran past the ref-name check: %q", calls)
+			}
+			if refOf("refs/heads/injected") != "" || refOf("refs/remotes/origin/x") != "" {
+				t.Fatal("invalid branch wrote a ref")
+			}
+		})
+	}
 }

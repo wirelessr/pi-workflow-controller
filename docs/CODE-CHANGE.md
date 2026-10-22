@@ -1,6 +1,6 @@
 # Code change workflow 規劃（草案）
 
-**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；其餘單元依第 8 節的順序施工。`code-change` 只是暫用名稱。
+**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree，未註冊）已落地；其餘單元依第 8 節的順序施工。`code-change` 只是暫用名稱。
 
 Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，經實作、發 PR 前審閱、發 PR、PR 後深度審閱、自行 triage 修正、收斂 PR，到最後清理，交付一個已開出的 PR。這是第一個會寫本機 repository 並對外部系統產生副作用的 workflow；現有 workflows 都只讀或只寫自有 artifacts。
 
@@ -91,7 +91,7 @@ Controller 可以：依機械定義的狀態條件等待（只看是否進入終
 | D 每輪 | 收斂者 | fresh | 同 A1 | 中 |
 | E | 清理者 | fresh | 同 A1 | 輕 |
 
-層級是提案。審閱角色與寫入角色都不把 CWD 放在 worktree 或使用者的日常 checkout，而是沿用既有的部署預設 `PWC_PI_CWD`（目前 triage 使用的同一個目錄，其下即全域規則所指的相鄰 repos 所在處），不另設 `Role.CWD`。理由：(1) 操作者的全域規則依「CWD 位於該目錄之下」才觸發跨 repo 的相鄰探索；(2) 目標 repo 自己的 `AGENTS.md`／`CLAUDE.md`、project skills 與 extensions 不會被載入，規則只來自全域與本 workflow 的 embedded／私有 skills；(3) 若 CWD 是使用者的日常 checkout，相對路徑的編輯會改到真實 repo 而不是 worktree，所以不用。Agent 以絕對路徑讀寫 worktree，並用 `git -C` 或在命令內 `cd` 操作；其他相鄰 repo 只讀。`PWC_PI_CWD` 未設定時 fallback 是啟動 Controller 時的目錄，可能就是某個真實 checkout，所以 code-change 在任何 Pi 啟動之前檢查它已設定且為絕對路徑，否則以輸入錯誤終止。
+層級是提案。審閱角色與寫入角色都不把 CWD 放在 worktree 或使用者的日常 checkout，而是沿用既有的部署預設 `PWC_PI_CWD`（目前 triage 使用的同一個目錄，其下即全域規則所指的相鄰 repos 所在處），不另設 `Role.CWD` 的目錄概念；C1b 把同一個值明設為 A1 的 `Role.CWD`，使檢查的值與實際使用的值相同。理由：(1) 操作者的全域規則依「CWD 位於該目錄之下」才觸發跨 repo 的相鄰探索；(2) 目標 repo 自己的 `AGENTS.md`／`CLAUDE.md`、project skills 與 extensions 不會被載入，規則只來自全域與本 workflow 的 embedded／私有 skills；(3) 若 CWD 是使用者的日常 checkout，相對路徑的編輯會改到真實 repo 而不是 worktree，所以不用。Agent 以絕對路徑讀寫 worktree，並用 `git -C` 或在命令內 `cd` 操作；其他相鄰 repo 只讀。`PWC_PI_CWD` 未設定時 fallback 是啟動 Controller 時的目錄，可能就是某個真實 checkout，所以 code-change 在任何 Pi 啟動之前檢查它已設定且為絕對路徑，否則以輸入錯誤終止。
 
 ### 失敗與不完整的區分
 
@@ -105,7 +105,11 @@ Controller 可以：依機械定義的狀態條件等待（只看是否進入終
 
 ## 4. 輸入、權限與授權範圍
 
-CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（ADDING 指南的既有限制）。因此目標 repo 作為 Prompt 的一部分：
+CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（ADDING 指南的既有限制）。因此目標 repo 作為 Prompt 的一部分。
+
+Controller 在任何網路呼叫之前依序檢查：Prompt 格式（第一段為 `owner/name`，其餘為路徑）、`PWC_PI_CWD` 已設定、為絕對路徑且指向既有目錄（可為 symlink）、Node TLS 驗證未停用、design doc 可讀。Design doc 路徑為絕對路徑時照用，相對路徑依啟動 Controller 的目錄做字面解析（先 Clean 再開啟），不展開 `~`；上層目錄可以是 symlink，檔案本身必須是 regular file、不得是 symlink、至多 1 MiB，讀取期間不得變動。Repo GET 回傳的 `full_name` 與輸入不分大小寫不同即拒絕（含改名與轉移，不追隨新名稱）；`permissions.push` 缺少或不為 true 即拒絕（這是 gh 認證身分在該 repo 的角色權限，不證明 Agent 之後使用的認證也能 push）；不檢查 archived；`default_branch` 是否為合法 ref 由 fetch 前的檢查判定，所以非法值會在 bare repository 建立之後才被拒絕。以上失敗都發生在建立 worktree 之前或由 Controller 自行移除半成品。
+
+Prompt 格式：
 
 ```
 <owner/name> <design doc 檔案路徑>
@@ -135,7 +139,8 @@ CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（AD
 ### 寫入型 worktree 政策（初值）
 
 - Remote 名稱 `origin`，URL 為目標 repo 的 https 位址，不含憑證；bare repository 加 `blob:none` 的 promisor partial fetch，與 review 的做法一致。fetch 的對象是 default branch tip（review 只 fetch 指定 SHA，這是政策差異，列入 R7 矩陣）。
-- 啟用使用者的全域 git config，因為 Agent 需要其 git identity；Controller 不安裝 hooks，也不把 credential helper 寫入 config；它自己的 git 呼叫經 `runtime.Git` 逐次以 `-c` 帶入 gh 的 helper，不落地。Agent 的 push 與開 PR 使用 Agent 既有的認證。
+- Controller 自己的 git 呼叫停用 system／global config 與 attributes、`core.hooksPath=/dev/null`，並帶與 review 相同的傳輸與 checkout 保護（不跟隨 redirect、protocol 白名單、不遞迴 submodule、不 sparse、不轉換行尾），所以使用者的 hooks、URL 改寫與 filters 不在 Controller 建立 worktree 時執行；共用的隔離環境來自 runtime。Controller 不寫入任何 git config 的 credential、url、hooks 或 identity 設定，也不把 credential helper 寫入 config，它自己的 git 呼叫經 `runtime.Git` 逐次以 `-c` 帶入 gh 的 helper，不落地。Agent 的 git 照常使用使用者的全域 git config（含 identity），push 與開 PR 使用 Agent 既有的認證。
+- Controller 設定 `origin` 的一般 tracking refspec 與 `origin/HEAD`，使 bare＋worktree 對 Agent 的 git 流程與一般 clone 相同；worktree 以 detached 方式建立於 fetch 當下的 default branch tip（記錄於 input 的 `base_sha`）。交給 Agent 之後，repository 的 config 由 Agent 寫入，Controller 之後的 git 只執行不讀可執行 config 的 plumbing（`rev-parse`、`for-each-ref`、`cat-file`），且讀 worktree 狀態只經 `WorktreeGitDir()`，不經 Agent 可改寫的 `checkout/.git`。
 - Branch 與 upstream tracking 由 Agent 依 git 流程 skill 建立，Controller 不預設。
 
 ### Step requirements 常數
@@ -173,10 +178,10 @@ CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（AD
 | 本 workflow 專屬 embedded skills | `reportresource.ExtractFresh` | 直接重用 |
 | 私有 skill 目錄展開 | `internal/contract/skilldir`（R8；triage 經 `PrepareSkills` 呼叫） | R8 抽出中性的讀取與展開入口（角色集合、環境變數、Attach 與 schema 由各 workflow 宣告）。上游比對與缺口紀錄留在 triage；code-change 依第 2 節只展開並記錄 digest，不做上游比對（私有版由原 command 衍生、兩邊不自動同步），日後若要偵測過期再於 C4 評估 |
 | gh／git 命令執行 | `runtime.GitHubGET`、`runtime.Git`（R7 已抽出） | 直接重用；PR 狀態 adapter 的 REST 查詢走 `GitHubGET`，GraphQL 於 C4 新增固定入口 |
-| bare repository 保留、init／remote／pinned fetch、SameFile cleanup | `internal/gitrepo`（R7 已抽出） | 直接重用；可寫 worktree 的 default branch fetch 於 C1 在此新增，不預造 |
+| bare repository 保留、init／remote／pinned fetch、SameFile cleanup | `internal/gitrepo`（R7 已抽出） | 直接重用；可寫 worktree 的 default branch fetch 已於 C1a 以 `Repo.FetchBranch` 加入（review 不呼叫） |
 | GitHub PR 狀態讀取（check runs、commit statuses、review threads） | 無 | 缺口：新的唯讀 adapter，底層 gh 執行共用 R7 |
-| 可寫 worktree | 無 | 缺口：run 內由 bare repository 加 fetch default branch 建立（acquire 明文不 fetch 可變 branch，政策不同），可建 branch、commit；憑證由 Agent 既有 gh／git 認證處理，Controller 不寫入憑證相關 config（R7） |
-| 測試 host transport | `testutil/protocol` | 直接重用 |
+| 可寫 worktree | `internal/workflows/codechange`（`createWorktree`） | C1a 已實作：run 內 bare repository 加 `FetchBranch`、detached worktree；註冊前失敗自行移除，註冊後預設保留，只有 workflow 設定移除旗標時才清理（C2 起設定）；憑證由 Agent 既有 gh／git 認證處理，Controller 不寫入憑證相關 config |
+| 測試 host transport | `testutil/protocol`；gh／git 的 PATH wrapper 為 `testutil/pathexec`（runtime、review、code-change 共用） | 直接重用 |
 | Contract repair 迴圈 | `engine.Scope.StepWithRepair`（`engine/step.go`，R9 已抽出；triage 經 `TaskSession.Run` 呼叫，`repairBudget = 2` 留在 triage） | 已抽成 `engine.Scope.StepWithRepair`（R9），triage 已遷移；本 workflow 的寫入型 Step 直接使用，不複製。Feedback 的 Refs 在 repair 時保留 |
 | Capacity handoff | triage package | 不需要：D 每輪 fresh session，context 以輪切分 |
 
@@ -219,7 +224,8 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 | R9 | contract repair 迴圈的中性化：由 `triage.TaskSession.Run` 抽出不綁 triage 角色名與 recovery 型別的核心，triage 遷移 | P0 |
 | R8 | 私有 skill 目錄展開中性化：由 `triage.PrepareSkills` 抽出不綁角色名的入口，triage 遷移 | P0 |
 | M-model | 更換 review 預設模型與文件、測試 | R6 |
-| C1 | `code-change` 骨架：輸入解析、權限與 TLS 前置檢查、worktree、receipt 核對、A1 與 gap 出口 | P0、R7、R9 |
+| C1a | `code-change` 骨架的 Controller 前置：Prompt 解析、`PWC_PI_CWD` 與 TLS 檢查、design doc snapshot、repo GET（identity 與 push 權限）、`gitrepo.FetchBranch`、可寫 worktree 與預設保留的 cleanup、`input` Attach；不啟動 Pi、不註冊，暫時以 `input` 為 Final | P0、R7 |
+| C1b | A1、receipt 核對（含只經 `WorktreeGitDir()` 讀 worktree HEAD）、gap 出口、repair 派送、registry／CLI 註冊（含 `Definitions` 的 `piCWD` 接線，A1 的 `Role.CWD` 明設為同一個值，並於任何副作用前確認它是目錄） | C1a、R9 |
 | C2 | A2 平行審閱與 A3 更正加發佈 | C1 |
 | C3 | 接 B，並加上 C 的 triage 與修正。含 B 的預期 head 參數與核對（第 7 節，連帶修改 `review.Run` 簽名與 `code-review` 的呼叫）；呼叫 `review.Run` 時外層不得有 live session，且須把單元回傳的 Outputs 以自己的名稱重映射再併入；Final 為 nil 時結束 Run | C2、R6 |
 | C4 | D 的 Controller 迴圈、PR 狀態 adapter、每輪私有 skill、E、品質掃描 skipped 語義 | C3、R7、R8 |
@@ -255,6 +261,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 - **多樣性下降。** 見第 7 節。
 - **只模擬或單元測試無法證明的事：** 模型能否遵循 schema、私有 skill 的單輪版能否在無人狀態下完成、品質掃描 skip 的實際行為、bot 靜置窗口、Agent 在 CWD 之外操作 worktree 時，各工具（git、build、test、專案內的相對路徑設定）的實際行為。皆列為 live 缺口。
 - **公開 repo。** Repo 內的 requirements 與文件只用通用描述；私有 skill 路徑與內容留在 repo 外。
+- **Prepare 的耗時與磁碟。** Controller 前置（GET、fetch、worktree add）各有 20 分鐘 deadline，最壞約一小時以上，不在准入範圍。每個 run 在 run 目錄永久保留含 default branch tip 全部 blob 的 bare repository，非成功路徑還保留整個 worktree，沒有大小上限也沒有磁碟 preflight。成功路徑移除大型 worktree 與 session 關閉共用 15 秒 cleanup 預算，逾時會被記為 cleanup failure；設定移除旗標的單元（C2）須決定處理方式，不默默改 engine 的 timeout。移除旗標只在 workflow 確定成功的最終返回處設定；之後 engine 仍可能因取消或 run deadline 判為 Cancelled／TimedOut 並移除 worktree，這是承認的殘餘窗口。
 
 ## 11. 初值與待核對
 

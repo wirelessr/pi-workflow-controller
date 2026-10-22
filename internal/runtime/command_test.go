@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"pi-workflow-controller/internal/testutil/pathexec"
 )
 
 // The real test binary is the external command; tests select its behavior with
@@ -25,13 +27,7 @@ func TestCommandHelper(t *testing.T) {
 	if mode == "" {
 		return
 	}
-	args := os.Args
-	for len(args) > 0 && args[0] != "--" {
-		args = args[1:]
-	}
-	if len(args) > 0 {
-		args = args[1:]
-	}
+	args, _ := pathexec.Args()
 	dir := os.Getenv("PWC_COMMAND_DIR")
 	// An attached descendant holds the output pipes open; a detached one does not.
 	sleeper := func(attached bool) *exec.Cmd {
@@ -108,21 +104,6 @@ func newCommandFixture(t *testing.T, mode string) commandFixture {
 
 func (f commandFixture) run(ctx context.Context, env ...string) ([]byte, error) {
 	return command(ctx, f.dir, f.exe, []string{"-test.run=^TestCommandHelper$", "--", "fixed", "argv"}, env)
-}
-
-// onPath shadows name on PATH with a wrapper that execs the helper binary,
-// so the fixed gh/git entry points still run a real subprocess.
-func (f commandFixture) onPath(t *testing.T, name string) {
-	t.Helper()
-	if strings.Contains(f.exe, "'") {
-		t.Fatalf("test binary path cannot be quoted: %s", f.exe)
-	}
-	bin := t.TempDir()
-	script := "#!/bin/sh\nexec '" + f.exe + "' -test.run='^TestCommandHelper$' -- \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func (f commandFixture) waitPID(t *testing.T, done <-chan error) int {
@@ -250,7 +231,7 @@ func TestCommandFixedEntryPoints(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newCommandFixture(t, "echo")
-			f.onPath(t, tc.executable)
+			pathexec.Install(t, tc.executable, "TestCommandHelper")
 			raw, err := tc.run(context.Background(), f.dir)
 			echo := decodeEcho(t, raw, err)
 			if !reflect.DeepEqual(echo.Args, tc.want) {
@@ -279,7 +260,7 @@ func TestGitHubGETRejectsEndpoint(t *testing.T) {
 	for _, endpoint := range []string{"", "-X", "--method=POST"} {
 		t.Run(endpoint, func(t *testing.T) {
 			f := newCommandFixture(t, "sentinel")
-			f.onPath(t, "gh")
+			pathexec.Install(t, "gh", "TestCommandHelper")
 			if raw, err := GitHubGET(context.Background(), f.dir, endpoint, false); raw != nil || err == nil || err.Error() != "invalid GitHub API endpoint" {
 				t.Fatalf("endpoint %q accepted: %q %v", endpoint, raw, err)
 			}
@@ -290,7 +271,7 @@ func TestGitHubGETRejectsEndpoint(t *testing.T) {
 	}
 	t.Run("sentinel-control", func(t *testing.T) {
 		f := newCommandFixture(t, "sentinel")
-		f.onPath(t, "gh")
+		pathexec.Install(t, "gh", "TestCommandHelper")
 		if _, err := GitHubGET(context.Background(), f.dir, "repos/o/r/pulls/1", false); err != nil {
 			t.Fatal(err)
 		}
@@ -298,6 +279,20 @@ func TestGitHubGETRejectsEndpoint(t *testing.T) {
 			t.Fatalf("accepted endpoint did not start gh: %v", err)
 		}
 	})
+}
+
+// The values review used before the definition moved here; a caller that
+// modifies its copy does not change the next caller's.
+func TestGitConfigIsolation(t *testing.T) {
+	want := []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1"}
+	got := GitConfigIsolation()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("GitConfigIsolation() = %q, want %q", got, want)
+	}
+	got[0] = "GIT_CONFIG_NOSYSTEM=0"
+	if again := GitConfigIsolation(); !reflect.DeepEqual(again, want) {
+		t.Fatalf("shared definition modified through a caller's copy: %q", again)
+	}
 }
 
 func TestCommandFailures(t *testing.T) {

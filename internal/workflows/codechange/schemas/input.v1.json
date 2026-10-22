@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/code-change/input.v1.json",
+  "description": "Controller record of the code-change input: the target repository, the default branch tip the worktree was created from, the worktree path and the design doc; the exact design doc bytes are the evidence file design-doc",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "repository",
+    "default_branch",
+    "base_sha",
+    "worktree",
+    "design_doc"
+  ],
+  "properties": {
+    "repository": {
+      "description": "GitHub repository as owner/name, exactly as given in the prompt",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$"
+    },
+    "default_branch": {
+      "description": "The repository's default branch when the worktree was created",
+      "type": "string",
+      "minLength": 1
+    },
+    "base_sha": {
+      "description": "The default branch tip fetched when the worktree was created; the worktree starts detached at this commit",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "worktree": {
+      "description": "Absolute path of the Controller-owned worktree",
+      "type": "string",
+      "pattern": "^/"
+    },
+    "design_doc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "resolved"
+      ],
+      "properties": {
+        "path": {
+          "description": "The design doc path exactly as given in the prompt",
+          "type": "string",
+          "minLength": 1
+        },
+        "resolved": {
+          "description": "The literal cleaned absolute path that was read: path itself when absolute, otherwise path joined to the launch directory; symlinks are not resolved",
+          "type": "string",
+          "pattern": "^/"
+        }
+      }
+    }
+  }
+}

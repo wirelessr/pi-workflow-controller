@@ -313,7 +313,7 @@ func (c *Checkout) git(ctx context.Context, args ...string) ([]byte, error) {
 	var data []byte
 	var err error
 	if c.gitOutput == nil {
-		data, err = runtime.Git(ctx, c.repo.Root(), gitEnv, command...)
+		data, err = runtime.Git(ctx, c.repo.Root(), runtime.GitConfigIsolation(), command...)
 	} else {
 		data, err = c.gitOutput(ctx, c.repo.Root(), command)
 	}
@@ -322,6 +322,3 @@ func (c *Checkout) git(ctx context.Context, args ...string) ([]byte, error) {
 	}
 	return data, nil
 }
-
-// Disable system, global and attribute configuration for the read-only acquisition.
-var gitEnv = []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1"}

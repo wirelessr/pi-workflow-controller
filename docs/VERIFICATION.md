@@ -61,7 +61,7 @@ Gate：各必要 case 的預期行為成立，無 race；實際執行交付 bina
 
 ### Runtime／RPC／process
 
-入口：[runtime_test.go](../internal/runtime/runtime_test.go)、[transport_test.go](../internal/runtime/transport_test.go)、[codec_test.go](../internal/runtime/codec_test.go)、[command_test.go](../internal/runtime/command_test.go)。共用外部 fixture：[protocol](../internal/testutil/protocol/protocol.go)。
+入口：[runtime_test.go](../internal/runtime/runtime_test.go)、[transport_test.go](../internal/runtime/transport_test.go)、[codec_test.go](../internal/runtime/codec_test.go)、[command_test.go](../internal/runtime/command_test.go)。共用外部 fixture：[protocol](../internal/testutil/protocol/protocol.go)、[pathexec](../internal/testutil/pathexec/pathexec.go)（gh／git 固定入口經 PATH wrapper 執行測試 binary）。
 
 | 方法／情境 | 必須成立的 gate |
 |---|---|
@@ -75,7 +75,7 @@ Gate：各必要 case 的預期行為成立，無 race；實際執行交付 bina
 | Context-owned pipe deadline 先於 context timer 公布；真正較早 RPC timeout | 前者保留 context typed cause，後者仍為 RPCUnresponsive |
 | Health probe 關閉／真 protocol fault、慢 observer、stderr 滿 | Intentional lifetime cancellation 不製造假 fatal；真 fault 不吞，reader/probe/observer/drain 有界且可 join |
 | Concurrent Close、active native tool、foreign sentinel、ownership mismatch／recovering | 唯一 Wait；確認退出後先刪自有 discovery 再 bounded observer drain；他人資源保留，未確認項目明列 |
-| gh／git 命令：繼承的 `GIT_*`／`GH_*` env、固定 argv 與 git 固定 `-c`（credential、gc、maintenance、fsmonitor）、空或以 `-` 開頭的 endpoint、非零 exit、stdout 超限、deadline、取消、成功後殘留子孫 | 繼承 env 被移除，固定值與 caller env 在後；不合法 endpoint 在啟動 gh 前拒絕；錯誤不含 argv／stderr；超限、deadline 與 cause 保留；process group 在 Wait 前被殺 |
+| gh／git 命令：繼承的 `GIT_*`／`GH_*` env、固定 argv 與 git 固定 `-c`（credential、gc、maintenance、fsmonitor）、共用的 `GitConfigIsolation`、空或以 `-` 開頭的 endpoint、非零 exit、stdout 超限、deadline、取消、成功後殘留子孫 | 繼承 env 被移除，固定值與 caller env 在後；`GitConfigIsolation` 等於 review 原本的四個值，呼叫端改動副本不影響下一次；不合法 endpoint 在啟動 gh 前拒絕；錯誤不含 argv／stderr；超限、deadline 與 cause 保留；process group 在 Wait 前被殺 |
 
 ### Git repository
 
@@ -85,6 +85,7 @@ Gate：各必要 case 的預期行為成立，無 race；實際執行交付 bina
 |---|---|
 | Root 為相對、不存在、檔案、symlink、group／world 可存取，或 `repository.git`／`checkout` 已存在 | 拒絕且既有內容不變；中途失敗只保留本次已建立的 `repository.git`；symlink 祖先正規化後記錄 identity |
 | Pinned fetch 的 SHA 非 40 位小寫 hex、ref 不以 `refs/` 開頭、remote 為空或以 `-` 開頭 | 在任何 git 執行前拒絕；Runner 錯誤原樣回傳；fetch 後 commit 不符即失敗 |
+| Branch fetch 的 remote 或 branch 為空或以 `-` 開頭、ref 不以 `refs/` 開頭；branch 含 refspec 字元（`:`、`*`、`..`、`@{`）或以 `.lock` 結尾；branch 不存在；來源前進後再 fetch | 前三項在任何 git 執行前拒絕；ref-name 由真 git 的 `check-ref-format` 判定，不合法時不執行 fetch、不寫任何 ref；固定 argv 與 Runner 錯誤原樣回傳；結果非 40 位小寫 hex 即失敗；再 fetch 取得新 tip |
 | Root、`repository.git`、`checkout` 被替換或 `checkout` 換成 symlink | 回 ownership mismatch，不刪替換內容或外部檔案；還原後可完成 cleanup |
 | Cleanup 前已取消、兩次刪除之間取消、重複呼叫、`checkout` 已不存在 | 保留 cause；再次呼叫完成剩餘 registration；成功後冪等；repository objects 與其他歷史保留 |
 

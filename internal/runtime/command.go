@@ -56,6 +56,14 @@ func Git(ctx context.Context, dir string, env []string, args ...string) ([]byte,
 	return command(ctx, dir, "git", append(append([]string{}, gitFixed...), args...), env)
 }
 
+// GitConfigIsolation is the Git env that ignores system and global
+// configuration and system attributes, for calls that must not run the
+// user's hooks, filters or URL rewrites. The global attributes file is not
+// covered; callers also pass core.attributesFile=/dev/null.
+func GitConfigIsolation() []string {
+	return []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1"}
+}
+
 type commandOutput struct {
 	data   []byte
 	cancel context.CancelCauseFunc

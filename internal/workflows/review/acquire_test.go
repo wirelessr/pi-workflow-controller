@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"pi-workflow-controller/internal/testutil/pathexec"
 )
 
 func TestParsePRURL(t *testing.T) {
@@ -203,21 +205,7 @@ func (f *acquisitionFixture) configureAPI(t *testing.T) {
 	fixtureWrite(t, filepath.Join(f.dir, "issues.json"), []byte(`[[{"id":1}],[{"id":2}]]`))
 	fixtureWrite(t, filepath.Join(f.dir, "inline.json"), []byte(`[[]]`))
 	fixtureWrite(t, filepath.Join(f.dir, "reviews.json"), []byte(`[[{"id":3}]]`))
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(executable, "'") {
-		t.Fatalf("test binary path cannot be quoted: %s", executable)
-	}
-	// The fixed gh entry point resolves gh on PATH; this wrapper keeps the
-	// GitHub boundary a real subprocess of the test binary.
-	bin := t.TempDir()
-	fixtureWrite(t, filepath.Join(bin, "gh"), []byte("#!/bin/sh\nexec '"+executable+"' -test.run='^TestAcquisitionGHHelper$' -- \"$@\"\n"))
-	if err := os.Chmod(filepath.Join(bin, "gh"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	pathexec.Install(t, "gh", "TestAcquisitionGHHelper")
 	t.Setenv("PWC_ACQUIRE_FIXTURE", f.dir)
 }
 
@@ -901,7 +889,7 @@ func TestAcquireSanitizesGitConfiguration(t *testing.T) {
 	f.metadata["head"].(map[string]any)["sha"] = f.head
 	f.saveMetadata(t)
 	t.Setenv("GIT_CONFIG_GLOBAL", global)
-	// Runtime drops inherited GIT_*, so without review's gitEnv Git would read
+	// Runtime drops inherited GIT_*, so without runtime.GitConfigIsolation Git would read
 	// the global files under HOME and XDG_CONFIG_HOME.
 	home, xdg := filepath.Join(outside, "home"), filepath.Join(outside, "xdg")
 	for _, dir := range []string{home, filepath.Join(xdg, "git")} {
@@ -1305,14 +1293,10 @@ func TestAcquisitionGHHelper(t *testing.T) {
 	if dir == "" {
 		return
 	}
-	args := os.Args
-	for len(args) > 0 && args[0] != "--" {
-		args = args[1:]
-	}
-	if len(args) == 0 {
+	args, ok := pathexec.Args()
+	if !ok {
 		return
 	}
-	args = args[1:]
 	if len(args) < 8 || !reflect.DeepEqual(args[:7], []string{"api", "--method", "GET", "--hostname", "github.com", "-H", "Accept: application/vnd.github+json"}) {
 		fmt.Fprintln(os.Stderr, "SECRET invalid API arguments")
 		os.Exit(2)

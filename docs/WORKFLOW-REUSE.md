@@ -31,10 +31,11 @@
 | Envelope／file consumer | `contract.FileEntry`／`Publication[T]`／`DecodePublication[T]`；review `readReviewContract`、triage `readAccepted` 經 `engine.ReadContract` 後消費 | R3 已接線：只共用投影與 fresh decode，不新增授權；review ID 索引、triage lineage/cache 留 caller |
 | Published／checkout 二次讀檔 | `contract.ReadBounded`；review `readCheckFile`／`readPublishedFile`、triage `rawFile` | R3 已接線：共用 bounded loop，root/open/identity 與錯誤政策留 adapter；Store `copyStable` 的雙 digest 不合併 |
 | RPC 測試 transport | `testutil/protocol.NewHost`／`Host.Events`／`Event.Reply`／`Host.Close`、`RegisterCleanup` 及 `WriteEnvelope` | review workflow/check integration、triage RPC driver 共用 host 與 late-bound cancel/close/join；原 domain scenarios 與 Store-only 分層不變 |
+| PATH 命令測試 transport | `testutil/pathexec.Install`／`Args` | runtime command、review acquisition 與 code-change tests 以 PATH 上的 wrapper 重新執行測試 binary 的具名 test，外部 gh／git 仍是真 subprocess；舊的兩份 wrapper 與 `--` 參數解析已移除。回應內容、barrier 與故障注入仍屬各 test |
 | Skill extraction／report renderer | `contract/reportresource.ExtractFresh`／embedded `pwc_report_io.py`；review `ExtractSkills`／renderer 與 triage `ExtractReport`／report Step | R5：兩個真 consumer 共用機械，業務模板／report binding 各自保留 |
 | Workflow 組合單元 | `review.Run(ctx, r, scope, name, prURL)`；`code-review` 的 `execute` 以 `r.Root()`、`"review"` 呼叫它 | R6 已接線：舊內聯副本移除；呼叫者只用 `review.Run`，不 import review 其他業務型別或 helper；不新增引擎層 sub-workflow 原語。預期 head 與外層准入留 C3 |
-| Node TLS 前置檢查 | `runtime.CheckNodeTLS`（`runtime/preflight.go`） | R6 已接線：需要此檢查的 workflow 在第一個副作用前呼叫（目前為 code-review；code-change 是規劃中的第二個 consumer）；不屬於 Pi 啟動，triage 與 smoke-echo 不呼叫 |
-| gh／git 命令執行與 bare clone | `runtime.GitHubGET`／`runtime.Git`（`runtime/command.go`）；`gitrepo.Reserve` 與 `Repo.Init`／`AddRemote`／`FetchPinned`／`Cleanup`；review `acquire`、`Verify`、`Checkout.Cleanup` 使用 | R7 已接線：review 舊副本移除；只限固定 gh REST GET 與 git，不提供任意執行檔；唯讀政策留 review；可寫 fetch 與 GraphQL 由第一個使用它的 C 單元加入，不 import review 私有實作 |
+| Node TLS 前置檢查 | `runtime.CheckNodeTLS`（`runtime/preflight.go`） | R6 已接線：需要此檢查的 workflow 在第一個副作用前呼叫（code-review；尚未註冊的 code-change 在讀 design doc 與任何 GET 之前）；不屬於 Pi 啟動，triage 與 smoke-echo 不呼叫 |
+| gh／git 命令執行與 bare clone | `runtime.GitHubGET`／`runtime.Git`／`runtime.GitConfigIsolation`（`runtime/command.go`）；`gitrepo.Reserve` 與 `Repo.Init`／`AddRemote`／`FetchPinned`／`FetchBranch`／`Cleanup`；review `acquire`、`Verify`、`Checkout.Cleanup` 使用（不呼叫 `FetchBranch`）；code-change 以 `GitHubGET` 做 repo metadata 檢查，worktree 建立使用 `Git`、`GitConfigIsolation` 與 `Reserve`／`Init`／`AddRemote`／`FetchBranch`／`Cleanup` | R7 已接線：review 舊副本移除；只限固定 gh REST GET 與 git，不提供任意執行檔；唯讀政策留 review，可寫政策留 code-change；`FetchBranch` 由 C1a 加入；GraphQL 由第一個使用它的 C 單元加入，不 import review 私有實作 |
 | 私有 skill 目錄展開 | `contract/skilldir` 的 `Read`／`Source.Expand`／`Abandon`；triage `PrepareSkills` 使用 | R8 已接線：triage 舊內聯副本移除；子樹清單、環境變數、展開目錄名、Attach 與 record schema 由各 workflow 宣告；manifest 與上游比對留在 triage |
 | Contract repair 迴圈 | `engine.Scope.StepWithRepair`；triage `TaskSession.Run` 使用 | R9 已接線：triage 舊內聯迴圈移除；規則見該方法的 doc comment |
 
@@ -135,7 +136,7 @@ R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入�
 
 服務 [CODE-CHANGE](CODE-CHANGE.md)。以其 P0 為前置，先於 R6（兩者都改 `review/acquire.go`）。
 
-**已實作接線：** runtime `command.go` 承接原 acquisition 的 process 執行：`gh`／`git` 自 PATH 啟動、每命令 20 分鐘 deadline、stdout 64 MiB 上限（cause 為 `ErrCommandOutputLimit`）、stderr 丟棄；移除繼承的 `GIT_*`、`GH_*`（保留 `GH_TOKEN`、`GH_CONFIG_DIR`）與 GitHub URL env，process group 在唯一 Wait 前 SIGKILL。錯誤仍是 untyped，字串不變，不含 argv 或 stderr。`GitHubGET` 只組固定 REST GET argv；`Git` 每次前置固定 `-c`：gh credential helper 三項，以及 `gc.auto=0`、`maintenance.auto=false`、`core.fsmonitor=false`。後三項防止 git 啟動 process-group kill 收不到的 detached 背景子孫，任何 Controller 端 git 都需要，與是否啟用全域 git config 無關。不寫入任何 git config，caller env 附在固定值之後。`internal/gitrepo` 只 import stdlib：`Reserve` 在 private root 下獨占建立 `repository.git` 與 `checkout` 並記錄 identity；`Init`／`AddRemote`／`FetchPinned` 經 caller 的 `Runner` 執行固定 git 序列，錯誤原樣回傳；`Cleanup` 以 SameFile 只刪保留的 worktree 與其 registration。Review 的唯讀 `-c` 清單、隔離 git config 的 env、detached worktree、remote 名與 URL、comments 分頁驗收、快照與 `Verify` 留在 review，`Checkout.Cleanup` 只轉送。測試的假 gh 改由 PATH wrapper 提供，仍是真 subprocess。URL userinfo 拒絕與傳輸 `-c` 未納入共用層。
+**已實作接線：** runtime `command.go` 承接原 acquisition 的 process 執行：`gh`／`git` 自 PATH 啟動、每命令 20 分鐘 deadline、stdout 64 MiB 上限（cause 為 `ErrCommandOutputLimit`）、stderr 丟棄；移除繼承的 `GIT_*`、`GH_*`（保留 `GH_TOKEN`、`GH_CONFIG_DIR`）與 GitHub URL env，process group 在唯一 Wait 前 SIGKILL。錯誤仍是 untyped，字串不變，不含 argv 或 stderr。`GitHubGET` 只組固定 REST GET argv；`Git` 每次前置固定 `-c`：gh credential helper 三項，以及 `gc.auto=0`、`maintenance.auto=false`、`core.fsmonitor=false`。後三項防止 git 啟動 process-group kill 收不到的 detached 背景子孫，任何 Controller 端 git 都需要，與是否啟用全域 git config 無關。不寫入任何 git config，caller env 附在固定值之後。`internal/gitrepo` 只 import stdlib：`Reserve` 在 private root 下獨占建立 `repository.git` 與 `checkout` 並記錄 identity；`Init`／`AddRemote`／`FetchPinned` 經 caller 的 `Runner` 執行固定 git 序列，錯誤原樣回傳；`Cleanup` 以 SameFile 只刪保留的 worktree 與其 registration。Review 的唯讀 `-c` 清單、隔離 git config 的 env（C1a 起改為 runtime 共用，見下）、detached worktree、remote 名與 URL、comments 分頁驗收、快照與 `Verify` 留在 review，`Checkout.Cleanup` 只轉送。測試的假 gh 改由 PATH wrapper 提供，仍是真 subprocess。URL userinfo 拒絕與傳輸 `-c` 未納入共用層。
 
 **明列的行為差異：**
 
@@ -143,7 +144,13 @@ R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入�
 - 新拒絕條件：`FetchPinned` 在執行任何 git 前拒絕非 40 位小寫 hex 的 SHA、不以 `refs/` 開頭的 ref、空或以 `-` 開頭的 remote；`GitHubGET` 在啟動 gh 前拒絕空或以 `-` 開頭的 endpoint。Review 的 remote 名、`refs/review/*` 與 `repos/...` endpoint 不會觸發。Review 在呼叫前已把 metadata 的 SHA 轉成小寫，所以對現有 caller 這些條件都不會觸發，沒有行為差異。
 - 不可達路徑：沒有 repo 的 `Checkout` 字面值若呼叫 `Verify` 或快照寫入會 nil panic。Production 只經 `acquire` 建構 `Checkout`；`check_test.go` 的字面值不呼叫這兩者；`Cleanup` 對沒有 repo 的 `Checkout` 仍回 nil。
 
-**後續：** 失敗命令目前只回報 `acquisition command failed`，不帶 exit code 或 stdout。第一個需要它們的 C 單元新增 typed exit error，並明列錯誤分類的變化；R7 不預造。
+**後續：** 失敗命令目前只回報 `acquisition command failed`，不帶 exit code 或 stdout。第一個需要它們的 C 單元新增 typed exit error，並明列錯誤分類的變化；R7 不預造，C1a 也不需要。
+
+**C1a 新增（code-change 是第一個 consumer）：**
+
+- `gitrepo.Repo.FetchBranch` 取得可變 branch 當下的 tip；輸入拒絕與 ref-name 判定見其 godoc。Review 不呼叫，其他 gitrepo 函式不變。
+- `runtime.GitConfigIsolation` 是停用 system／global config 與 system attributes 的 env，review 與 code-change 共用；review 的私有副本移除，值不變（runtime test 以字面值釘住）。
+- Controller 端 git 政策：兩者共用 `runtime.Git` 的固定 `-c` 與 `GitConfigIsolation`；review 的 `Checkout.git` 與 code-change 的 `worktree.git` 各自加上相同的 `--git-dir`、hooks、attributes、行尾、sparse、TLS 驗證、不跟隨 redirect、`protocol.allow=never` 加 https、不遞迴 submodule。差異只在傳輸白名單：review 另允許 http；code-change 只允許 https，測試經 `gitSource` 另加 file，production 不加。Tracking refspec、`origin/HEAD`、detached worktree 與預設保留的 cleanup 屬 code-change。
 
 以下保留目標與完成條件。
 

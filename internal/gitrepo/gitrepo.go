@@ -117,10 +117,44 @@ func (r *Repo) FetchPinned(ctx context.Context, git Runner, remote, sha, ref str
 	return nil
 }
 
+// FetchBranch fetches the current tip of the mutable branch into ref and
+// returns the fetched commit. Unlike FetchPinned the result is whatever the
+// remote holds at that moment, and ref moves only by fast-forward. Inputs git
+// could parse as options or as a different refspec are rejected before git
+// runs, then git itself must accept refs/heads/<branch> as a ref name.
+func (r *Repo) FetchBranch(ctx context.Context, git Runner, remote, branch, ref string) (string, error) {
+	if remote == "" || strings.HasPrefix(remote, "-") {
+		return "", errors.New("branch fetch remote must be a name")
+	}
+	if branch == "" || strings.HasPrefix(branch, "-") {
+		return "", errors.New("branch fetch branch must be a name")
+	}
+	if !strings.HasPrefix(ref, "refs/") {
+		return "", errors.New("branch fetch ref must start with refs/")
+	}
+	// check-ref-format rejects the refspec characters (":", "*", "..", "@{")
+	// that would turn the source into a different refspec.
+	if _, err := git(ctx, "check-ref-format", "refs/heads/"+branch); err != nil {
+		return "", err
+	}
+	if _, err := git(ctx, "fetch", "--filter=blob:none", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", remote, "refs/heads/"+branch+":"+ref); err != nil {
+		return "", err
+	}
+	actual, err := git(ctx, "rev-parse", "--verify", ref+"^{commit}")
+	if err != nil {
+		return "", err
+	}
+	sha := strings.TrimSpace(string(actual))
+	if !fullSHA.MatchString(sha) {
+		return "", errors.New("fetched branch is not a full commit SHA")
+	}
+	return sha, nil
+}
+
 // Cleanup removes only the originally reserved worktree and its registration.
 // The repository objects and other files under root remain as history.
-// Init, AddRemote and FetchPinned are not synchronized with Cleanup; call it
-// only after every Runner call has joined.
+// Init, AddRemote, FetchPinned and FetchBranch are not synchronized with
+// Cleanup; call it only after every Runner call has joined.
 func (r *Repo) Cleanup(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
