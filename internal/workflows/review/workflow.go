@@ -28,14 +28,12 @@ func Definition() engine.Definition {
 var roles = []string{"code", "scale", "simplicity"}
 
 func model(role string) runtime.ModelSpec {
-	id, thinking := "deepseek-v4-pro-0813", "high"
+	id, thinking := "glm-5p3", "high"
 	switch role {
 	case "prepare":
 		id, thinking = "glm-5p3-flash", "low"
-	case "scale":
-		id = "kimi-k2p7-code"
 	case "simplicity":
-		id, thinking = "minimax-m3", "medium"
+		id, thinking = "glm-5p3-flash", "medium"
 	}
 	return runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/" + id, Thinking: thinking}
 }
