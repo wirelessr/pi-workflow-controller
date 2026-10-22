@@ -101,7 +101,7 @@ Controller 可以：依機械定義的狀態條件等待（只看是否進入終
 - B 的 `limited`（來源缺失等）：合法，原樣交給 C。B 的 `incomplete`（必要 reviewer 失敗）：執行失敗，PR 保留，流程終止，不進 C。
 - D：輪數用盡仍無合格的收斂宣稱，即未收斂，依同一先例交付 final 並以具名錯誤結束。某輪逾時或失敗是執行失敗，不當成「已收斂」，也不由 Controller 自行重跑該輪。
 - 檢查項狀態只有四種：`passed`、`failed`、`skipped`、`not_checked`。`skipped` 只用於 schema enum 預先列舉的項目 ID，且需交代前提（例如沒有登入 session），集合外的值在 schema 層即被拒。`not_checked` 表示檢查因其他原因未能執行，必須附原因。兩者都不算通過，也不併入已驗證結論。這不是通用 fallback。
-- 寫入型 Step 的輸出不合 contract：沿用 triage 已有的 contract repair（同一 handle、有限預算、Controller 的具體診斷作為 Feedback），其共用機械由 R9 抽出。Repair 只重寫本 attempt 的報告，不重做外部寫入，這條寫進 Step requirements 常數；Controller 能機械核對者（push head 與 worktree HEAD 的一致）由 receipt 驗收攔下，不能核對者（例如重複的 thread reply）是承認的殘餘風險。repair 預算用盡仍不合法，才是執行失敗；此時 Controller 從自有 worktree 讀出目前 branch，再以唯讀 GET 查對應的 PR，在失敗報告中交代已存在的外部物件，不自動撤銷。
+- 寫入型 Step 的輸出不合 contract：沿用 triage 已有的 contract repair（同一 handle、有限預算、Controller 的具體診斷作為 Feedback），其共用機械由 R9 抽成 `engine.Scope.StepWithRepair`。Repair 只重寫本 attempt 的報告，不重做外部寫入，這條寫進 Step requirements 常數；receipt 核對只對最終 contract 執行一次：它攔得下回報的 head 與 worktree HEAD 不一致（謊報），攔不下 repair 中重做的寫入（新 push 產生新 commit，回報仍會一致），也攔不下重複的 thread reply 或重開的 PR，這些是承認的殘餘風險；前幾次被拒的 attempt 若有外部副作用，其 receipt 只有在最終 contract 承載時才會被核對，C1 須決定是否同時核對被拒發布中的 receipt。engine 對 repair 派送的固定文字要求 Agent 先執行 request.prompt 的任務，與「repair 只重寫報告」的常數相衝突；C1 須解決（例如 repair 時可區分的訊息），並經 live 驗證，未解決前重做寫入列為殘餘風險。寫入型 Step 的任何失敗（repair 預算用盡、逾時、身分不符等）都是執行失敗；此時 Controller 從自有 worktree 讀出目前 branch，再以唯讀 GET 查對應的 PR，在失敗報告中交代已存在的外部物件，不自動撤銷。
 
 ## 4. 輸入、權限與授權範圍
 
@@ -177,7 +177,7 @@ CLI 仍是 `run <workflow> "單行 Prompt"`，沒有 flags 或外部 config（AD
 | GitHub PR 狀態讀取（check runs、commit statuses、review threads） | 無 | 缺口：新的唯讀 adapter，底層 gh 執行共用 R7 |
 | 可寫 worktree | 無 | 缺口：run 內由 bare repository 加 fetch default branch 建立（acquire 明文不 fetch 可變 branch，政策不同），可建 branch、commit；憑證由 Agent 既有 gh／git 認證處理，Controller 不寫入憑證相關 config（R7） |
 | 測試 host transport | `testutil/protocol` | 直接重用 |
-| Contract repair 迴圈 | `triage.TaskSession.Run` 的迴圈（`repairBudget = 2`、每次 repair 開 `contract-repair-*` 子 scope、同一 handle、schema 與 acceptance 兩種診斷） | 兩個真 consumer（triage 與本 workflow）：抽成中性機械並遷移 triage（R9），不複製 |
+| Contract repair 迴圈 | `engine.Scope.StepWithRepair`（`engine/step.go`，R9 已抽出；triage 經 `TaskSession.Run` 呼叫，`repairBudget = 2` 留在 triage） | 已抽成 `engine.Scope.StepWithRepair`（R9），triage 已遷移；本 workflow 的寫入型 Step 直接使用，不複製。Feedback 的 Refs 在 repair 時保留 |
 | Capacity handoff | triage package | 不需要：D 每輪 fresh session，context 以輪切分 |
 
 ## 7. 重用抽取：code-review 成為可組合單元

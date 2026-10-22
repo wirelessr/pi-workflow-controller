@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -2610,5 +2611,249 @@ func TestEngineRetryBudgetBoundaries(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestEngineStepWithRepair(t *testing.T) {
+	rejected := errors.New("acceptance rejected")
+	valid := func(int) engTestReply { return engTestReply{Data: engTestData{Value: "valid"}} }
+	invalidUntil := func(last int) func(int) engTestReply {
+		return func(n int) engTestReply {
+			if n <= last {
+				return engTestReply{Raw: []byte(`{"broken":`)}
+			}
+			return engTestReply{Data: engTestData{Value: "valid"}}
+		}
+	}
+	rejectUntil := func(last int) func(int) error {
+		return func(n int) error {
+			if n <= last {
+				return fmt.Errorf("violation %d", n)
+			}
+			return nil
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		repairs  int
+		reply    func(n int) engTestReply
+		validate func(n int) error
+		// cancelAt cancels the caller's context during that dispatch.
+		cancelAt int
+		// kinds lists, per dispatch after the first, the diagnostic it repairs.
+		kinds []string
+		code  Code
+		is    error
+	}{
+		{name: "a schema failure is repaired with the original refs", repairs: 2, reply: invalidUntil(1), kinds: []string{"schema"}},
+		{name: "acceptance rejects twice and the third is accepted", repairs: 2, reply: valid, validate: rejectUntil(2), kinds: []string{"acceptance", "acceptance"}},
+		{name: "schema repairs exhaust with the last ContractInvalid", repairs: 2, reply: invalidUntil(3), kinds: []string{"schema", "schema"}, code: ContractInvalid},
+		{name: "acceptance repairs exhaust with validate's own error", repairs: 2, reply: valid, validate: func(int) error { return rejected }, kinds: []string{"acceptance", "acceptance"}, is: rejected},
+		{name: "a provider failure is not repaired", repairs: 2, reply: func(int) engTestReply {
+			return engTestReply{Err: &Failure{Code: ProviderFailed, Origin: OriginProvider, DispatchAccepted: AcceptedYes, Message: "provider down"}}
+		}, code: ProviderFailed},
+		{name: "a missing contract is not repaired", repairs: 2, reply: func(int) engTestReply { return engTestReply{Missing: true} }, code: ContractMissing},
+		{name: "a cancel during a repair keeps the rejected publication", repairs: 2, reply: valid, validate: rejectUntil(2), cancelAt: 2, kinds: []string{"acceptance"}, code: Cancelled},
+		{name: "a zero budget repairs nothing", repairs: 0, reply: invalidUntil(1), code: ContractInvalid},
+		{name: "a negative budget is rejected before any attempt", repairs: -1, reply: valid, code: InvalidDefinition},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var cancel context.CancelCauseFunc
+			fake := &engTestRuntime{execute: func(ctx context.Context, call engTestCall) engTestReply {
+				if call.Number == tc.cancelAt {
+					cancel(&Failure{Code: Cancelled, Origin: OriginFailFastSibling, Message: "sibling failed"})
+					<-ctx.Done()
+					return engTestReply{Err: context.Cause(ctx)}
+				}
+				return tc.reply(call.Number)
+			}}
+			var results []StepResult
+			var stepErr error
+			var seed contract.Ref
+			var validated []contract.Ref
+			r, _ := engTestNew(t, "", fake, func(ctx context.Context, run *Run, _ Input) (Result, error) {
+				h, err := run.OpenSession(ctx, engTestRole("worker"))
+				if err != nil {
+					return Result{}, err
+				}
+				if seed, err = run.Root().Attach(ctx, AttachSpec{Key: "seed", Output: contract.Spec{SchemaID: engTestSchema}, Data: engTestData{Value: "seed"}}); err != nil {
+					return Result{}, err
+				}
+				spec := StepSpec{Key: "work", Session: h, Prompt: "task", Output: contract.Spec{SchemaID: engTestSchema}, Feedback: &Feedback{Message: "first attempt reason", Refs: []contract.Ref{seed}}}
+				var validate func(context.Context, contract.Ref) error
+				if tc.validate != nil {
+					validate = func(_ context.Context, ref contract.Ref) error {
+						validated = append(validated, ref)
+						return tc.validate(len(validated))
+					}
+				}
+				stepCtx, stop := context.WithCancelCause(ctx)
+				defer stop(nil)
+				cancel = stop
+				results, stepErr = run.Root().StepWithRepair(stepCtx, spec, tc.repairs, validate)
+				return Result{}, nil
+			})
+			report := r.Execute()
+			engTestReport(t, report, Succeeded, 0)
+			engTestPersisted(t, r, report)
+			dispatches := len(tc.kinds) + 1
+			if tc.repairs < 0 {
+				dispatches = 0
+			}
+			var calls []engTestCall
+			for _, s := range fake.allSessions() {
+				c, _, _ := s.history()
+				calls = append(calls, c...)
+			}
+			if len(fake.allSessions()) != 1 || len(calls) != dispatches || len(results) != dispatches {
+				t.Fatalf("sessions = %d dispatches = %d results = %d, want 1, %d, %d", len(fake.allSessions()), len(calls), len(results), dispatches, dispatches)
+			}
+			switch {
+			case tc.is != nil:
+				if stepErr != tc.is {
+					t.Fatalf("error = %v, want validate's own error unwrapped", stepErr)
+				}
+			case tc.code != "":
+				if !engTestCode(stepErr, tc.code) {
+					t.Fatalf("error = %v, want %s", stepErr, tc.code)
+				}
+			default:
+				if stepErr != nil || results[len(results)-1].Output == (contract.Ref{}) {
+					t.Fatalf("error = %v results = %+v, want the last attempt accepted", stepErr, results)
+				}
+			}
+			if len(report.Snapshot.Retries) != 0 {
+				t.Errorf("repairs registered retries: %+v", report.Snapshot.Retries)
+			}
+			for i, call := range calls {
+				id := call.Request.Identity.AttemptID
+				attempt := report.Snapshot.Attempts[id]
+				if results[i].AttemptID != id || call.Request.Prompt != "task" || attempt.Number != 1 {
+					t.Errorf("dispatch %d: result %s attempt %+v", i+1, results[i].AttemptID, attempt)
+				}
+				wantScope := "root"
+				switch i {
+				case 1:
+					wantScope = "root/contract-repair-work"
+				case 2:
+					wantScope = "root/contract-repair-2-work"
+				}
+				if attempt.Scope != wantScope {
+					t.Errorf("dispatch %d scope = %q, want %q", i+1, attempt.Scope, wantScope)
+				}
+				fb := call.Request.Feedback
+				if i == 0 {
+					continue
+				}
+				if fb == nil || !reflect.DeepEqual(fb.Refs, []contract.Ref{seed}) {
+					t.Fatalf("dispatch %d feedback = %+v, want the refs [%+v]", i+1, fb, seed)
+				}
+				prev := calls[i-1].Request.Identity.AttemptID
+				kind := tc.kinds[i-1]
+				var diagnostic string
+				switch kind {
+				case "schema":
+					failure := report.Snapshot.Attempts[prev].Failure
+					if failure == nil || failure.Code != ContractInvalid || fb.SourceAttemptID != prev || fb.SourceCode != string(ContractInvalid) {
+						t.Errorf("dispatch %d schema feedback = %+v after %+v", i+1, fb, failure)
+					}
+					if failure != nil {
+						diagnostic = failure.Message
+					}
+				case "acceptance":
+					n := slices.Index(validated, results[i-1].Output) + 1
+					if n == 0 || fb.SourceAttemptID != "" || fb.SourceCode != "" {
+						t.Errorf("dispatch %d acceptance feedback = %+v", i+1, fb)
+					}
+					if report.Snapshot.Attempts[prev].State != Succeeded || results[i-1].Output == (contract.Ref{}) {
+						t.Errorf("rejected publication %d is not committed: %+v", i, report.Snapshot.Attempts[prev])
+					}
+					if n > 0 {
+						diagnostic = tc.validate(n).Error()
+					}
+				}
+				if diagnostic == "" || !strings.HasSuffix(fb.Message, diagnostic) || !strings.Contains(fb.Message, kind) {
+					t.Errorf("dispatch %d feedback message %q, want the %s diagnostic %q as its suffix", i+1, fb.Message, kind, diagnostic)
+				}
+			}
+		})
+	}
+}
+
+// A repair that cannot start ends the loop with its error after earlier
+// attempts already ran, and the results still report those attempts.
+func TestEngineStepWithRepairStopsBetweenAttempts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// occupied pre-reserves the first repair's scope name.
+		occupied bool
+		// cancel cancels the caller's context inside validate.
+		cancel bool
+		code   Code
+		// entries is the result count: a Step preflight failure takes one, a
+		// Child failure none.
+		entries int
+	}{
+		{name: "the repair child cannot be created", occupied: true, code: InvalidDefinition, entries: 1},
+		{name: "the caller is cancelled inside validate", cancel: true, code: Cancelled, entries: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &engTestRuntime{execute: func(context.Context, engTestCall) engTestReply {
+				return engTestReply{Data: engTestData{Value: "valid"}}
+			}}
+			var results []StepResult
+			var stepErr, childErr error
+			r, _ := engTestNew(t, "", fake, func(ctx context.Context, run *Run, _ Input) (Result, error) {
+				h, err := run.OpenSession(ctx, engTestRole("worker"))
+				if err != nil {
+					return Result{}, err
+				}
+				if tc.occupied {
+					if _, err := run.Root().Child("contract-repair-work"); err != nil {
+						return Result{}, err
+					}
+				}
+				stepCtx, stop := context.WithCancelCause(ctx)
+				defer stop(nil)
+				validate := func(context.Context, contract.Ref) error {
+					if tc.cancel {
+						stop(&Failure{Code: Cancelled, Origin: OriginFailFastSibling, Message: "sibling failed"})
+					}
+					return errors.New("violation")
+				}
+				spec := StepSpec{Key: "work", Session: h, Prompt: "task", Output: contract.Spec{SchemaID: engTestSchema}}
+				results, stepErr = run.Root().StepWithRepair(stepCtx, spec, 2, validate)
+				if tc.occupied {
+					_, childErr = run.Root().Child("contract-repair-work")
+				}
+				return Result{}, nil
+			})
+			report := r.Execute()
+			engTestReport(t, report, Succeeded, 0)
+			var calls []engTestCall
+			for _, s := range fake.allSessions() {
+				c, _, _ := s.history()
+				calls = append(calls, c...)
+			}
+			if len(calls) != 1 || len(results) != tc.entries {
+				t.Fatalf("dispatches = %d results = %+v, want 1 dispatch and %d entries", len(calls), results, tc.entries)
+			}
+			first := calls[0].Request.Identity.AttemptID
+			if results[0].AttemptID != first || results[0].Output == (contract.Ref{}) || report.Snapshot.Attempts[first].State != Succeeded {
+				t.Errorf("first result = %+v, want the committed publication of %s", results[0], first)
+			}
+			if !engTestCode(stepErr, tc.code) {
+				t.Fatalf("error = %v, want %s", stepErr, tc.code)
+			}
+			if tc.occupied && (childErr == nil || stepErr.Error() != childErr.Error()) {
+				t.Errorf("error = %v, want the Child error %v", stepErr, childErr)
+			}
+			if tc.cancel && (results[1] != StepResult{}) {
+				t.Errorf("preflight result = %+v, want an empty entry", results[1])
+			}
+			if len(report.Snapshot.Attempts) != 1 {
+				t.Errorf("attempts = %d, want only the first", len(report.Snapshot.Attempts))
+			}
+		})
 	}
 }

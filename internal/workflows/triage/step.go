@@ -29,13 +29,15 @@ type TaskStep struct {
 	// contract; nil means schema validation only.
 	Validate func(context.Context, contract.Ref) error
 	// Feedback is given to the first attempt, for example a business retry's
-	// reason; a contract repair re-attempt replaces it with the rejection.
+	// reason; repairs derive theirs from it as engine.Scope.StepWithRepair
+	// describes.
 	Feedback *engine.Feedback
 	// Timeout bounds each attempt; zero means the run policy's attempt
 	// timeout.
 	Timeout time.Duration
 	// Observed, when set, records every attempt's session entries and tool
-	// calls and receives each attempt's observation, failed ones included.
+	// calls and receives each attempt's observation, failed ones included,
+	// in dispatch order once the Step's repairs end.
 	Observed func(attemptID string, o *engine.Observation)
 }
 
@@ -48,20 +50,10 @@ const repairBudget = 2
 // and each repair. Budget reservations count Steps with it.
 const attemptsPerStep = repairBudget + 1
 
-// repairMessage asks for this attempt's contract with the named violations
-// fixed. Some violations require a change of substance (a completeness
-// value, a basis label), so what stays is the rest of the content; the
-// identity is always this attempt's own.
-func repairMessage(stage, violations string) string {
-	return "Previous contract was rejected by " + stage + " validation. Write this attempt's contract, with this request's identity, fixing the reported violations; the content they do not name stays as it was: " + violations
-}
-
-// RunTaskStep allows up to repairBudget repair retries covering both
-// contract-shape (schema) failures and, when Validate is supplied, semantic
-// acceptance failures. A rejected contract returns to the same session with the exact
-// validator diagnostic as feedback; the repaired contract must pass the same
-// gates in full. Execution failures (timeout, cancellation, provider) are
-// never retried here.
+// RunTaskStep runs t in its own session with up to repairBudget contract
+// repairs, as engine.Scope.StepWithRepair defines them, and closes the session
+// after success. With Recovery a failure is a *TaskFailure; one caused by a
+// cancellation hands over the last publication an earlier attempt committed.
 func RunTaskStep(ctx context.Context, r *engine.Run, t TaskStep) (contract.Ref, error) {
 	ts, err := OpenTaskSession(ctx, r, t)
 	if err != nil {
@@ -102,74 +94,24 @@ func OpenTaskSession(ctx context.Context, r *engine.Run, t TaskStep) (TaskSessio
 // Run dispatches t on the session with up to repairBudget contract repairs and
 // leaves the session open. A failure with Recovery is a *TaskFailure.
 func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engine.StepResult, error) {
-	s, stage, key, recovery, validate := t.Scope, t.Stage, t.Key, t.Recovery, t.Validate
+	stage, recovery := t.Stage, t.Recovery
 	h, identity := ts.Handle, ts.Identity
 	prompt, err := json.Marshal(t.Task)
 	if err != nil {
 		return engine.StepResult{}, err
 	}
-	spec := engine.StepSpec{Key: key, Session: h, Prompt: string(prompt), Inputs: t.Inputs, Feedback: t.Feedback, Output: contract.Spec{SchemaID: t.Schema}, Timeout: t.Timeout, Observe: t.Observed != nil}
+	spec := engine.StepSpec{Key: t.Key, Session: h, Prompt: string(prompt), Inputs: t.Inputs, Feedback: t.Feedback, Output: contract.Spec{SchemaID: t.Schema}, Timeout: t.Timeout, Observe: t.Observed != nil}
+	attempts, err := t.Scope.StepWithRepair(ctx, spec, repairBudget, t.Validate)
 	var out engine.StepResult
-	var lastFeedback *engine.Feedback
-	// Mechanical contract-shape repair, budgeted re-attempts on the same
-	// session: the rejection diagnostic rides spec.Feedback so the repairing
-	// agent sees the exact violation. Retried failures keep their typed code.
-	// Execution failures (timeout, cancellation, provider) are never retried.
-	// A manual second Step keeps successful steps from registering a retry
-	// scope: retry accounting must reflect only real repairs.
-	var repairCount int
 	var lastPublished contract.Ref
-	for {
-		attemptSpec := spec
-		if repairCount > 0 && lastFeedback != nil {
-			attemptSpec.Feedback = lastFeedback
+	for _, a := range attempts {
+		if t.Observed != nil && a.Observation != nil {
+			t.Observed(a.AttemptID, a.Observation)
 		}
-		// The first attempt dispatches from the owning scope unchanged; each
-		// repair re-attempt needs a fresh child scope, because a failed step
-		// key is burned on its owning scope.
-		attemptScope := s
-		if repairCount > 0 {
-			name := "contract-repair-" + key
-			if repairCount > 1 {
-				name = fmt.Sprintf("contract-repair-%d-%s", repairCount, key)
-			}
-			child, cerr := s.Child(name)
-			if cerr != nil {
-				err = cerr
-				break
-			}
-			attemptScope = child
+		if a.Output != (contract.Ref{}) {
+			lastPublished = a.Output
 		}
-		var e error
-		out, e = attemptScope.Step(ctx, attemptSpec)
-		if t.Observed != nil && out.Observation != nil {
-			t.Observed(out.AttemptID, out.Observation)
-		}
-		if e == nil {
-			if out.Output != (contract.Ref{}) {
-				lastPublished = out.Output
-			}
-			if validate == nil {
-				break
-			}
-			if ve := validate(ctx, out.Output); ve == nil {
-				break
-			} else if repairCount < repairBudget {
-				lastFeedback = &engine.Feedback{Message: repairMessage("acceptance", ve.Error())}
-				repairCount++
-				continue
-			} else {
-				err = ve
-				break
-			}
-		}
-		var failure *engine.Failure
-		if !errors.As(e, &failure) || failure.Code != engine.ContractInvalid || repairCount >= repairBudget {
-			err = e
-			break
-		}
-		lastFeedback = &engine.Feedback{Message: repairMessage("schema", failure.Message), SourceAttemptID: failure.AttemptID, SourceCode: string(failure.Code)}
-		repairCount++
+		out = a
 	}
 	if err != nil {
 		if recovery {

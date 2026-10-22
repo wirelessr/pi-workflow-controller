@@ -254,6 +254,8 @@ func Decode[T any](ctx context.Context, r *Run, ref contract.Ref) (T, error)
 
 func (s *Scope) Child(name string) (*Scope, error)
 func (s *Scope) Step(ctx context.Context, spec StepSpec) (StepResult, error)
+func (s *Scope) StepWithRepair(ctx context.Context, spec StepSpec, repairs int,
+    validate func(context.Context, contract.Ref) error) ([]StepResult, error)
 func (s *Scope) Parallel(ctx context.Context, name string, mode JoinMode,
     branches []Branch) ([]BranchResult, error)
 func (s *Scope) Retry(ctx context.Context, name string, maxRetries int,
@@ -267,6 +269,7 @@ func (r *Run) ControllerAttached(ref contract.Ref) bool
 - 建構入口：`engine.New(ctx, Definition, Input, Options)`，先完成 definition/schema/prompt preflight，再建立 run；`Run.Execute()` 單次執行，回傳 outcome、exit code、result、cleanup、finalization errors 與 snapshot。`engine.NewRegistry` 提供穩定排序與查詢，沒有外部 workflow config。
 - `Run`、`Scope`、`SessionHandle` 是 concrete type。Workflow 不持有底層 Session 或 `exec.Cmd`。
 - `Step` 自動建 attempt，落 request，派送，檢查 execution，驗證並發布 output。任何階段失敗都留下結構化原因。
+- `StepWithRepair` 是 contract repair：在 `repairs` 次以內，ContractInvalid 或 `validate` 回錯時，以同一 handle 在 `contract-repair-*` 子 scope 重派同一 key，Feedback 為具體診斷並保留原 Feedback 的 Refs；其餘失敗原樣回傳。預算與驗收由 workflow 傳入；精確規則見該方法的 doc comment。
 - `Attach` 把 Controller 自己產生的 data 與檔案（例如 caller 原始 Prompt、Controller 記錄的缺口）走同一條 BeginAttempt → Stage → Publish → journal commit 取得 exact Ref；沒有 session、派送與 execution，`AttemptState.Controller=true`、`HandleID` 為空、`DispatchAccepted=no`。它與 Step 共用 scope key 命名空間、attempt 配置與 `MaxTotalAttempts` 額度（不退還）、AttemptTimeout、AttemptStarted 與終態／成功提交（同一段程式碼），journal 只有 AttemptStarted 與終態事件。檔案路徑形狀、重複 ID／路徑（含只差大小寫）、檔案數與大小在結構 preflight 拒絕，不建立 attempt；檔案種類由 `evidence/`／`artifacts/` 目錄決定。Controller 的 data 不合 schema 時 attempt 為 Failed 並回傳 ContractInvalid；Storage／Journal 失敗照常 sticky fatal，寫到一半失敗會移除本次建立的檔案。`ControllerAttached(ref)` 只在 ref 是已 commit 且由 Attach 產生時為真；Agent Step 即使發布同 schema、同 file ID 與路徑也不是。被選為 final 的 attached Ref 沒有 session 可 resume，formatter 顯示 producer 為 controller。
 - `Result.Outputs` 只持有已 committed Ref，不用 memory-only JSON 傳給下一個 Pi；`Result.Final` 明確選 output key 與可選 artifact file ID，不是任意檔案路徑。
 - Workflow 透過 `engine.Decode[T](ctx, run, ref)` 讀取業務資料，供 B verdict 等 Go 分支判斷；內部走本 run 的統一 Ref resolver（第 8.3 節）。這是 package function，不是 generic method，也不把 Store 的寫入權限暴露給 workflow。
@@ -318,7 +321,7 @@ func (a *Attempt) WriteControllerCandidate(data json.RawMessage, files []Control
 
 - `Child("round-003")` 建立新的邏輯 scope；同一 parent execution 內名稱不可重複。輪次用新 child 表達，不重用 round key。
 - Logical scope ID 由穩定 path 識別；execution epoch 表示該 scope 的一次執行。Invocation key = logical scope path + StepSpec.Key，平行分支增加 branch name。
-- 同一 scope execution 內同一 step key 不可呼叫兩次（`Attach` 與 Step 共用此命名空間）；重跑必須來自 `Retry`，不由同名呼叫隱含重試。
+- 同一 scope execution 內同一 step key 不可呼叫兩次（`Attach` 與 Step 共用此命名空間）；重跑必須來自 `Retry` 或 `StepWithRepair`（在新子 scope 重派），不由同名呼叫隱含重試。
 - 每次進入 Retry 呼叫建立新的 activation ID 與 budget；同一 activation 的各次 callback 使用同一邏輯 scope path、不同 execution epoch。被重跑的 step invocation 增加 attempt number。
 - 外層重跑而再次進入同名內層 Retry，建立新內層 activation，budget 從 0 起算；其 logical path 不變。Child/Retry 名稱重複檢查限定同一 parent execution，不跨 epoch 拒絕合法重跑。
 - Step attempt number 按進入 Preparing 的次數累加，不以實際 prompt 數量或某個 retry count 代替；是否送出及是否接受由獨立 dispatch 狀態記錄。RetryState 帶 activation ID、RetryCount、MaxRetries、前次 Feedback；總 attempt 上限防止巢狀 budget 乘積失控。
@@ -345,6 +348,7 @@ func (a *Attempt) WriteControllerCandidate(data json.RawMessage, files []Control
 - Callback 回 error：立即失敗，不隱含重試。若 workflow 明確要修正 schema，可將該錯誤轉成 RetryAction。
 - Feedback 包含文字、來源 attempt/error code、可選已發布 Ref。寫入新 attempt 的 request，送回哪個 handle 由 workflow 決定。
 - Reviewer reject 與 schema 修正可以共用同一 Retry scope；是否拆 budget 由 workflow 程式碼決定。
+- 同一 Step 的 contract repair（`StepWithRepair`，第 4.2 節）不是 Retry：不建立 activation、不寫 Retry 事件，用盡時回最後的原始錯誤而非 `RetryExhausted`；每次 repair 仍消耗 run 的 attempt 額度。不可 repair 的核對（例如外部副作用的身分與 receipt）在其成功返回後由 workflow 執行一次。
 - Provider auto retry 在同一 attempt 內，由 Pi 管理；記錄其獨立 counter，不消耗 workflow budget。
 - Controller 不在 pipe 斷線、ack timeout 或結果不明時自動重送 prompt。Retry 也不代表外部 API／檔案修改的 exactly-once。
 
@@ -527,7 +531,7 @@ Dispatch 流程：
 | CleanupFailed、FinalizationFailed | 不追溯改寫既有 attempt | 不再派送，記錄未確認項目 | 不改已鎖定 outcome；按第 7.4 節回非零 |
 | 未分類的非 nil error | Failed，原始 cause 保留 | 已有 dispatch 而無完整 receipt 則 Close，否則保留 | Failed / 1，不猜為取消或可重試 |
 
-Pre-dispatch 的獨立 manual compaction 結果只觸發 readiness 重新查詢，不套用本次 dispatch 的 sticky failure；本次 prompt 寫入後觀察到的 compaction failure/abort 才按上表處理。每個 error 都不會自動 dispatch retry；workflow 必須顯式處理，已關閉 handle 若要繼續須 OpenSession。
+Pre-dispatch 的獨立 manual compaction 結果只觸發 readiness 重新查詢，不套用本次 dispatch 的 sticky failure；本次 prompt 寫入後觀察到的 compaction failure/abort 才按上表處理。每個 error 都不會自動 dispatch retry；workflow 必須顯式處理，已關閉 handle 若要繼續須 OpenSession。例外是 workflow 顯式呼叫的 `StepWithRepair`（第 4.2 節）：ContractInvalid 與其 `validate` 回傳的任何 error（含未分類與 I/O error）都當作內容診斷，在預算內以同一 handle repair；其餘 error 照上表原樣回傳。
 
 錯誤正規化取最外層已分類 boundary，不能把 StorageFailed 因內層 timeout cause 降級。Root/collateral 歸屬依明確 attempt identity／handle provenance 判定，不依 error chain 形狀。真正觸發 fault 的 attempt 保留 failure；被同一 root-fatal 停止的 siblings 記 Cancelled，根因留 Cause。Consumer Ref read failure 以當前 operation 的 attempt/handle 記來源；runtime fatal ingress 保留來源 handle。Collateral cancellation 的 DispatchAccepted 必須保留本次 dispatch evidence，不被根因的 accepted=no 覆蓋。
 

@@ -108,6 +108,7 @@ Gate：各必要 case 的預期行為成立，無 race；實際執行交付 bina
 | 方法／情境 | 必須成立的 gate |
 |---|---|
 | 順序 Ref 交接、不同完成順序的 parallel、schema 修正＋reviewer reject、fresh/reused session、nested retry | 真實 workflow control flow；宣告順序回傳，首次之外的 retry budget 正確，ancestor 未結束前不提前定案 invocation |
+| `StepWithRepair` 的 schema／acceptance repair、不可 repair 的失敗、預算 0／負數／用盡、repair 中取消、repair 無法開始 | 同一 handle 與 `contract-repair-*` 子 scope；repair Feedback 帶診斷並保留原 Refs；不建立 Retry activation；不可 repair 的失敗只派送一次；用盡回原始錯誤；被拒的發布仍 committed |
 | 重複 names/keys、同 handle lease、Preparing/request/waiting/rejected 等失敗 | Preflight 拒絕不建 attempt；Preparing 起消耗額度，不把未派送次數退還，Busy 不干擾現有 lease |
 | Inputs、feedback refs、Decision、Decode/ReadContract、Retry/Parallel/final Result | 所有入口使用同一 committed resolver；跨 run、偽造 metadata/hash、未提交 published、被改寫來源都拒絕 |
 | Publish 後阻斷 journal 或必要 snapshot | Publish != commit，無 committed Ref，不派送下游，sticky fatal 不能被 callback 吞掉 |

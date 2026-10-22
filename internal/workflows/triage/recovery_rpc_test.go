@@ -144,3 +144,53 @@ func TestTaskStepSecondAcceptanceRepair(t *testing.T) {
 		t.Error("the second repair did not get the latest diagnostic")
 	}
 }
+
+// A cancel that interrupts a repair is not repaired and hands over the last
+// publication an earlier attempt committed.
+func TestTaskStepCancelDuringRepairKeepsLastPublication(t *testing.T) {
+	model := runtime.ModelSpec{Provider: "fixture", ID: "model", Thinking: "high"}
+	var ref contract.Ref
+	var stepErr error
+	var calls []agentCall
+	cancelNow := make(chan struct{})
+	res := runHarness(t, "CASE-17", func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
+		stepCtx, stop := context.WithCancelCause(ctx)
+		defer stop(nil)
+		go func() {
+			select {
+			case <-cancelNow:
+				stop(&engine.Failure{Code: engine.Cancelled, Origin: engine.OriginFailFastSibling, Message: "sibling failed"})
+			case <-stepCtx.Done():
+			}
+		}()
+		tk := newTask(r, "probe", "CASE-17", nil)
+		ref, stepErr = RunTaskStep(stepCtx, r, TaskStep{Scope: r.Root(), Model: model, Stage: "probe", Key: "probe", Task: tk, Schema: PromptSchema, Recovery: true, Timeout: time.Second,
+			Validate: func(context.Context, contract.Ref) error { return errors.New("violation") }})
+		return engine.Result{}, nil
+	}, func(t *testing.T, call agentCall) string {
+		calls = append(calls, call)
+		if len(calls) == 3 {
+			close(cancelNow)
+			return "hold"
+		}
+		call.reply(t, CallerPrompt{Ticket: "CASE-17"}, nil)
+		return ""
+	})
+	if len(calls) != 3 {
+		t.Fatalf("dispatches = %d, want 3", len(calls))
+	}
+	var failure *TaskFailure
+	var f *engine.Failure
+	if !errors.As(stepErr, &failure) || !errors.As(failure.Cause, &f) || f.Code != engine.Cancelled || f.Origin != engine.OriginFailFastSibling {
+		t.Fatalf("error = %v, want a *TaskFailure caused by the sibling cancel", stepErr)
+	}
+	second := calls[1].Request.Identity.AttemptID
+	if ref == (contract.Ref{}) || ref.AttemptID != second || failure.Attempt != second || res.Report.Snapshot.Attempts[second].State != engine.Succeeded {
+		t.Errorf("ref = %+v failure attempt = %s, want the committed publication of the second attempt %s", ref, failure.Attempt, second)
+	}
+	for _, s := range res.Report.Snapshot.Sessions {
+		if s.State != "Closed" {
+			t.Fatalf("session %s left %s", s.ID, s.State)
+		}
+	}
+}

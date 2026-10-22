@@ -2,7 +2,7 @@
 
 本文件落實 [專案憲法第七條](../AGENTS.md)，是開發、review 與接手的必要入口。規範共用機制的收斂順序，不新增 WorkflowBase、DSL、工具權限框架或外部 workflow config。
 
-**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，R2 已提供共用 report 判定，R3 已共用 publication 投影與 bounded-read loop，R4 已遷移指定 host transport consumers，R7 已將 gh／git 命令執行接入 runtime、bare repository 機械接入 gitrepo，R6 已將 review 流程抽成可組合單元，實際入口見下表，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
+**規劃中的 API 不等於已實作。** R1 已接入共用 runtime，R2 已提供共用 report 判定，R3 已共用 publication 投影與 bounded-read loop，R4 已遷移指定 host transport consumers，R7 已將 gh／git 命令執行接入 runtime、bare repository 機械接入 gitrepo，R6 已將 review 流程抽成可組合單元，R9 已將 contract repair 迴圈抽成 engine 方法，實際入口見下表，具體名稱以完成後的 source 宣告為準。已有 engine 原語不能因本計畫重新實作。逐次執行狀態、SHA、review/gate logs 留在 repo 外指定工程紀錄，不放進本文件。
 
 ## 1. 單一規範來源與接手 gate
 
@@ -36,9 +36,9 @@
 | Node TLS 前置檢查 | `runtime.CheckNodeTLS`（`runtime/preflight.go`） | R6 已接線：需要此檢查的 workflow 在第一個副作用前呼叫（目前為 code-review；code-change 是規劃中的第二個 consumer）；不屬於 Pi 啟動，triage 與 smoke-echo 不呼叫 |
 | gh／git 命令執行與 bare clone | `runtime.GitHubGET`／`runtime.Git`（`runtime/command.go`）；`gitrepo.Reserve` 與 `Repo.Init`／`AddRemote`／`FetchPinned`／`Cleanup`；review `acquire`、`Verify`、`Checkout.Cleanup` 使用 | R7 已接線：review 舊副本移除；只限固定 gh REST GET 與 git，不提供任意執行檔；唯讀政策留 review；可寫 fetch 與 GraphQL 由第一個使用它的 C 單元加入，不 import review 私有實作 |
 | 私有 skill 目錄展開 | 規劃中（R8）：目前在 `triage.PrepareSkills`，將抽成中性入口 | 未實作前，新 workflow 不得 import triage 私有實作 |
-| Contract repair 迴圈 | 規劃中（R9）：目前在 `triage.TaskSession.Run`，將抽成中性機械 | 未實作前，新 workflow 不得複製或 import triage 私有實作 |
+| Contract repair 迴圈 | `engine.Scope.StepWithRepair`；triage `TaskSession.Run` 使用 | R9 已接線：triage 舊內聯迴圈移除；規則見該方法的 doc comment |
 
-表中的 triage consumers 指已刪除的舊版 Planner triage；共用入口仍由其他 consumers 使用。v2（`internal/workflows/triage`）目前使用 `engine.ReadContract`＋`contract.DecodePublication`（`readAccepted`、citation 檢查）、`contract.ReadBounded`（`rawFile`，與舊版相同的二次讀取 adapter）、`reportresource.ExtractFresh`（`PrepareSkills`）、`contract.ReadStable`，以及 `Scope.Attach`、`StepSpec.Observe`。上述相對路徑均位於 `internal/`。角色模型、PR Pin、code-location Evidence、investigation Ref/file Evidence、Source status 及 verdict 不屬於通用登記項，保留 workflow-specific 語義。
+表中的 triage consumers 指已刪除的舊版 Planner triage；共用入口仍由其他 consumers 使用。v2（`internal/workflows/triage`）目前使用 `engine.ReadContract`＋`contract.DecodePublication`（`readAccepted`、citation 檢查）、`contract.ReadBounded`（`rawFile`，與舊版相同的二次讀取 adapter）、`reportresource.ExtractFresh`（`PrepareSkills`）、`contract.ReadStable`，以及 `Scope.Attach`、`Scope.StepWithRepair`、`StepSpec.Observe`。上述相對路徑均位於 `internal/`。角色模型、PR Pin、code-location Evidence、investigation Ref/file Evidence、Source status 及 verdict 不屬於通用登記項，保留 workflow-specific 語義。
 
 ## 3. 共用 refactor 單元與順序
 
@@ -197,22 +197,38 @@ R5 提供真 report 操作及 shared consumer；M6 已在明示政策的新入�
 
 **完成出口：** triage 實際使用中性入口，舊內聯副本移除；新 consumer 的角色集合與環境變數由其 workflow 自行宣告。
 
-### R9：contract repair 迴圈中性化（規劃中，尚未實作）
+### R9：contract repair 迴圈中性化
 
 服務 [CODE-CHANGE](CODE-CHANGE.md)。以其 P0 為前置，與 R6、R7、R8 彼此獨立。
+
+**已實作接線：** `engine.Scope.StepWithRepair(ctx, spec, repairs, validate)` 承接原本在 `triage.TaskSession.Run` 的迴圈與 repair 訊息文字，triage 的內聯迴圈與 `repairMessage` 已移除；`TaskSession.Run` 以 `repairBudget`（仍為 2）與 `TaskStep.Validate` 呼叫它，`RunTaskStep` 與 `rounds.go` 兩個入口不變。可 repair 的條件、子 scope 命名、Feedback 組成、回傳形狀與 validate 的界線以該方法的 doc comment 為準，本文不重述；triage 專屬部分與錯誤字串不變。
+
+**明列的行為差異：**
+
+- Repair attempt 的 Feedback 保留首次 Feedback 的 Refs（舊版丟棄），只以診斷取代 message；原 message 不併入，也不加入被拒的 Ref。對 triage 可觀察：facts 業務重試與 investigator 第二輪起帶 Refs 的 Feedback，其 repair attempt 的 `request.json`、`AttemptStarted` 與 snapshot 的 feedback refs 由空變為原 Refs，每個 Ref 在該 attempt 派送前多經一次 committed 解析。解析失敗為 Store I/O 的 fatal、已發布檔案被改寫或移除時的 ReferenceInvalid，或取消／attempt 期限，都在派送前發生，都不 repair。
+- `Observed` 由每次 attempt 後立即呼叫，改為迴圈結束後依派送順序呼叫；唯一 consumer（investigator）在 `RetryInputs` 返回後才讀，無可觀察差異。
+- 新拒絕條件只對新呼叫者：負數預算在任何 Child／Step 之前以 `InvalidDefinition` 拒絕；triage 傳 2，不觸發。
+
+**剩餘缺口：**
+
+- 寫入型 Step 的身分與 receipt 核對放在成功返回之後，其接線與回歸在 C1。
+- 寫入型 Step 的 repair 派送與 repair 意圖衝突：engine 固定的派送文字要求 Agent 先執行 `request.prompt` 的任務，repair 只帶診斷 Feedback，對寫入型 Step 可能重做副作用。由 code-change 第一個使用它的單元提出必要改動，本單元不改派送文字。
+- D1 對 Agent 行為的影響（repair 時看到原 Feedback 的 Refs）未經 live 驗證。
+
+以下保留目標與完成條件。
 
 兩個真 consumer：triage 的 `TaskSession.Run`（經 `RunTaskStep` 與 `rounds.go` 兩個入口呼叫，含 `repairBudget = 2`、每次 repair 的 `contract-repair-*` 子 scope、同一 handle、schema 與 acceptance 兩種診斷、已發布 Ref 的保留）與 code-change 的寫入型 Step。`review` 刻意沒有內容修正迴圈（見 `docs/CODE-REVIEW.md`），不是 consumer，也不在此遷移。
 
 - 只抽政策無關的核心：預算內的同 handle 重派、診斷作為 Feedback、子 scope 命名、執行類失敗（timeout、cancel、provider）不重試。triage 專屬的角色命名（`triage-` 前綴）、`TaskFailure` 與 recovery 型別、observation 回調留在 triage。
 - 差異矩陣須逐項列：取消、錯誤分類、ownership（repair 被取消時已發布 Ref 的保留）、限額（每 Step 的 attempts 上界）、穩定性、生命週期。不得改變 triage 的錯誤字串、預算與 attempts 會計，也不得默默套用其他語義。
 - 寫入型 Step 的外部副作用不由此機械處理；它不知道副作用存在。身分與 receipt 核對在迴圈接受最終 contract 之後由 consumer 執行一次，不進 `Validate`，因此核心不需要「不可 repair 的驗收錯誤」；若 consumer 把它放進 `Validate`，會被 repair，違反第四條。
-- 矩陣另列：repair 時 Feedback 的 Refs 是否保留（現行 repair 以不含 Refs 的新 Feedback 取代原 Feedback，A3 的 findings Refs 走 Feedback，必須保留，這對 triage 是行為差異，須明列並驗收）。
+- 矩陣另列：repair 時 Feedback 的 Refs 是否保留（舊版 repair 以不含 Refs 的新 Feedback 取代原 Feedback，A3 的 findings Refs 走 Feedback，必須保留，這對 triage 是行為差異，須明列並驗收）。
 
 **完成出口：** triage 實際使用中性核心，舊內聯副本移除；既有 triage 測試與錯誤字串不變。只交付政策無關的核心；寫入型 Step 的回歸在 code-change 第一個使用它的單元驗收，不在本單元預造。
 
 ## 4. 後續 triage milestones 的依賴鎖
 
-> **現況：**以下 M1–M7 是舊版 Planner triage 的歷史接線；該 workflow 未通過 alpha，已自 registry 移除，程式碼也已刪除（可從版本歷史取得）。v2 以新 package 改寫；v2 的共用項與相依於落地時更新本文件，下表不再是施工順序。目前 `internal/workflows/triage` 已承接 typed recovery（`Recoverable`、`ConfirmTaskRecovery`、`RetryInputs` 等）與 fresh-session task Step（`RunTaskStep`／`CloseTaskStep`），錯誤字串不變；S0（caller prompt 以 Attach 記錄、intake、facts、獨立 fact-check validator、未通過的事實以 Controller 記錄降級為缺口）已在 `runS0`，intake 驗收移植自舊版初始 intake，去掉 revision 欄位。外部 skill 目錄的展開（`triage.PrepareSkills`）以 `contract.ReadStable`（Store 既有的 no-symlink／regular-file／NONBLOCK／大小上限／讀取期間穩定檢查，僅新增匯出）讀入記憶體，再交給既有 `reportresource.ExtractFresh`（只展開六個角色子樹，略過 `.` 開頭的項目，每個角色必須有 `SKILL.md`；讀來源與比對上游各有期限，前者逾時為執行失敗，後者逾時記為未檢查的缺口）；`ExtractFresh` 本身與其 embed consumers 不變。`runtime/preflight.go` 的 discovery 讀取不遷移：它在 runtime 層（不 import contract）、讀的是他人 process 寫的 discovery 檔，只做唯讀判斷，政策是最後一段 NOFOLLOW、1 MiB、不需要讀取期間穩定檢查，與 run 內複製的信任邊界不同。
+> **現況：**以下 M1–M7 是舊版 Planner triage 的歷史接線；該 workflow 未通過 alpha，已自 registry 移除，程式碼也已刪除（可從版本歷史取得）。v2 以新 package 改寫；v2 的共用項與相依於落地時更新本文件，下表不再是施工順序。目前 `internal/workflows/triage` 已承接 typed recovery（`Recoverable`、`ConfirmTaskRecovery`、`RetryInputs` 等）與 fresh-session task Step（`RunTaskStep`／`TaskSession.Close`），錯誤字串不變；S0（caller prompt 以 Attach 記錄、intake、facts、獨立 fact-check validator、未通過的事實以 Controller 記錄降級為缺口）已在 `runS0`，intake 驗收移植自舊版初始 intake，去掉 revision 欄位。外部 skill 目錄的展開（`triage.PrepareSkills`）以 `contract.ReadStable`（Store 既有的 no-symlink／regular-file／NONBLOCK／大小上限／讀取期間穩定檢查，僅新增匯出）讀入記憶體，再交給既有 `reportresource.ExtractFresh`（只展開六個角色子樹，略過 `.` 開頭的項目，每個角色必須有 `SKILL.md`；讀來源與比對上游各有期限，前者逾時為執行失敗，後者逾時記為未檢查的缺口）；`ExtractFresh` 本身與其 embed consumers 不變。`runtime/preflight.go` 的 discovery 讀取不遷移：它在 runtime 層（不 import contract）、讀的是他人 process 寫的 discovery 檔，只做唯讀判斷，政策是最後一段 NOFOLLOW、1 MiB、不需要讀取期間穩定檢查，與 run 內複製的信任邊界不同。
 
 R1–R4 的匿名驗收與 consumer 遷移完成後才啟動 M1，不因某個 helper 尚未共用就在 triage 寫私有替代品。Live 驗收是 M7 的獨立 gate，不阻止已授權的匿名實作，也不因匿名通過被解除。
 

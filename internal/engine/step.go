@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -248,6 +249,86 @@ func (s *Scope) Step(ctx context.Context, spec StepSpec) (result StepResult, err
 	result.Execution = receipt
 	return
 }
+
+// repairMessage asks for this attempt's contract with the reported
+// violations fixed and the rest of the content kept.
+func repairMessage(stage, violations string) string {
+	return "Previous contract was rejected by " + stage + " validation. Write this attempt's contract, with this request's identity, fixing the reported violations; the content they do not name stays as it was: " + violations
+}
+
+// StepWithRepair runs spec and, up to repairs times, dispatches it again on
+// the same handle after a ContractInvalid failure or a validate error. A
+// repair's Feedback message carries the diagnostic and its Refs are those of
+// spec.Feedback. Every other failure returns as is; exhausted repairs return
+// the last ContractInvalid failure or validate error unwrapped. Repairs are
+// not a Retry, and every attempt counts against the run attempt limit.
+//
+// Repair n runs in a child scope of s named "contract-repair-<key>" for n = 1
+// and "contract-repair-<n>-<key>" after. A name collision surfaces only at the
+// repair that needs the name, after earlier attempts ran, so callers avoid
+// keys beginning with a number and a dash, and scope names beginning with
+// "contract-repair-".
+//
+// validate, nil meaning schema only, sees every publication. Any error it
+// returns, an I/O error included, is taken as a content diagnostic and
+// repaired, so a consumer separates execution failures itself instead of
+// returning them from validate. A check whose failure must end the Step, such
+// as the identity or receipt of a write-type Step's side effect, runs once
+// after success, never inside validate. A publication validate rejected stays
+// committed.
+//
+// The results hold one entry per Step call in dispatch order. A Step that
+// fails before its attempt starts, for example on a context cancelled during
+// validate, still occupies an entry with an empty AttemptID, so the last entry
+// is not necessarily the failing attempt; a repair whose Child fails appends
+// none. On success the last entry is the accepted one.
+func (s *Scope) StepWithRepair(ctx context.Context, spec StepSpec, repairs int, validate func(context.Context, contract.Ref) error) ([]StepResult, error) {
+	if repairs < 0 {
+		return nil, newFailure(InvalidDefinition, "StepWithRepair", "nonnegative repair budget required")
+	}
+	var results []StepResult
+	scope, attempt := s, spec
+	for n := 0; ; n++ {
+		if n > 0 {
+			name := "contract-repair-" + spec.Key
+			if n > 1 {
+				name = fmt.Sprintf("contract-repair-%d-%s", n, spec.Key)
+			}
+			child, err := s.Child(name)
+			if err != nil {
+				return results, err
+			}
+			scope = child
+		}
+		out, err := scope.Step(ctx, attempt)
+		results = append(results, out)
+		var feedback *Feedback
+		if err == nil {
+			if validate == nil {
+				return results, nil
+			}
+			ve := validate(ctx, out.Output)
+			if ve == nil {
+				return results, nil
+			}
+			if n >= repairs {
+				return results, ve
+			}
+			feedback = &Feedback{Message: repairMessage("acceptance", ve.Error())}
+		} else {
+			var failure *Failure
+			if !errors.As(err, &failure) || failure.Code != ContractInvalid || n >= repairs {
+				return results, err
+			}
+			feedback = &Feedback{Message: repairMessage("schema", failure.Message), SourceAttemptID: failure.AttemptID, SourceCode: string(failure.Code)}
+		}
+		if spec.Feedback != nil {
+			feedback.Refs = spec.Feedback.Refs
+		}
+		attempt.Feedback = feedback
+	}
+}
+
 func (r *Run) keepHandle(ctx context.Context, h *SessionHandle, f *Failure, dispatched, settled bool) bool {
 	if fatal(f) {
 		return false

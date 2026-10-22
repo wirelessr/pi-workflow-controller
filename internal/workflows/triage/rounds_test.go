@@ -160,6 +160,9 @@ func TestRounds(t *testing.T) {
 				if fb := calls[2].Request.Feedback; fb == nil || !strings.Contains(fb.Message, "recorded absent in the round 2 fact status") {
 					t.Errorf("round 3 feedback = %+v", fb)
 				}
+				if first, repair := calls[2].Request.Feedback, calls[3].Request.Feedback; !calls[3].repair || first == nil || len(first.Refs) == 0 || !slices.Equal(repair.Refs, first.Refs) {
+					t.Errorf("round 3 repair feedback = %+v, want the refs of %+v", repair, first)
+				}
 				status := decodeRef[FactStatus](t, nil, out.Records[1].Status)
 				if len(status.Gaps) != 1 || status.Gaps[0].ID != "not-accepted-r2-d-pop" || !strings.Contains(status.Gaps[0].Text, "2 times") {
 					t.Errorf("round 2 status gaps = %+v", status.Gaps)
