@@ -2780,6 +2780,66 @@ func TestEngineStepWithRepair(t *testing.T) {
 	}
 }
 
+// A repair dispatch of a RepairKeepsWork Step opens with the repair
+// instruction instead of the task instruction; every other dispatch, all of
+// triage's included, keeps the task instruction.
+func TestEngineStepWithRepairDispatchText(t *testing.T) {
+	const execute = "\nFirst execute the task in request.prompt, using its inputs and feedback. Do not skip the task to construct an output. After the task finishes, read output.schema.path"
+	const rewrite = "\nThis is a contract repair: do not add or repeat any external write or local commit; only fix the violations request.feedback.message reports by rewriting this attempt's contract. Read output.schema.path"
+	for _, tc := range []struct {
+		name      string
+		keepsWork bool
+		// instructions opens each dispatch: the first, a schema repair, an
+		// acceptance repair, then a plain Step with feedback.
+		instructions []string
+	}{
+		{name: "default", instructions: []string{execute, execute, execute, execute}},
+		{name: "repair keeps work", keepsWork: true, instructions: []string{execute, rewrite, rewrite, execute}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &engTestRuntime{execute: func(_ context.Context, call engTestCall) engTestReply {
+				if call.Number == 1 {
+					return engTestReply{Raw: []byte(`{"broken":`)}
+				}
+				return engTestReply{Data: engTestData{Value: "valid"}}
+			}}
+			var stepErr, directErr error
+			r, _ := engTestNew(t, "", fake, func(ctx context.Context, run *Run, _ Input) (Result, error) {
+				h, err := run.OpenSession(ctx, engTestRole("worker"))
+				if err != nil {
+					return Result{}, err
+				}
+				rejections := 0
+				spec := StepSpec{Key: "work", Session: h, Prompt: "task", Output: contract.Spec{SchemaID: engTestSchema}, RepairKeepsWork: tc.keepsWork}
+				_, stepErr = run.Root().StepWithRepair(ctx, spec, 2, func(context.Context, contract.Ref) error {
+					if rejections++; rejections == 1 {
+						return errors.New("violation")
+					}
+					return nil
+				})
+				spec.Key, spec.Feedback = "direct", &Feedback{Message: "business retry"}
+				_, directErr = run.Root().Step(ctx, spec)
+				return Result{}, nil
+			})
+			report := r.Execute()
+			engTestReport(t, report, Succeeded, 0)
+			if stepErr != nil || directErr != nil {
+				t.Fatalf("step %v direct %v", stepErr, directErr)
+			}
+			calls, _, _ := fake.allSessions()[0].history()
+			if len(calls) != len(tc.instructions) {
+				t.Fatalf("dispatches = %d, want %d", len(calls), len(tc.instructions))
+			}
+			for i, call := range calls {
+				other := map[string]string{execute: rewrite, rewrite: execute}[tc.instructions[i]]
+				if got := call.Dispatch.Message; !strings.Contains(got, tc.instructions[i]) || strings.Contains(got, other) {
+					t.Errorf("dispatch %d: %q, want it to open with %q", i+1, got, tc.instructions[i])
+				}
+			}
+		})
+	}
+}
+
 // A repair that cannot start ends the loop with its error after earlier
 // attempts already ran, and the results still report those attempts.
 func TestEngineStepWithRepairStopsBetweenAttempts(t *testing.T) {

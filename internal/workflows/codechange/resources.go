@@ -15,7 +15,10 @@ const schemaURI = "https://pi-workflow-controller.local/schemas/code-change/"
 // and the worktree; the design doc bytes are its evidence file design-doc.
 const InputSchema = "code-change.input.v1"
 
-var schemaNames = []string{"input"}
+// ImplementSchema is the implementer's readiness and local implementation.
+const ImplementSchema = "code-change.implement.v1"
+
+var schemaNames = []string{"input", "implement"}
 
 func Resources() []contract.Resource {
 	var out []contract.Resource

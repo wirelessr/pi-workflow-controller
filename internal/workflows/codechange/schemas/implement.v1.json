@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/code-change/implement.v1.json",
+  "description": "The implementer's readiness decision for the design doc and, when ready, the local implementation in the worktree",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "readiness",
+    "input"
+  ],
+  "properties": {
+    "readiness": {
+      "description": "ready: the design doc was implementable and the work is committed locally; the worktree HEAD is local_head, which is not the base or one of its ancestors. gaps: it could not be implemented without decisions the design doc should have made; the worktree HEAD still equals the base",
+      "enum": [
+        "ready",
+        "gaps"
+      ]
+    },
+    "input": {
+      "$ref": "#/$defs/ref",
+      "description": "The input Ref this request gave, whose evidence is the design doc snapshot, copied byte-exact from request.inputs"
+    },
+    "ticket": {
+      "description": "The ticket the design doc names for this work",
+      "type": "string",
+      "minLength": 1
+    },
+    "gaps": {
+      "description": "What the design doc leaves undecided that the implementation would need, one gap per item",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "plan": {
+      "description": "The implementation plan followed",
+      "type": "string",
+      "minLength": 1
+    },
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "changes",
+        "verification"
+      ],
+      "properties": {
+        "changes": {
+          "description": "Summary of the committed changes",
+          "type": "string",
+          "minLength": 1
+        },
+        "verification": {
+          "description": "Every check chosen for this change, including those that could not run",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "status",
+              "detail"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "description": "passed or failed when the check ran; not_checked when it could not run, which is not a pass",
+                "enum": [
+                  "passed",
+                  "failed",
+                  "not_checked"
+                ]
+              },
+              "detail": {
+                "description": "What was run and its result, or for not_checked why it could not run",
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "local_head": {
+      "description": "The worktree HEAD after the last local commit",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "readiness": {
+            "const": "ready"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "ticket",
+          "plan",
+          "report",
+          "local_head"
+        ],
+        "not": {
+          "required": [
+            "gaps"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "readiness": {
+            "const": "gaps"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "gaps"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "local_head"
+              ]
+            },
+            {
+              "required": [
+                "report"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "attempt_id",
+        "path",
+        "schema_id",
+        "sha256",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "schema_id": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

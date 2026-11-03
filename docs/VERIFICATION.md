@@ -110,7 +110,7 @@ Gate：各必要 case 的預期行為成立，無 race；實際執行交付 bina
 | 方法／情境 | 必須成立的 gate |
 |---|---|
 | 順序 Ref 交接、不同完成順序的 parallel、schema 修正＋reviewer reject、fresh/reused session、nested retry | 真實 workflow control flow；宣告順序回傳，首次之外的 retry budget 正確，ancestor 未結束前不提前定案 invocation |
-| `StepWithRepair` 的 schema／acceptance repair、不可 repair 的失敗、預算 0／負數／用盡、repair 中取消、repair 無法開始 | 同一 handle 與 `contract-repair-*` 子 scope；repair Feedback 帶診斷並保留原 Refs；不建立 Retry activation；不可 repair 的失敗只派送一次；用盡回原始錯誤；被拒的發布仍 committed |
+| `StepWithRepair` 的 schema／acceptance repair、不可 repair 的失敗、預算 0／負數／用盡、repair 中取消、repair 無法開始、`RepairKeepsWork` 的派送文字 | 同一 handle 與 `contract-repair-*` 子 scope；repair Feedback 帶診斷並保留原 Refs；未設定 `RepairKeepsWork` 的每個派送都以原「先執行任務」指示開頭，設定者只在 repair 派送改以 repair 指示開頭，首次派送與一般 Step 不變；不建立 Retry activation；不可 repair 的失敗只派送一次；用盡回原始錯誤；被拒的發布仍 committed |
 | 重複 names/keys、同 handle lease、Preparing/request/waiting/rejected 等失敗 | Preflight 拒絕不建 attempt；Preparing 起消耗額度，不把未派送次數退還，Busy 不干擾現有 lease |
 | Inputs、feedback refs、Decision、Decode/ReadContract、Retry/Parallel/final Result | 所有入口使用同一 committed resolver；跨 run、偽造 metadata/hash、未提交 published、被改寫來源都拒絕 |
 | Publish 後阻斷 journal 或必要 snapshot | Publish != commit，無 committed Ref，不派送下游，sticky fatal 不能被 callback 吞掉 |
@@ -200,7 +200,19 @@ PWC_LIVE_PI=1 go test -race -count=1 ./internal/engine \
 - 此 workflow 的真 Pi/provider/獲授權 PR E2E 另行進行，不能以 smoke-echo 或 substitute 代替。範例目標使用 `https://github.com/owner/repo/pull/123`，執行時的真目標只記 repo 外。
 - 真 E2E 核對所有角色/read skills/resources/refs/report/cleanup、global resources 不變、未執行被審 code/tests/build/scripts 或外部 writes。這是採證方法，不是 OS sandbox／全面 syscall/network 稽核或模型推理正確率保證。
 
-## 6. 發布前 privacy／安全 scan
+## 6. Code-change 業務 gates
+
+使用真 engine/Store/runtime/Pi RPC 與真 git（本機 bare repo 經 `file://`），只替代 GitHub API（PATH 上的 gh wrapper）、GitHub 的 git remote 與 Pi/provider。入口見 [workflow_test.go](../internal/workflows/codechange/workflow_test.go) 與 [implement_test.go](../internal/workflows/codechange/implement_test.go)。
+
+- 前置拒絕依序（Prompt、`PWC_PI_CWD`、Node TLS、design doc、repo GET）發生在任何 worktree、git、session 與 attempt 之前；repo GET 之後、建立 worktree 之前，以同一 git 隔離環境執行 `git --no-lazy-fetch version`，不支援此選項的 git（以拒絕該選項的 PATH wrapper 模擬）以具名錯誤失敗，不建立 worktree、session 或 attempt。Worktree 建立的 git 政策、部分失敗的清理與註冊後的保留也在 `workflow_test.go`。`main()` 把 `PWC_PI_CWD` 交給 workflow 定義，由 cmd 層的 subprocess test 經 `main()` 證明。
+- 實作者在 `PWC_PI_CWD`（不是 engine default）以 fresh session 執行，request 帶 worktree 絕對路徑與 input Ref；每個結束路徑都確認該 session 的 process 退出，worktree 保留。
+- Receipt 只在 repair 迴圈接受最終 contract 後核對一次，只經 worktree registration 讀 HEAD，並停用 lazy fetch 與 replace refs：回報值不是 worktree HEAD、是 base 或其祖先（含以 replace ref 改寫 base 歷史的情形）、不存在，或 checkout 的 `.git` 被改指他處時，以具名錯誤失敗、不 repair、不記 Decision、不交付 Final，已 committed 的 `input` 與 `implement` 仍列在 Outputs；gaps 回報時 HEAD 不等於 base 同樣失敗。
+- Schema 錯誤與 input Ref 回抄不符（Ref 的任一欄位）在 repair 時 Feedback 帶具體診斷，repair 派送使用 `RepairKeepsWork` 的文字，Agent 只 commit 一次；同一 handle、子 scope、預算用盡等 repair 機械由 engine tests 涵蓋。
+- Ready 通過核對時記 `implementation-recorded`、gaps 且 HEAD 等於 base 時記 `design-gaps-reported`（各引用 `implement` Ref）。後者交付實作 contract 為 Final，以具名錯誤結束（Failed、exit 1）。A1 執行中取消為 Cancelled（130），保留 worktree。
+- Receipt 核對防的是錯誤與謊報，不防同一使用者權限的 Agent 偽造：worktree registration 與 repository 目錄（HEAD、`commondir`、`shallow`、grafts、refs）都可由 Agent 寫入，改寫 `shallow`、grafts 或 `commondir` 能改變讀出的答案。「新 commit」只指 HEAD 不是 base 或其祖先，不證明該 commit 由 Agent 在本 Step 建立，也不證明它是 base 的後代。
+- 未經 live 驗證：模型遵循 `code-change.implement.v1` 與回抄 Ref 的能力、gap 判斷品質；repair 派送文字是否讓模型不再重做 commit；Agent 在 CWD 之外以絕對路徑操作 worktree 時各工具（檔案工具、git、build、test、依 CWD 找設定的工具）的行為；全域的相鄰 repo 探索規則是否觸發；Agent 端 git 的 identity、簽章、hooks、LFS 與 partial clone lazy fetch 的認證；`permissions.push` 與實際 push 能力。寫入範圍只靠 Step requirements：Agent 的工具能以絕對路徑在 worktree 以外的 repository 建檔並以使用者全域 identity commit，Controller 不阻擋，也只核對 worktree 自己的 HEAD。
+
+## 7. 發布前 privacy／安全 scan
 
 發布候選只包含通用 source/docs、匿名可重現 fixtures/tests 與公開產品配置。以下是檢查策略，不會自動刪除資料、重寫歷史或授權發布。
 
@@ -214,6 +226,6 @@ PWC_LIVE_PI=1 go test -race -count=1 ./internal/engine \
 
 實際 scan finding、檔案 manifests、執行命令/輸出、日期、SHA 及稽核結果只寫 repo 外受限紀錄，不將本機報告、真實 traces/history/email 或私有備份位置加入 commit。若發現洩漏，不將原文複製到 issue/PR，依授權處理。
 
-## 7. 保留的限制
+## 8. 保留的限制
 
 Numeric validator 極端可表示性／boolean inversion／error-tree 放大與非協作取消、完整 snapshot 重寫 I/O、永久 blocked stdout/filesystem 的非固定 wall-clock、任意 detached 子孫、Controller abrupt death，均保留 [DESIGN](../DESIGN.md) 的限制。不承諾 sandbox、supervisor、crash resume、exactly-once、外部副作用 rollback 或同 UID 惡意隔離。未知／未執行情境須明列，不以「全部通過」掩蓋。

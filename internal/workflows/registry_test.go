@@ -21,23 +21,56 @@ import (
 	"pi-workflow-controller/internal/workflows"
 )
 
-func TestRegistryContainsSmokeCodeReviewAndTriage(t *testing.T) {
-	registry, err := engine.NewRegistry(workflows.Definitions(""))
+func TestRegistryContainsProductWorkflows(t *testing.T) {
+	registry, err := engine.NewRegistry(workflows.Definitions("", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	definitions := registry.Definitions()
-	if len(definitions) != 3 || definitions[0].Name != "code-review" || definitions[1].Name != "jira-triage" || definitions[2].Name != "smoke-echo" {
+	if len(definitions) != 4 || definitions[0].Name != "code-change" || definitions[1].Name != "code-review" || definitions[2].Name != "jira-triage" || definitions[3].Name != "smoke-echo" {
 		t.Fatalf("unexpected product workflows: %+v", definitions)
 	}
-	for _, name := range []string{"smoke-echo", "jira-triage"} {
+	for _, name := range []string{"smoke-echo", "jira-triage", "code-change"} {
 		if _, err := registry.Lookup(name); err != nil {
 			t.Fatal(err)
 		}
 	}
 	schemas, err := contract.NewRegistry(workflows.Resources(), workflows.Schemas())
-	if err != nil || !schemas.Has("smoke.echo.v1") || !schemas.Has("triage.report.v1") || !schemas.Has("triage.round.v1") {
+	if err != nil || !schemas.Has("smoke.echo.v1") || !schemas.Has("triage.report.v1") || !schemas.Has("triage.round.v1") || !schemas.Has("code-change.input.v1") || !schemas.Has("code-change.implement.v1") {
 		t.Fatalf("product schemas unavailable: %v", err)
+	}
+}
+
+// The registered code-change checks the PWC_PI_CWD value Definitions was
+// given, before any side effect; its use as the implementer's CWD is covered
+// in the codechange package.
+func TestRegistryPassesPiCWDToCodeChange(t *testing.T) {
+	registry, err := engine.NewRegistry(workflows.Definitions("", "relative-pi-cwd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := registry.Lookup("code-change")
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas, err := contract.NewRegistry(workflows.Resources(), workflows.Schemas())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	pi, err := runtime.New(runtime.Options{Executable: filepath.Join(dir, "no-pi"), BridgeDir: dir, Policy: definition.Policy.Runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := engine.New(context.Background(), definition, engine.Input{Prompt: "owner/repo design.md", LaunchCWD: dir}, engine.Options{BaseDir: dir, Schemas: schemas, Runtime: pi, PiVersion: "0.84.3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := r.Execute()
+	// The value itself in the failure is what shows it reached code-change: an
+	// unset value fails at the same check.
+	if report.Failure == nil || !strings.Contains(report.Failure.Error(), `"relative-pi-cwd"`) || len(report.Snapshot.Attempts) != 0 {
+		t.Fatalf("outcome %s failure %v attempts %d", report.Outcome, report.Failure, len(report.Snapshot.Attempts))
 	}
 }
 
@@ -69,7 +102,7 @@ func TestSmokePreflightSubprocess(t *testing.T) {
 }
 
 func TestSmokeEchoSharedPreflight(t *testing.T) {
-	registry, err := engine.NewRegistry(workflows.Definitions(""))
+	registry, err := engine.NewRegistry(workflows.Definitions("", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +216,7 @@ func TestSmokeEchoBundledDefinition(t *testing.T) {
 				written <- produced{request, original}
 				return bundled.Reply{ToolName: "write", ToolArguments: map[string]any{"path": candidatePath, "content": string(original)}}
 			}})
-			registry, err := engine.NewRegistry(workflows.Definitions(""))
+			registry, err := engine.NewRegistry(workflows.Definitions("", ""))
 			if err != nil {
 				t.Fatal(err)
 			}

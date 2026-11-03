@@ -14,7 +14,20 @@ import (
 // feedbackDispatchNote marks a dispatch whose request carries feedback.
 const feedbackDispatchNote = "This request carries request.feedback: read request.feedback.message before starting; it says why this attempt runs or what it must address."
 
-func (s *Scope) Step(ctx context.Context, spec StepSpec) (result StepResult, err error) {
+// taskInstruction opens every dispatch's instructions unless a repair of a
+// RepairKeepsWork Step replaces it with repairKeepsWorkInstruction, because
+// redoing such a task would repeat its writes.
+const (
+	taskInstruction            = "First execute the task in request.prompt, using its inputs and feedback. Do not skip the task to construct an output. After the task finishes, read"
+	repairKeepsWorkInstruction = "This is a contract repair: do not add or repeat any external write or local commit; only fix the violations request.feedback.message reports by rewriting this attempt's contract. Read"
+)
+
+func (s *Scope) Step(ctx context.Context, spec StepSpec) (StepResult, error) {
+	return s.step(ctx, spec, false)
+}
+
+// step is Step; repair marks a StepWithRepair repair dispatch.
+func (s *Scope) step(ctx context.Context, spec StepSpec, repair bool) (result StepResult, err error) {
 	if s == nil || s.run == nil {
 		return result, newFailure(InvalidDefinition, "Step", "scope is not initialized")
 	}
@@ -161,7 +174,11 @@ func (s *Scope) Step(ctx context.Context, spec StepSpec) (result StepResult, err
 		// prompt against the previous one and never read the feedback.
 		feedbackNote = feedbackDispatchNote + "\n"
 	}
-	message := fmt.Sprintf("Controller dispatch %s\nRead request JSON: %s\n%sFirst execute the task in request.prompt, using its inputs and feedback. Do not skip the task to construct an output. After the task finishes, read output.schema.path, output.envelope.path and resources. Write evidence files into %s and artifact files into %s, creating either directory if absent; each files[] entry pairs a unique id with that file's path relative to the attempt directory. The envelope's data holds the task result. Write the complete envelope with exactly request.identity and output.schema_id to: %s\nWrite only this attempt's candidate; do not modify published inputs.\n", id.DispatchToken, attempt.RequestPath(), feedbackNote, filepath.Join(attempt.Dir(), "evidence"), filepath.Join(attempt.Dir(), "artifacts"), attempt.CandidatePath())
+	instruction := taskInstruction
+	if repair && spec.RepairKeepsWork {
+		instruction = repairKeepsWorkInstruction
+	}
+	message := fmt.Sprintf("Controller dispatch %s\nRead request JSON: %s\n%s%s output.schema.path, output.envelope.path and resources. Write evidence files into %s and artifact files into %s, creating either directory if absent; each files[] entry pairs a unique id with that file's path relative to the attempt directory. The envelope's data holds the task result. Write the complete envelope with exactly request.identity and output.schema_id to: %s\nWrite only this attempt's candidate; do not modify published inputs.\n", id.DispatchToken, attempt.RequestPath(), feedbackNote, instruction, filepath.Join(attempt.Dir(), "evidence"), filepath.Join(attempt.Dir(), "artifacts"), attempt.CandidatePath())
 	dispatch := runtime.Dispatch{Token: id.DispatchToken, Message: message}
 	if spec.Observe {
 		sink := r.newEntrySink(h.id, id.AttemptID)
@@ -259,9 +276,11 @@ func repairMessage(stage, violations string) string {
 // StepWithRepair runs spec and, up to repairs times, dispatches it again on
 // the same handle after a ContractInvalid failure or a validate error. A
 // repair's Feedback message carries the diagnostic and its Refs are those of
-// spec.Feedback. Every other failure returns as is; exhausted repairs return
-// the last ContractInvalid failure or validate error unwrapped. Repairs are
-// not a Retry, and every attempt counts against the run attempt limit.
+// spec.Feedback; with spec.RepairKeepsWork its dispatch tells the Agent to
+// only rewrite the contract, without adding or repeating writes. Every other failure returns
+// as is; exhausted repairs return the last ContractInvalid failure or validate
+// error unwrapped. Repairs are not a Retry, and every attempt counts against
+// the run attempt limit.
 //
 // Repair n runs in a child scope of s named "contract-repair-<key>" for n = 1
 // and "contract-repair-<n>-<key>" after. A name collision surfaces only at the
@@ -300,7 +319,7 @@ func (s *Scope) StepWithRepair(ctx context.Context, spec StepSpec, repairs int, 
 			}
 			scope = child
 		}
-		out, err := scope.Step(ctx, attempt)
+		out, err := scope.step(ctx, attempt, n > 0)
 		results = append(results, out)
 		var feedback *Feedback
 		if err == nil {

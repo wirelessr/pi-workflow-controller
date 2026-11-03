@@ -53,9 +53,10 @@ func TestGHHelper(t *testing.T) {
 }
 
 // TestGitHelper records each Controller git call, optionally blocks or fails
-// one subcommand, and otherwise replaces itself with the real git. Before a
-// failure it can replace the reserved checkout with a symlink to git-swap's
-// target, so the workflow's cleanup of the partial worktree fails.
+// one subcommand or acts as a git without --no-lazy-fetch, and otherwise
+// replaces itself with the real git. Before a failure it can replace the
+// reserved checkout with a symlink to git-swap's target, so the workflow's
+// cleanup of the partial worktree fails.
 func TestGitHelper(t *testing.T) {
 	real := os.Getenv("PWC_CC_GIT")
 	if real == "" {
@@ -82,6 +83,10 @@ func TestGitHelper(t *testing.T) {
 	}
 	_, _ = log.Write(append(line, '\n'))
 	_ = log.Close()
+	if _, err := os.Stat(filepath.Join(dir, "git-old")); err == nil && slices.Contains(args, "--no-lazy-fetch") {
+		_, _ = fmt.Fprintln(os.Stderr, "unknown option: --no-lazy-fetch")
+		os.Exit(129)
+	}
 	sub := subcommand(args)
 	if raw, err := os.ReadFile(filepath.Join(dir, "git-block")); err == nil && string(raw) == sub {
 		block(dir)
@@ -230,9 +235,14 @@ func (f *fixture) remote(repository string) string {
 // source replaces only the GitHub git remote, allowing the file protocol for it.
 func (f *fixture) fileSource() gitSource { return gitSource{remote: f.remote, allowFile: true} }
 
-// fixtureExecute is the workflow with only its GitHub git remote replaced.
-func (f *fixture) fixtureExecute(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-	return execute(ctx, r, in, f.piCWD, f.fileSource())
+// prepareOnly is the Controller preparation with only its GitHub git remote
+// replaced, ending with the input as Final, so preparation tests need no Pi.
+func (f *fixture) prepareOnly(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
+	p, err := prepare(ctx, r, in, f.piCWD, f.fileSource())
+	if err != nil {
+		return engine.Result{}, err
+	}
+	return engine.Result{Outputs: map[string]contract.Ref{"input": p.input}, Final: &engine.FinalSelection{Output: "input"}}, nil
 }
 
 type started struct {
@@ -440,6 +450,30 @@ func TestRejectionOrderBeforeSideEffects(t *testing.T) {
 	}
 }
 
+// A git without --no-lazy-fetch, which the receipt reads need, is rejected
+// after the repository GET and before any worktree, session or attempt.
+func TestGitWithoutNoLazyFetchRejected(t *testing.T) {
+	f := newFixture(t)
+	f.write(filepath.Join(f.dir, "git-old"), "")
+	r, report := f.execute(Definition(f.piCWD), prompt)
+	requireFailure(t, report, "code-change needs a git that supports --no-lazy-fetch (2.45 or newer)")
+	if !errors.Is(report.Failure, errGitNoLazyFetch) {
+		t.Fatalf("failure %v, want errGitNoLazyFetch", report.Failure)
+	}
+	if calls := f.gitCalls(); len(calls) != 1 || subcommand(calls[0].Args) != "version" {
+		t.Fatalf("git calls %q, want only the capability check", calls)
+	}
+	if got := len(f.ghCalls()); got != 1 {
+		t.Fatalf("gh calls: %d", got)
+	}
+	if _, err := os.Lstat(filepath.Join(r.Dir(), worktreeDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worktree directory created: %v", err)
+	}
+	if len(report.Snapshot.Sessions) != 0 || len(report.Snapshot.Attempts) != 0 || report.Final != nil {
+		t.Fatalf("sessions %d attempts %d final %+v", len(report.Snapshot.Sessions), len(report.Snapshot.Attempts), report.Final)
+	}
+}
+
 func TestDesignDocRejections(t *testing.T) {
 	for _, tc := range []struct {
 		name, path, want string
@@ -541,7 +575,7 @@ func TestRepositoryMetadata(t *testing.T) {
 			} else {
 				f.write(filepath.Join(f.dir, "repo.json"), tc.repo)
 			}
-			r, report := f.execute(f.definition(f.fixtureExecute), prompt)
+			r, report := f.execute(f.definition(f.prepareOnly), prompt)
 			if calls := f.ghCalls(); len(calls) != 1 {
 				t.Fatalf("gh calls: %v", calls)
 			}
@@ -585,19 +619,23 @@ func controllerPolicy(repoDir string) []string {
 
 var fileProtocol = []string{"-c", "protocol.file.allow=always"}
 
-// requirePolicy checks that every Controller git call carries exactly the
-// workflow policy plus extra before its subcommand, and the environment that
-// disables system and global configuration.
+// requirePolicy checks that the first Controller git call is the capability
+// check and every later one carries exactly the workflow policy plus extra
+// before its subcommand, and that all have the environment that disables
+// system and global configuration.
 func (f *fixture) requirePolicy(t *testing.T, repoDir string, extra []string) {
 	t.Helper()
 	calls := f.gitCalls()
-	if len(calls) == 0 {
-		t.Fatal("no Controller git call")
+	if len(calls) < 2 {
+		t.Fatalf("Controller git calls %q, want the capability check and more", calls)
 	}
 	want := append(controllerPolicy(repoDir), extra...)
-	for _, call := range calls {
-		i := slices.Index(call.Args, "--no-pager")
-		if i < 0 || len(call.Args) <= i+len(want) || !reflect.DeepEqual(call.Args[i:i+len(want)], want) || call.Args[i+len(want)] == "-c" {
+	for n, call := range calls {
+		if n == 0 {
+			if !slices.Equal(call.Args[len(call.Args)-2:], []string{"--no-lazy-fetch", "version"}) || subcommand(call.Args) != "version" {
+				t.Fatalf("first git call %q, want the --no-lazy-fetch capability check", call.Args)
+			}
+		} else if i := slices.Index(call.Args, "--no-pager"); i < 0 || len(call.Args) <= i+len(want) || !reflect.DeepEqual(call.Args[i:i+len(want)], want) || call.Args[i+len(want)] == "-c" {
 			t.Fatalf("git call %q, want the policy %q then the subcommand", call.Args, want)
 		}
 		for _, env := range []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1"} {
@@ -613,7 +651,7 @@ func TestSuccessRecordsInputAndKeepsWorktree(t *testing.T) {
 	var record contract.Publication[inputRecord]
 	var evidence []byte
 	def := f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-		result, err := f.fixtureExecute(ctx, r, in)
+		result, err := f.prepareOnly(ctx, r, in)
 		if err != nil {
 			return result, err
 		}
@@ -727,7 +765,7 @@ func TestGlobalGitConfigurationIgnored(t *testing.T) {
 	}
 	f.write(filepath.Join(f.dir, "xdg", "git", "config"), global)
 	f.write(filepath.Join(f.dir, "xdg", "git", "attributes"), "* filter=hostile eol=crlf\n")
-	r, report := f.execute(f.definition(f.fixtureExecute), prompt)
+	r, report := f.execute(f.definition(f.prepareOnly), prompt)
 	if report.Outcome != engine.Succeeded {
 		t.Fatalf("outcome %s: %v", report.Outcome, report.Failure)
 	}
@@ -799,7 +837,7 @@ func TestPartialWorktreeCleanupFailureReported(t *testing.T) {
 	f.write(filepath.Join(outside, "foreign"), "keep")
 	f.write(filepath.Join(f.dir, "git-swap"), outside)
 	f.write(filepath.Join(f.dir, "git-fail"), "worktree")
-	r, report := f.execute(f.definition(f.fixtureExecute), prompt)
+	r, report := f.execute(f.definition(f.prepareOnly), prompt)
 	requireFailure(t, report, "git worktree: ")
 	if !strings.Contains(report.Failure.Error(), "worktree cleanup: acquisition cleanup ownership mismatch") {
 		t.Fatalf("cleanup failure not reported: %v", report.Failure)
@@ -821,7 +859,7 @@ func TestCleanupRegistrationFailureRemovesCheckout(t *testing.T) {
 		if err := r.AddCleanup(ctx, worktreeResource, func(context.Context) error { other = true; return nil }); err != nil {
 			return engine.Result{}, err
 		}
-		return f.fixtureExecute(ctx, r, in)
+		return f.prepareOnly(ctx, r, in)
 	}), prompt)
 	requireFailure(t, report, "duplicate resource name")
 	root := filepath.Join(r.Dir(), worktreeDir)
@@ -854,7 +892,7 @@ func TestRegisteredWorktreeKeptUnlessRemoveSet(t *testing.T) {
 				Data: inputRecord{Repository: "owner/repo", DefaultBranch: "main", BaseSHA: strings.Repeat("a", 40), Worktree: "/w", DesignDoc: designDocRecord{Path: "p", Resolved: "/p"}}}); err != nil {
 				return engine.Result{}, err
 			}
-			return f.fixtureExecute(ctx, r, in)
+			return f.prepareOnly(ctx, r, in)
 		}), prompt)
 		requireFailure(t, report, "invalid key or schema")
 		if len(report.CleanupErrors) != 0 {
@@ -865,7 +903,7 @@ func TestRegisteredWorktreeKeptUnlessRemoveSet(t *testing.T) {
 	t.Run("cancelled-after-registration", func(t *testing.T) {
 		f := newFixture(t)
 		r, report := f.execute(f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-			result, err := f.fixtureExecute(ctx, r, in)
+			result, err := f.prepareOnly(ctx, r, in)
 			if err != nil {
 				return result, err
 			}
@@ -933,7 +971,7 @@ func TestCancellationDuringExternalCommands(t *testing.T) {
 			} else {
 				f.write(filepath.Join(f.dir, "git-block"), tc)
 			}
-			s := f.start(f.definition(f.fixtureExecute), prompt)
+			s := f.start(f.definition(f.prepareOnly), prompt)
 			waitBlocked(t, filepath.Join(f.dir, "blocked"), s.done)
 			cancelled := time.Now()
 			s.run.Cancel(engine.OriginControllerUser)

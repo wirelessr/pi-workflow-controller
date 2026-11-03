@@ -20,7 +20,7 @@
 | 能力 | 現有入口／位置 | 決策 |
 |---|---|---|
 | Run、session、Step 與 limits | `engine/api.go`、`session.go`、`step.go`、`policy.go`；`Run.SessionIdentity` 讀 owned committed identity；`Run.WorkflowInput` 以值回傳 immutable workflow/input | 直接重用；M4 dispatch 前身份沿中性入口，不另造 session driver／會計；`callerRequest` 使用 input 投影，無需複製歷史 |
-| Pi 預設 cwd | `engine.Options.PiDefaultCWD`／`Run.OpenSession` → `runtime.SessionSpec.CWD` | CLI run 讀 `PWC_PI_CWD`，engine 在 New 依 LaunchCWD 固定相對值；triage／smoke 沿 fallback，review explicit workspace 保留，僅選用的 default NUL 提前拒絕，explicit Role.CWD／fallback LaunchCWD 保留原 runtime 驗證與會計。Task workspace 與來源唯讀要求留 triage，不新增 runtime prompt 或 sandbox |
+| Pi 預設 cwd | `engine.Options.PiDefaultCWD`／`Run.OpenSession` → `runtime.SessionSpec.CWD` | CLI run 讀 `PWC_PI_CWD`，engine 在 New 依 LaunchCWD 固定相對值；triage／smoke 沿 fallback，review explicit workspace 保留，僅選用的 default NUL 提前拒絕，explicit Role.CWD／fallback LaunchCWD 保留原 runtime 驗證與會計。code-change 另經 `workflows.Definitions` 取得 `PWC_PI_CWD` 原值，檢查為既有目錄的絕對路徑後明設為實作者的 Role.CWD，不依賴 engine default。Task workspace 與來源唯讀要求留 triage，不新增 runtime prompt 或 sandbox |
 | Child、Parallel、Retry、Decision | `engine/scope.go` | 直接重用；workflow 決定批次、依賴及可重做分支 |
 | OS File.Sync 依賴 | `engine.Options.SyncFile` → `engine.New` → 原 `Run`／`contract.Options.SyncFile`／`NewStore`；Store 的既有 writers 及 Stage copy | 正常逐 instance constructor DI，兩個入口的 nil 都正規化為真 `os.File.Sync`，建構後 private 固定；schemas、run/input、RunCreated 及後續寫入使用同一依賴。既有 CLI／review／triage callers 留 nil，無 fast mode／CLI/env 開關。只替代 Sync 結果，不重造 filesystem／Store／journal；真 durability/fault/order gates 保留 |
 | Stage／Confirm／Publish、committed resolver | `contract/`、`engine/resolve.go`、`step.go` | 直接重用；禁止第二個 Store／commit／journal |
@@ -34,10 +34,10 @@
 | PATH 命令測試 transport | `testutil/pathexec.Install`／`Args` | runtime command、review acquisition 與 code-change tests 以 PATH 上的 wrapper 重新執行測試 binary 的具名 test，外部 gh／git 仍是真 subprocess；舊的兩份 wrapper 與 `--` 參數解析已移除。回應內容、barrier 與故障注入仍屬各 test |
 | Skill extraction／report renderer | `contract/reportresource.ExtractFresh`／embedded `pwc_report_io.py`；review `ExtractSkills`／renderer 與 triage `ExtractReport`／report Step | R5：兩個真 consumer 共用機械，業務模板／report binding 各自保留 |
 | Workflow 組合單元 | `review.Run(ctx, r, scope, name, prURL)`；`code-review` 的 `execute` 以 `r.Root()`、`"review"` 呼叫它 | R6 已接線：舊內聯副本移除；呼叫者只用 `review.Run`，不 import review 其他業務型別或 helper；不新增引擎層 sub-workflow 原語。預期 head 與外層准入留 C3 |
-| Node TLS 前置檢查 | `runtime.CheckNodeTLS`（`runtime/preflight.go`） | R6 已接線：需要此檢查的 workflow 在第一個副作用前呼叫（code-review；尚未註冊的 code-change 在讀 design doc 與任何 GET 之前）；不屬於 Pi 啟動，triage 與 smoke-echo 不呼叫 |
+| Node TLS 前置檢查 | `runtime.CheckNodeTLS`（`runtime/preflight.go`） | R6 已接線：需要此檢查的 workflow 在第一個副作用前呼叫（code-review；code-change 在讀 design doc 與任何 GET 之前）；不屬於 Pi 啟動，triage 與 smoke-echo 不呼叫 |
 | gh／git 命令執行與 bare clone | `runtime.GitHubGET`／`runtime.Git`／`runtime.GitConfigIsolation`（`runtime/command.go`）；`gitrepo.Reserve` 與 `Repo.Init`／`AddRemote`／`FetchPinned`／`FetchBranch`／`Cleanup`；review `acquire`、`Verify`、`Checkout.Cleanup` 使用（不呼叫 `FetchBranch`）；code-change 以 `GitHubGET` 做 repo metadata 檢查，worktree 建立使用 `Git`、`GitConfigIsolation` 與 `Reserve`／`Init`／`AddRemote`／`FetchBranch`／`Cleanup` | R7 已接線：review 舊副本移除；只限固定 gh REST GET 與 git，不提供任意執行檔；唯讀政策留 review，可寫政策留 code-change；`FetchBranch` 由 C1a 加入；GraphQL 由第一個使用它的 C 單元加入，不 import review 私有實作 |
 | 私有 skill 目錄展開 | `contract/skilldir` 的 `Read`／`Source.Expand`／`Abandon`；triage `PrepareSkills` 使用 | R8 已接線：triage 舊內聯副本移除；子樹清單、環境變數、展開目錄名、Attach 與 record schema 由各 workflow 宣告；manifest 與上游比對留在 triage |
-| Contract repair 迴圈 | `engine.Scope.StepWithRepair`；triage `TaskSession.Run` 使用 | R9 已接線：triage 舊內聯迴圈移除；規則見該方法的 doc comment |
+| Contract repair 迴圈 | `engine.Scope.StepWithRepair`；triage `TaskSession.Run` 與 code-change 的實作者 Step 使用；寫入型 Step 以 `StepSpec.RepairKeepsWork` opt-in repair 派送文字 | R9 已接線：triage 舊內聯迴圈移除；規則見該方法的 doc comment。C1b 加入 opt-in，triage 不設定，派送文字不變 |
 
 表中的 triage consumers 指已刪除的舊版 Planner triage；共用入口仍由其他 consumers 使用。v2（`internal/workflows/triage`）目前使用 `engine.ReadContract`＋`contract.DecodePublication`（`readAccepted`、citation 檢查）、`contract.ReadBounded`（`rawFile`，與舊版相同的二次讀取 adapter）、`reportresource.ExtractFresh`（`runReport`）、`skilldir.Read`／`Source.Expand`（`PrepareSkills`）、`contract.ReadStable`＋`skilldir.Abandon`（上游比對），以及 `Scope.Attach`、`Scope.StepWithRepair`、`StepSpec.Observe`。上述相對路徑均位於 `internal/`。角色模型、PR Pin、code-location Evidence、investigation Ref/file Evidence、Source status 及 verdict 不屬於通用登記項，保留 workflow-specific 語義。
 
@@ -239,8 +239,8 @@ R8 前，`triage.PrepareSkills` 綁 triage 的角色名與上游比對。新 wor
 
 **剩餘缺口：**
 
-- 寫入型 Step 的身分與 receipt 核對放在成功返回之後，其接線與回歸在 C1。
-- 寫入型 Step 的 repair 派送與 repair 意圖衝突：engine 固定的派送文字要求 Agent 先執行 `request.prompt` 的任務，repair 只帶診斷 Feedback，對寫入型 Step 可能重做副作用。由 code-change 第一個使用它的單元提出必要改動，本單元不改派送文字。
+- 寫入型 Step 的身分與 receipt 核對放在成功返回之後：C1b 為 code-change 的實作者 Step 接上本機 commit 的核對，只對最終 contract 執行一次，被拒 attempt 的 receipt 不核對；push 與 PR receipt 屬 C2 起的單元。
+- 寫入型 Step 的 repair 派送與 repair 意圖衝突：C1b 以 `StepSpec.RepairKeepsWork` 解決，對設定它的 Step（目前只有 code-change 的實作者），`StepWithRepair` 的 repair 派送以一句「不新增或重複任何外部寫入或本機 commit，只修正 `request.feedback.message` 回報的違規，重寫本 attempt 的 contract」取代「先執行任務」的開頭指示；首次派送、一般 `Step` 與未設定的 Step（triage）仍以原指示開頭，其餘派送文字未改（engine test 核對每個派送的開頭指示）。新文字對模型行為的效果（repair 時是否仍重做 commit 或其他寫入）未經 live 驗證；repair 若重做寫入，receipt 核對攔不下（回報仍會一致），仍是承認的殘餘風險。
 - D1 對 Agent 行為的影響（repair 時看到原 Feedback 的 Refs）未經 live 驗證。
 
 以下保留目標與完成條件。

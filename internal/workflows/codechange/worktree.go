@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -43,8 +45,13 @@ type worktree struct {
 // except that plain http is not allowed. Nothing is written to any config:
 // the Agent's git later uses the user's global configuration unchanged.
 func (w *worktree) git(ctx context.Context, args ...string) ([]byte, error) {
+	return w.gitAt(ctx, w.repo.Dir(), args...)
+}
+
+// gitAt is git with the same policy on another git directory of the repository.
+func (w *worktree) gitAt(ctx context.Context, gitDir string, args ...string) ([]byte, error) {
 	fixed := []string{
-		"--no-pager", "--git-dir=" + w.repo.Dir(),
+		"--no-pager", "--git-dir=" + gitDir,
 		"-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null",
 		"-c", "core.autocrlf=false", "-c", "core.sparseCheckout=false",
 		"-c", "http.sslVerify=true", "-c", "http.followRedirects=false",
@@ -55,6 +62,52 @@ func (w *worktree) git(ctx context.Context, args ...string) ([]byte, error) {
 		fixed = append(fixed, "-c", "protocol.file.allow=always")
 	}
 	return runtime.Git(ctx, w.repo.Root(), runtime.GitConfigIsolation(), append(fixed, args...)...)
+}
+
+// errGitNoLazyFetch is a git without the option the receipt reads rely on.
+var errGitNoLazyFetch = errors.New("code-change needs a git that supports --no-lazy-fetch (2.45 or newer)")
+
+// checkGit runs that option under the Controller's git isolation, so an
+// unsupported git fails before a worktree exists and the Agent has work to
+// lose.
+func checkGit(ctx context.Context, dir string) error {
+	_, err := runtime.Git(ctx, dir, runtime.GitConfigIsolation(), "--no-lazy-fetch", "version")
+	if err != nil && context.Cause(ctx) == nil {
+		return fmt.Errorf("%w: %w", errGitNoLazyFetch, err)
+	}
+	return err
+}
+
+// read runs plumbing on the worktree's registration after the Agent had the
+// repository. It never uses the checkout's .git file, which the Agent may
+// point elsewhere. It disables lazy fetches, so no remote, helper or command
+// from a configuration the Agent may have changed runs, and replace refs,
+// which would substitute the history it reads.
+func (w *worktree) read(ctx context.Context, args ...string) (string, error) {
+	out, err := w.gitAt(ctx, w.repo.WorktreeGitDir(), append([]string{"--no-lazy-fetch", "--no-replace-objects"}, args...)...)
+	return strings.TrimSpace(string(out)), err
+}
+
+// head is the worktree's current HEAD commit.
+func (w *worktree) head(ctx context.Context) (string, error) {
+	head, err := w.read(ctx, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("worktree HEAD: %w", err)
+	}
+	return head, nil
+}
+
+// isNew reports whether head is neither the base nor one of its ancestors.
+func (w *worktree) isNew(ctx context.Context, head string) (bool, error) {
+	out, err := w.read(ctx, "rev-list", "--count", "--end-of-options", w.base+".."+head)
+	if err != nil {
+		return false, fmt.Errorf("worktree history: %w", err)
+	}
+	n, err := strconv.Atoi(out)
+	if err != nil {
+		return false, fmt.Errorf("worktree history: rev-list count %q", out)
+	}
+	return n > 0, nil
 }
 
 // cleanup runs only after the workflow joined and Pi exit was confirmed.

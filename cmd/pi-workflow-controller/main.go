@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, cliOptions{definitions: workflows.Definitions(os.Getenv(triage.SkillsDirEnv)), resources: workflows.Resources(), schemas: workflows.Schemas()}))
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, cliOptions{definitions: workflows.Definitions(os.Getenv(triage.SkillsDirEnv), os.Getenv("PWC_PI_CWD")), resources: workflows.Resources(), schemas: workflows.Schemas()}))
 }
 
 // Construction-time dependencies, never flags or workflow configuration.

@@ -9,6 +9,7 @@ import (
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
+	"pi-workflow-controller/internal/workflows/codechange"
 	"pi-workflow-controller/internal/workflows/review"
 	"pi-workflow-controller/internal/workflows/triage"
 )
@@ -18,19 +19,22 @@ const echoURI = "https://pi-workflow-controller.local/schemas/smoke-echo.v1.json
 
 func Resources() []contract.Resource {
 	resources := append([]contract.Resource{{URI: echoURI, JSON: json.RawMessage(`{"type":"object","required":["echo"],"additionalProperties":false,"properties":{"echo":{"type":"string"}}}`)}}, review.Resources()...)
-	return append(resources, triage.Resources()...)
+	resources = append(resources, triage.Resources()...)
+	return append(resources, codechange.Resources()...)
 }
 
 func Schemas() []contract.SchemaDefinition {
 	schemas := append([]contract.SchemaDefinition{{ID: echoSchema, URI: echoURI}}, review.Schemas()...)
-	return append(schemas, triage.Schemas()...)
+	schemas = append(schemas, triage.Schemas()...)
+	return append(schemas, codechange.Schemas()...)
 }
 
 // Definitions are the registered workflows; triageSkillsDir is the
 // jira-triage private skill directory, which the CLI reads from
-// triage.SkillsDirEnv.
-func Definitions(triageSkillsDir string) []engine.Definition {
-	return []engine.Definition{{Name: "smoke-echo", Description: "Echo a one-line prompt through Pi and publish a verified contract", Version: "1", Policy: engine.DefaultRunPolicy(), Execute: smokeEcho}, review.Definition(), triage.Definition(triageSkillsDir)}
+// triage.SkillsDirEnv, and piCWD is the unprocessed PWC_PI_CWD value that
+// code-change checks and uses as its implementer's CWD.
+func Definitions(triageSkillsDir, piCWD string) []engine.Definition {
+	return []engine.Definition{{Name: "smoke-echo", Description: "Echo a one-line prompt through Pi and publish a verified contract", Version: "1", Policy: engine.DefaultRunPolicy(), Execute: smokeEcho}, review.Definition(), triage.Definition(triageSkillsDir), codechange.Definition(piCWD)}
 }
 
 func smokeEcho(ctx context.Context, run *engine.Run, input engine.Input) (engine.Result, error) {

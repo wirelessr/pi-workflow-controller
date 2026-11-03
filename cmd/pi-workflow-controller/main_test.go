@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -119,6 +120,33 @@ func TestCLIList(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCLIMainSubprocess runs main as the binary does.
+func TestCLIMainSubprocess(t *testing.T) {
+	if os.Getenv("PWC_CLI_MAIN") != "1" {
+		return
+	}
+	os.Args = []string{"pi-workflow-controller", "run", "code-change", "owner/repo design.md"}
+	main()
+}
+
+// main hands PWC_PI_CWD to the registered workflows, not only to the engine:
+// code-change rejects the relative value before any side effect.
+func TestCLIMainPassesPiCWDToWorkflows(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	cmd := exec.Command(executable, "-test.run=^TestCLIMainSubprocess$")
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(os.Environ(), "PWC_CLI_MAIN=1", "PWC_PI_CWD=relative-pi-cwd", "HOME="+home)
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(string(out), `"relative-pi-cwd"`) {
+		t.Fatalf("main: %v\n%s", err, out)
 	}
 }
 

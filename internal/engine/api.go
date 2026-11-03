@@ -64,6 +64,10 @@ type StepSpec struct {
 	// Observe records this attempt's session entries and tool calls for
 	// audit, returned as StepResult.Observation on success and failure.
 	Observe bool
+	// RepairKeepsWork is for a Step whose task writes outside its contract:
+	// StepWithRepair's repair dispatches then tell the Agent not to add or
+	// repeat any write, only to rewrite the contract. Step ignores it.
+	RepairKeepsWork bool
 }
 
 type StepResult struct {

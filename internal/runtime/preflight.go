@@ -14,9 +14,8 @@ import (
 
 // CheckNodeTLS rejects a Controller environment that disables Node TLS
 // verification, which Pi children would inherit. Workflows that need the check
-// call it before their first side effect (currently code-review; code-change
-// is the planned second consumer). It is not part of Start, and triage and
-// smoke-echo do not call it.
+// call it before their first side effect (code-review and code-change). It is
+// not part of Start, and triage and smoke-echo do not call it.
 func CheckNodeTLS() error {
 	if os.Getenv("NODE_TLS_REJECT_UNAUTHORIZED") == "0" {
 		return errors.New("TLS preflight blocked: Node TLS verification is disabled; launch with NODE_TLS_REJECT_UNAUTHORIZED=1")

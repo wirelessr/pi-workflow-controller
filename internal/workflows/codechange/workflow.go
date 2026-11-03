@@ -12,12 +12,12 @@ import (
 )
 
 // Definition is the code-change workflow. piCWD is the raw PWC_PI_CWD value;
-// it is checked before any side effect.
+// it is checked before any side effect and is the implementer's CWD.
 func Definition(piCWD string) engine.Definition {
 	p := engine.DefaultRunPolicy()
 	p.RunTimeout = 8 * time.Hour
 	p.MaxLiveSessions, p.MaxTotalSessions, p.MaxTotalAttempts = 3, 22, 80
-	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc in a Controller-owned worktree; currently prepares the worktree and records the input only", Version: "1", Policy: p,
+	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree; this version stops there, with no review, push or pull request", Version: "1", Policy: p,
 		Execute: func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
 			return execute(ctx, r, in, piCWD, gitSource{remote: githubRemote})
 		}}
@@ -36,13 +36,13 @@ func execute(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, 
 	if err != nil {
 		return engine.Result{}, err
 	}
-	return engine.Result{Outputs: map[string]contract.Ref{"input": p.input}, Final: &engine.FinalSelection{Output: "input"}}, nil
+	return implement(ctx, r, p, piCWD)
 }
 
 // prepare checks the prompt, PWC_PI_CWD, Node TLS and the design doc before
 // any network call, then the repository with one GET, and writes nothing
-// before that GET succeeds. It then creates and registers the worktree and
-// records the input.
+// before that GET succeeds. It then checks git, creates and registers the
+// worktree and records the input.
 func prepare(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, source gitSource) (prepared, error) {
 	repository, docPath, err := parsePrompt(in.Prompt)
 	if err != nil {
@@ -60,6 +60,9 @@ func prepare(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, 
 	}
 	meta, err := repositoryMetadata(ctx, r.Dir(), repository)
 	if err != nil {
+		return prepared{}, err
+	}
+	if err := checkGit(ctx, r.Dir()); err != nil {
 		return prepared{}, err
 	}
 	wt, err := createWorktree(ctx, r, source, repository, meta.DefaultBranch)
