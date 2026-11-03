@@ -215,6 +215,24 @@ func (r *Run) CloseSessionReport(ctx context.Context, h *SessionHandle) (runtime
 		return runtime.CleanupReport{Identity: runtime.Identity{HandleID: h.id}, Unconfirmed: []string{"Close outcome not available before cleanup deadline"}}, err
 	}
 }
+
+// CloseFailure classifies an error from CloseSessionReport for a workflow
+// that closes a session strictly: a classified failure stays as it is, a
+// cancellation is a cancellation, and anything else, including running out
+// of cleanup time, is a cleanup failure of phase and handleID rather than a
+// workflow failure or a run deadline.
+func CloseFailure(err error, phase, handleID string) error {
+	var f *Failure
+	var c *contract.Error
+	switch {
+	case errors.As(err, &f) || errors.As(err, &c):
+		return err
+	case errors.Is(err, context.Canceled):
+		return &Failure{Code: Cancelled, Origin: OriginControllerUser, Phase: phase, Message: err.Error(), DispatchAccepted: AcceptedNo, HandleID: handleID, Cause: err}
+	}
+	return &Failure{Code: CleanupFailed, Origin: OriginProtocol, Phase: phase, Message: err.Error(), DispatchAccepted: AcceptedNo, HandleID: handleID, Cause: err}
+}
+
 func (r *Run) closeHandle(h *SessionHandle) error {
 	ctx, cancel := context.WithTimeout(context.Background(), r.definition.Policy.Runtime.CleanupTimeout)
 	defer cancel()

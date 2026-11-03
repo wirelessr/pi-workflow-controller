@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/code-change/external-objects.v1.json",
+  "description": "Controller record, after the run failed from the correction Step on, of what exists as read-only reads showed it once the implementer's session was closed: the session, the worktree and its branch on GitHub with that branch's pull requests, and the receipt the last correction contract reported with what GitHub shows for it. Nothing was judged; no pull request was closed, no branch deleted and nothing undone",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "failure",
+    "session",
+    "worktree",
+    "remote_branch",
+    "pull_requests"
+  ],
+  "$defs": {
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "branch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "description": "present or absent as GitHub showed it; unknown when it was not read, or the read failed, see detail",
+          "enum": [
+            "present",
+            "absent",
+            "unknown"
+          ]
+        },
+        "sha": {
+          "description": "The branch tip when present",
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "pull": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number",
+        "html_url",
+        "state",
+        "draft",
+        "head_ref",
+        "head_sha"
+      ],
+      "properties": {
+        "number": {
+          "type": "integer"
+        },
+        "html_url": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "draft": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "head_ref": {
+          "type": "string"
+        },
+        "head_sha": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "properties": {
+    "failure": {
+      "description": "The error the run fails with",
+      "type": "string",
+      "minLength": 1
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exit_confirmed"
+      ],
+      "properties": {
+        "exit_confirmed": {
+          "description": "Whether the implementer's session was confirmed closed before the reads; when false the Agent may have written after them",
+          "type": "boolean"
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "worktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "description": "read: head and branch were read through the worktree registration. unknown: a read failed, see detail",
+          "enum": [
+            "read",
+            "unknown"
+          ]
+        },
+        "head": {
+          "$ref": "#/$defs/sha"
+        },
+        "branch": {
+          "description": "The branch the worktree HEAD is on; empty when it is detached",
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "remote_branch": {
+      "$ref": "#/$defs/branch",
+      "description": "The worktree branch in the target repository on GitHub; unknown without detail when the worktree has no branch to look up, see worktree"
+    },
+    "pull_requests": {
+      "description": "Pull requests in any state whose head is the worktree branch of the target repository, one page of at most 100; unknown without detail when the worktree has no branch to look up, see worktree",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "items"
+      ],
+      "properties": {
+        "status": {
+          "description": "listed: items is what GitHub listed. unknown: the list was not read, or the read failed, see detail, and items is empty",
+          "enum": [
+            "listed",
+            "unknown"
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pull"
+          }
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "reported": {
+      "description": "The receipt of the last correction contract that passed the schema, accepted or rejected, which is the publish output, and what one read each shows for its branch and pull request number in the target repository on GitHub. A branch pushed under another name than the worktree branch is covered only here",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "branch",
+        "head",
+        "pull_request",
+        "remote_branch",
+        "observed_pull_request"
+      ],
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "head": {
+          "type": "string"
+        },
+        "pull_request": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "url",
+            "number"
+          ],
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "number": {
+              "type": "integer"
+            }
+          }
+        },
+        "remote_branch": {
+          "$ref": "#/$defs/branch",
+          "description": "The reported branch on GitHub"
+        },
+        "observed_pull_request": {
+          "description": "The pull request with the reported number in the target repository",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "description": "read: item is what GitHub showed. unknown: the read failed or its answer could not be read, see detail",
+              "enum": [
+                "read",
+                "unknown"
+              ]
+            },
+            "item": {
+              "$ref": "#/$defs/pull"
+            },
+            "detail": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1177,26 +1176,6 @@ func TestRoundFits(t *testing.T) {
 	late.Policy.DisableRunTimeout = true
 	if !roundFits(late, p) {
 		t.Error("a run without a deadline refused a round")
-	}
-}
-
-func TestCloseFailure(t *testing.T) {
-	classified := &engine.Failure{Code: engine.TimedOut, Origin: engine.OriginRunDeadline}
-	for _, tc := range []struct {
-		name string
-		err  error
-		code engine.Code
-	}{
-		{"a classified failure stays", classified, engine.TimedOut},
-		{"a bare cancellation is a cancellation", context.Canceled, engine.Cancelled},
-		{"running out of cleanup time is a cleanup failure", context.DeadlineExceeded, engine.CleanupFailed},
-		{"anything else is a cleanup failure", fmt.Errorf("close: broken pipe"), engine.CleanupFailed},
-	} {
-		var f *engine.Failure
-		err := closeFailure(tc.err, "triage-probe", "h1")
-		if !errors.As(err, &f) || f.Code != tc.code || f.Code != engine.TimedOut && f.HandleID != "h1" {
-			t.Errorf("%s: closeFailure = %+v", tc.name, f)
-		}
 	}
 }
 

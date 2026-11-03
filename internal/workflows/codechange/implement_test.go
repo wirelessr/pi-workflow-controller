@@ -109,6 +109,8 @@ type agents struct {
 	implement func(t *testing.T, c agentCall) string
 	// review answers both reviewers; nil accepts with no findings.
 	review func(t *testing.T, c agentCall) string
+	// publish answers the correction Step; nil publishes without a change.
+	publish func(t *testing.T, c agentCall) string
 	// release reports whether the deferred prompts are settled after c was
 	// answered; nil settles them after any answer that is not "defer".
 	release func(t *testing.T, r *engine.Run, c agentCall) bool
@@ -219,8 +221,16 @@ func (f *fixture) run(t *testing.T, as agents) a1Run {
 					t.Fatalf("request prompt is not a task: %v", err)
 				}
 				out.calls = append(out.calls, c)
-				agent := as.implement
-				if c.task.Role != "implementer" {
+				var agent func(t *testing.T, c agentCall) string
+				switch c.request.Output.SchemaID {
+				case ImplementSchema:
+					agent = as.implement
+				case PublishSchema:
+					agent = as.publish
+					if agent == nil {
+						agent = f.acceptPublish
+					}
+				default:
 					agent = as.review
 					if agent == nil {
 						agent = acceptReview
@@ -304,12 +314,24 @@ func (a a1Run) requireExitsConfirmed(t *testing.T) {
 	}
 }
 
-// requireAttempts checks the run's accounting: the input Attach plus steps
-// Agent attempts.
-func (a a1Run) requireAttempts(t *testing.T, steps int) {
+// requireAttempts checks the run's accounting: steps Agent attempts and the
+// Controller Attaches with the keys attaches, only the input when none is
+// given.
+func (a a1Run) requireAttempts(t *testing.T, steps int, attaches ...string) {
 	t.Helper()
-	if len(a.report.Snapshot.Attempts) != steps+1 || len(a.calls) != steps || len(a.runtime.dispatches) != steps {
-		t.Fatalf("attempts %d calls %d dispatches %d, want %d implementer attempts", len(a.report.Snapshot.Attempts), len(a.calls), len(a.runtime.dispatches), steps)
+	if attaches == nil {
+		attaches = []string{"input"}
+	}
+	var controller []string
+	for _, attempt := range a.report.Snapshot.Attempts {
+		if attempt.Controller {
+			controller = append(controller, attempt.Key)
+		}
+	}
+	slices.Sort(controller)
+	attaches = slices.Sorted(slices.Values(attaches))
+	if len(a.report.Snapshot.Attempts) != steps+len(attaches) || !slices.Equal(controller, attaches) || len(a.calls) != steps || len(a.runtime.dispatches) != steps {
+		t.Fatalf("attempts %d (Controller %v) calls %d dispatches %d, want %d Agent attempts and the Attaches %v", len(a.report.Snapshot.Attempts), controller, len(a.calls), len(a.runtime.dispatches), steps, attaches)
 	}
 }
 
@@ -375,36 +397,82 @@ func (a a1Run) requireDecisions(t *testing.T, want ...decision) {
 	}
 }
 
+// requireRepairKeepsWork checks that of calls, one Step's dispatches in
+// order, only the repairs use the RepairKeepsWork instruction.
+func (a a1Run) requireRepairKeepsWork(t *testing.T, calls ...agentCall) {
+	t.Helper()
+	const rewrite = "This is a contract repair: do not add or repeat any external write or local commit"
+	for i, c := range calls {
+		var dispatch string
+		for _, d := range a.runtime.dispatches {
+			if strings.Contains(d, c.request.Identity.AttemptID) {
+				dispatch = d
+			}
+		}
+		if dispatch == "" || strings.Contains(dispatch, rewrite) != (i > 0) {
+			t.Fatalf("dispatch %d %q, want only the repairs to use the RepairKeepsWork instruction", i, dispatch)
+		}
+	}
+}
+
+// journalIndex is the journal index of each handle's SessionClosed, of
+// RunFinalizing and of each Decision by name.
+func (a a1Run) journalIndex(t *testing.T) (closed map[string][]int, finalizing int, decided map[string]int) {
+	t.Helper()
+	closed, decided, finalizing = map[string][]int{}, map[string]int{}, -1
+	for i, e := range a.events(t) {
+		switch e.Kind {
+		case "RunFinalizing":
+			finalizing = i
+		case "SessionClosed":
+			var d struct {
+				HandleID string `json:"handle_id"`
+			}
+			if err := json.Unmarshal(e.Details, &d); err != nil {
+				t.Fatal(err)
+			}
+			closed[d.HandleID] = append(closed[d.HandleID], i)
+		case "Decision":
+			var d decision
+			if err := json.Unmarshal(e.Details, &d); err != nil {
+				t.Fatal(err)
+			}
+			decided[d.Name] = i
+		}
+	}
+	return closed, finalizing, decided
+}
+
 // requireNoSnapshot checks the run never created the pre-PR review snapshot.
 func (a a1Run) requireNoSnapshot(t *testing.T) {
 	t.Helper()
 	requireMissing(t, filepath.Join(a.run.Dir(), snapshotDir))
 }
 
-func TestImplementReadyKeepsWorktree(t *testing.T) {
+// A ready report whose local head the worktree confirms is recorded and
+// handed on to the pre-PR review and the correction, whose own checks are in
+// their tests.
+func TestImplementReady(t *testing.T) {
 	f := newFixture(t)
 	var head string
-	a := f.run(t, agents{implement: func(t *testing.T, c agentCall) string {
-		head = f.commit(t, c.task.Worktree, "implemented\n")
-		writeCandidate(t, c, readyData(c, head))
+	a := f.run(t, agents{implement: f.implementReady(&head), publish: func(t *testing.T, c agentCall) string {
+		f.commit(t, c.task.Worktree, "fixed\n")
+		writeCandidate(t, c, f.publishWork(t, c, "committed"))
 		return ""
 	}})
 	report := a.report
 	if report.Outcome != engine.Succeeded || report.ExitCode != 0 || report.Failure != nil {
 		t.Fatalf("outcome %s exit %d failure %v", report.Outcome, report.ExitCode, report.Failure)
 	}
-	if report.Final == nil || report.Final.Output != "implement" || report.Final.Step != "implement" || report.Final.Ref != report.Result.Outputs["implement"] {
-		t.Fatalf("final: %+v", report.Final)
-	}
-	// The implementer's session and both reviewers'.
 	a.requireSessionsClosed(t, 3)
-	a.requireAttempts(t, 3)
-	a.requireDecisions(t, decision{Scope: "root", Name: "implementation-recorded", Refs: []contract.Ref{report.Result.Outputs["implement"]}},
-		decision{Scope: "root", Name: "pre-pr-reviewed", Refs: []contract.Ref{report.Result.Outputs["review-basic"], report.Result.Outputs["review-consistency"]}})
+	implemented := decision{Scope: "root", Name: "implementation-recorded", Refs: []contract.Ref{report.Result.Outputs["implement"]}}
+	if got := a.decisions(t); len(got) == 0 || !reflect.DeepEqual(got[0], implemented) {
+		t.Fatalf("decisions %+v, want %+v first", got, implemented)
+	}
 	// The implementer runs in PWC_PI_CWD, not the engine default, and is
 	// given the worktree by absolute path.
 	spec := a.runtime.specs[0]
-	for _, cwd := range []string{spec.CWD, a.hellos[0].CWD, report.Snapshot.Sessions[report.Snapshot.Attempts[report.Final.Ref.AttemptID].HandleID].Role.CWD} {
+	for _, cwd := range []string{spec.CWD, a.hellos[0].CWD, report.Snapshot.Sessions[a.attempt(a.calls[0]).HandleID].Role.CWD} {
 		if cwd != f.piCWD || cwd == a.defaultCWD {
 			t.Fatalf("implementer cwd %q, want PWC_PI_CWD %q", cwd, f.piCWD)
 		}
@@ -412,9 +480,6 @@ func TestImplementReadyKeepsWorktree(t *testing.T) {
 	c := a.calls[0]
 	if c.task.Worktree != a.worktree() || !reflect.DeepEqual(c.request.Inputs, []contract.Ref{report.Result.Outputs["input"]}) {
 		t.Fatalf("task worktree %q inputs %+v", c.task.Worktree, c.request.Inputs)
-	}
-	if got := f.gitIn(a.worktree(), "rev-parse", "HEAD"); got != head {
-		t.Fatalf("worktree HEAD %s, want the Agent's commit %s", got, head)
 	}
 	// After the worktree is handed over, the Controller's git never runs on
 	// its repository except to read the worktree registration, with lazy
@@ -445,8 +510,9 @@ func TestImplementReadyKeepsWorktree(t *testing.T) {
 			t.Fatalf("git call %q after the worktree was handed over, want a registration read or the snapshot's creation", call.Args)
 		}
 	}
-	// The receipt's HEAD and history, then the HEAD after the review.
-	if !reflect.DeepEqual(reads, []string{"rev-parse", "rev-list", "rev-parse"}) || !reflect.DeepEqual(snapshot, []string{"init", "worktree"}) {
+	// The implement receipt's HEAD and history, the HEAD after the review,
+	// the correction receipt's HEAD and history and the HEAD after its close.
+	if !reflect.DeepEqual(reads, []string{"rev-parse", "rev-list", "rev-parse", "rev-parse", "rev-list", "rev-parse"}) || !reflect.DeepEqual(snapshot, []string{"init", "worktree"}) {
 		t.Fatalf("registration reads %v, snapshot git %v", reads, snapshot)
 	}
 }
@@ -635,22 +701,19 @@ func TestImplementRepair(t *testing.T) {
 				return ""
 			}})
 			report := a.report
-			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Ref != report.Result.Outputs["implement"] {
+			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "publish" || report.Result.Outputs["implement"] != *a.attempt(a.calls[1]).Output {
 				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 			}
-			// Two implementer attempts and one per reviewer.
-			a.requireAttempts(t, 4)
-			if got := f.gitIn(a.worktree(), "rev-list", "--count", f.head+"..HEAD"); got != "1" {
+			// Two implementer attempts, one per reviewer and the correction.
+			a.requireAttempts(t, 5, "input", "pull-request")
+			if got := f.gitIn(f.origin, "rev-list", "--count", f.head+".."+workBranch); got != "1" {
 				t.Fatalf("commits on base: %s, want the single commit of the first attempt", got)
 			}
 			fb := a.calls[1].request.Feedback
 			if fb == nil || !strings.Contains(fb.Message, tc.diagnostic(a.calls[0].request.Inputs[0])) {
 				t.Fatalf("repair feedback %+v, want %q", fb, tc.diagnostic(a.calls[0].request.Inputs[0]))
 			}
-			const rewrite = "This is a contract repair: do not add or repeat any external write or local commit"
-			if strings.Contains(a.runtime.dispatches[0], rewrite) || !strings.Contains(a.runtime.dispatches[1], rewrite) {
-				t.Fatalf("dispatches %q, want only the repair to use the RepairKeepsWork instruction", a.runtime.dispatches)
-			}
+			a.requireRepairKeepsWork(t, a.calls[0], a.calls[1])
 		})
 	}
 }

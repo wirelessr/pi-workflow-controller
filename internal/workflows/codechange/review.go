@@ -13,11 +13,7 @@ import (
 	"pi-workflow-controller/internal/runtime"
 )
 
-const (
-	// reviewRepairs gives each reviewer at most three attempts.
-	reviewRepairs = 2
-	reviewTimeout = 30 * time.Minute
-)
+const reviewTimeout = 30 * time.Minute
 
 // reviewer is a required pre-PR reviewer. Its name is the Parallel branch,
 // the task role and the role its contract must report.
@@ -121,52 +117,13 @@ func (rv reviewer) review(ctx context.Context, r *engine.Run, s *engine.Scope, p
 	if err != nil {
 		return engine.Result{}, err
 	}
-	var readErr error
-	results, err := s.StepWithRepair(ctx, engine.StepSpec{Key: "review", Session: h, Prompt: string(prompt), Inputs: inputs,
-		Output: contract.Spec{SchemaID: ReviewSchema}, Timeout: reviewTimeout}, reviewRepairs,
-		func(ctx context.Context, ref contract.Ref) error {
-			v, err := engine.Decode[findings](ctx, r, ref)
-			if err != nil {
-				// A schema-valid publication that cannot be read is an
-				// execution failure, not a content diagnostic to repair.
-				readErr = err
-				return nil
-			}
-			return checkReview(v, rv.name, inputs[1])
-		})
+	out, _, err := stepDecoded(ctx, r, s, engine.StepSpec{Key: "review", Session: h, Prompt: string(prompt), Inputs: inputs,
+		Output: contract.Spec{SchemaID: ReviewSchema}, Timeout: reviewTimeout},
+		func(v findings) error { return checkReview(v, rv.name, inputs[1]) })
 	if err != nil {
 		return engine.Result{}, err
 	}
-	if readErr != nil {
-		return engine.Result{}, readErr
-	}
-	out := results[len(results)-1]
-	accepted := engine.Result{Outputs: map[string]contract.Ref{"review": out.Output}}
-	closed, err := r.CloseSessionReport(ctx, h)
-	if err != nil {
-		return accepted, closeFailure(err, role, closed.Identity.HandleID)
-	}
-	if !closed.ConfirmsLocalClose(out.Execution.SessionID) {
-		return accepted, &engine.Failure{Code: engine.CleanupFailed, Origin: engine.OriginProtocol, Phase: role, Message: rv.name + " reviewer session close not confirmed",
-			DispatchAccepted: engine.AcceptedNo, HandleID: closed.Identity.HandleID, Cleanup: &closed}
-	}
-	return accepted, nil
-}
-
-// closeFailure classifies an error from closing a session as triage does: a
-// classified failure stays as it is, a cancellation is a cancellation, and
-// anything else, including running out of cleanup time, is a cleanup failure
-// rather than a workflow failure.
-func closeFailure(err error, phase, handleID string) error {
-	var f *engine.Failure
-	var c *contract.Error
-	switch {
-	case errors.As(err, &f) || errors.As(err, &c):
-		return err
-	case errors.Is(err, context.Canceled):
-		return &engine.Failure{Code: engine.Cancelled, Origin: engine.OriginControllerUser, Phase: phase, Message: err.Error(), DispatchAccepted: engine.AcceptedNo, HandleID: handleID, Cause: err}
-	}
-	return &engine.Failure{Code: engine.CleanupFailed, Origin: engine.OriginProtocol, Phase: phase, Message: err.Error(), DispatchAccepted: engine.AcceptedNo, HandleID: handleID, Cause: err}
+	return engine.Result{Outputs: map[string]contract.Ref{"review": out.Output}}, closeStrictly(ctx, r, h, out.Execution.SessionID, role, rv.name+" reviewer")
 }
 
 // checkReview is the acceptance a repair can fix: the dispatched role, the

@@ -59,7 +59,7 @@ func (a a1Run) requireSnapshotRemoved(t *testing.T) {
 func (a a1Run) reviewCalls() map[string][]agentCall {
 	out := map[string][]agentCall{}
 	for _, c := range a.calls {
-		if c.task.Role != "implementer" {
+		if c.task.Role == "basic" || c.task.Role == "consistency" {
 			out[c.task.Role] = append(out[c.task.Role], c)
 		}
 	}
@@ -101,10 +101,9 @@ func otherReviewer(role string) string {
 // Both reviewers run in parallel, each in a fresh session in PWC_PI_CWD,
 // reading a Controller-made snapshot of the verified head with their own git,
 // within exactly the limits the run needs: three live sessions, since the
-// implementer's stays open, three sessions and four attempts with the input
-// Attach. The workflow closes both strictly and removes the snapshot before
-// it returns, leaves the implementer's session to the run's cleanup and
-// still ends with the implement contract as Final.
+// implementer's stays open for the correction, three sessions and the six
+// attempts of the whole run. The workflow closes both strictly and removes
+// the snapshot before its Decision.
 func TestPrePRReviewSucceeds(t *testing.T) {
 	f := newFixture(t)
 	var head string
@@ -133,7 +132,7 @@ func TestPrePRReviewSucceeds(t *testing.T) {
 			return ""
 		},
 		policy: func(p *engine.RunPolicy) {
-			p.MaxLiveSessions, p.MaxTotalSessions, p.MaxTotalAttempts = 3, 3, 4
+			p.MaxLiveSessions, p.MaxTotalSessions, p.MaxTotalAttempts = 3, 3, 6
 		},
 		returned: func(r *engine.Run) { _, snapshotAtReturn = os.Lstat(filepath.Join(r.Dir(), snapshotDir, "checkout")) },
 	})
@@ -141,11 +140,7 @@ func TestPrePRReviewSucceeds(t *testing.T) {
 	if report.Outcome != engine.Succeeded || report.ExitCode != 0 || report.Failure != nil {
 		t.Fatalf("outcome %s exit %d failure %v", report.Outcome, report.ExitCode, report.Failure)
 	}
-	if report.Final == nil || report.Final.Output != "implement" || report.Final.Step != "implement" || report.Final.Ref != report.Result.Outputs["implement"] {
-		t.Fatalf("final: %+v", report.Final)
-	}
 	a.requireSessionsClosed(t, 3)
-	a.requireAttempts(t, 3)
 	calls := a.reviewCalls()
 	implementAttempt := a.attempt(a.calls[0])
 	want := map[string]contract.Ref{"input": a.calls[0].request.Inputs[0], "implement": *implementAttempt.Output}
@@ -186,57 +181,40 @@ func TestPrePRReviewSucceeds(t *testing.T) {
 			t.Fatalf("cwds %q, want PWC_PI_CWD %q", cwds, f.piCWD)
 		}
 	}
-	if !reflect.DeepEqual(report.Result.Outputs, want) {
-		t.Fatalf("outputs %+v, want %+v", report.Result.Outputs, want)
+	for key, ref := range want {
+		if report.Result.Outputs[key] != ref {
+			t.Fatalf("outputs %+v, want %+v among them", report.Result.Outputs, want)
+		}
 	}
-	a.requireDecisions(t, decision{Scope: "root", Name: "implementation-recorded", Refs: []contract.Ref{want["implement"]}},
-		decision{Scope: "root", Name: "pre-pr-reviewed", Refs: []contract.Ref{want["review-basic"], want["review-consistency"]}})
+	reviewed := []decision{{Scope: "root", Name: "implementation-recorded", Refs: []contract.Ref{want["implement"]}},
+		{Scope: "root", Name: "pre-pr-reviewed", Refs: []contract.Ref{want["review-basic"], want["review-consistency"]}}}
+	if got := a.decisions(t); len(got) < 2 || !reflect.DeepEqual(got[:2], reviewed) {
+		t.Fatalf("decisions %+v, want %+v first", got, reviewed)
+	}
 	// The journal: a CollectAll group of both reviewers, whose sessions the
-	// workflow closed before its Decision; the implementer's session is left
-	// open for the run's cleanup.
+	// workflow closed before its Decision.
 	var group map[string]any
-	decided, finalizing, closed := -1, -1, map[string]int{}
-	for i, e := range a.events(t) {
-		switch e.Kind {
-		case "RunFinalizing":
-			finalizing = i
-		case "GroupStarted":
+	for _, e := range a.events(t) {
+		if e.Kind == "GroupStarted" {
 			if err := json.Unmarshal(e.Details, &group); err != nil {
 				t.Fatal(err)
-			}
-		case "SessionClosed":
-			var d struct {
-				HandleID string `json:"handle_id"`
-			}
-			if err := json.Unmarshal(e.Details, &d); err != nil {
-				t.Fatal(err)
-			}
-			closed[d.HandleID] = i
-		case "Decision":
-			if strings.Contains(string(e.Details), `"pre-pr-reviewed"`) {
-				decided = i
 			}
 		}
 	}
 	if !reflect.DeepEqual(group, map[string]any{"scope": "root/pre-pr-review", "mode": "collect_all", "branches": float64(2)}) {
 		t.Fatalf("group %+v", group)
 	}
+	closed, _, decided := a.journalIndex(t)
 	for h := range reviewHandles {
-		if i, ok := closed[h]; !ok || i > decided {
-			t.Fatalf("reviewer session %s closed at event %d (%v), Decision at %d", h, i, ok, decided)
+		if at := closed[h]; len(at) != 1 || at[0] > decided["pre-pr-reviewed"] {
+			t.Fatalf("reviewer session %s closed at events %v, Decision at %d", h, at, decided["pre-pr-reviewed"])
 		}
-	}
-	if i, ok := closed[implementAttempt.HandleID]; !ok || i < finalizing || decided > finalizing || len(closed) != 3 {
-		t.Fatalf("sessions closed at %v, Decision at %d, finalizing at %d; want only the implementer's in the run's cleanup", closed, decided, finalizing)
 	}
 	// The workflow removed the snapshot before returning.
 	if !errors.Is(snapshotAtReturn, os.ErrNotExist) {
 		t.Fatalf("snapshot checkout at workflow return: %v", snapshotAtReturn)
 	}
 	a.requireSnapshotRemoved(t)
-	if got := f.gitIn(a.worktree(), "rev-parse", "HEAD"); got != head {
-		t.Fatalf("worktree HEAD %s, want %s", got, head)
-	}
 }
 
 // The snapshot is the verified head, not the live worktree: uncommitted and
@@ -303,7 +281,8 @@ func TestPrePRReviewSnapshotPinned(t *testing.T) {
 // A filter and hooks the implementer configured in the worktree repository,
 // and a .gitattributes the implementer committed, do not apply while the
 // Controller checks out the snapshot: the checkout has the committed bytes,
-// although the same filter runs on a checkout in that repository.
+// although the same filter runs on a checkout in that repository, tried when
+// the workflow returns, before the run's cleanup removes the worktree.
 func TestPrePRReviewSnapshotIgnoresWorktreeConfig(t *testing.T) {
 	f := newFixture(t)
 	sentinel := filepath.Join(f.dir, "hostile-ran")
@@ -324,6 +303,7 @@ func TestPrePRReviewSnapshotIgnoresWorktreeConfig(t *testing.T) {
 	}
 	var head string
 	var files map[string]string
+	var ranBefore, ranOnCheckout error
 	a := f.run(t, agents{
 		implement: func(t *testing.T, c agentCall) string {
 			for _, kv := range [][2]string{{"filter.hostile.clean", "cat"}, {"filter.hostile.smudge", hostile}, {"filter.hostile.required", "true"}, {"core.hooksPath", hooks}} {
@@ -355,18 +335,24 @@ func TestPrePRReviewSnapshotIgnoresWorktreeConfig(t *testing.T) {
 			}
 			return acceptReview(t, c)
 		},
+		// The configuration is live in the worktree repository.
+		returned: func(r *engine.Run) {
+			_, ranBefore = os.Lstat(sentinel)
+			worktree := filepath.Join(r.Dir(), worktreeDir, "checkout")
+			if ranOnCheckout = os.Remove(filepath.Join(worktree, "tracked.txt")); ranOnCheckout == nil {
+				f.gitIn(worktree, "checkout", "--", "tracked.txt")
+				_, ranOnCheckout = os.Stat(sentinel)
+			}
+		},
 	})
 	if a.report.Outcome != engine.Succeeded {
 		t.Fatalf("outcome %s: %v", a.report.Outcome, a.report.Failure)
 	}
-	requireMissing(t, sentinel)
-	// The configuration is live in the worktree repository.
-	if err := os.Remove(filepath.Join(a.worktree(), "tracked.txt")); err != nil {
-		t.Fatal(err)
+	if !errors.Is(ranBefore, os.ErrNotExist) {
+		t.Fatalf("the filter or a hook ran before the workflow returned: %v", ranBefore)
 	}
-	f.gitIn(a.worktree(), "checkout", "--", "tracked.txt")
-	if _, err := os.Stat(sentinel); err != nil {
-		t.Fatalf("the worktree repository's filter did not run on its own checkout: %v", err)
+	if ranOnCheckout != nil {
+		t.Fatalf("the worktree repository's filter did not run on its own checkout: %v", ranOnCheckout)
 	}
 }
 
@@ -468,7 +454,7 @@ func TestPrePRReviewerFailure(t *testing.T) {
 					case "":
 						return false
 					case "exhausted":
-						if dispatched[c.task.Role] < 1+reviewRepairs {
+						if dispatched[c.task.Role] < 1+contractRepairs {
 							return false
 						}
 					case "provider":
@@ -496,7 +482,7 @@ func TestPrePRReviewerFailure(t *testing.T) {
 					}
 					want["review-"+rv.name] = *accepted.Output
 				case "exhausted":
-					n = 1 + reviewRepairs
+					n = 1 + contractRepairs
 					if diagnostic := `role: got "` + otherReviewer(rv.name) + `"; want "` + rv.name + `"`; !strings.Contains(report.Failure.Error(), diagnostic) {
 						t.Fatalf("failure %v, want %q", report.Failure, diagnostic)
 					}
@@ -680,10 +666,10 @@ func TestPrePRReviewRepair(t *testing.T) {
 				},
 			})
 			report := a.report
-			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "implement" {
+			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "publish" {
 				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 			}
-			a.requireAttempts(t, 4)
+			a.requireAttempts(t, 5, "input", "pull-request")
 			basic := a.reviewCalls()["basic"]
 			if len(basic) != 2 {
 				t.Fatalf("basic dispatches %d", len(basic))
@@ -712,8 +698,9 @@ func TestPrePRReviewRepair(t *testing.T) {
 }
 
 // One less than the live sessions, sessions or attempts pre-PR review needs
-// (TestPrePRReviewSucceeds runs at exactly those limits) stops the run with
-// a run-scope LimitExceeded after every started session's exit is confirmed.
+// (three, three and four with the input Attach; TestPrePRReviewSucceeds runs
+// at those live sessions and sessions) stops the run with a run-scope
+// LimitExceeded after every started session's exit is confirmed.
 func TestPrePRReviewLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name                     string

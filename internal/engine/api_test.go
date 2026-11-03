@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"pi-workflow-controller/internal/contract"
@@ -82,6 +83,42 @@ func TestUninitializedOperationsFailClosed(t *testing.T) {
 			}
 			if failure.Code != engine.InvalidDefinition || failure.Origin != engine.OriginDefinition || failure.DispatchAccepted != engine.AcceptedNo {
 				t.Fatalf("incorrect unimplemented failure: %+v", failure)
+			}
+		})
+	}
+}
+
+// CloseFailure keeps a classified failure, anywhere in the chain, as it is
+// and turns anything else into a failure of the given phase and handle: a
+// bare cancellation is a cancellation, running out of cleanup time or any
+// other error a cleanup failure.
+func TestCloseFailure(t *testing.T) {
+	classified := &engine.Failure{Code: engine.TimedOut, Origin: engine.OriginRunDeadline}
+	for _, tc := range []struct {
+		name string
+		err  error
+		// code and origin classify an error CloseFailure does not pass on.
+		code   engine.Code
+		origin engine.Origin
+	}{
+		{"a classified failure stays", classified, "", ""},
+		{"a wrapped classified failure stays", fmt.Errorf("close: %w", classified), "", ""},
+		{"a contract error stays", &contract.Error{Code: contract.ContractInvalid, Message: "invalid"}, "", ""},
+		{"a bare cancellation is a cancellation", context.Canceled, engine.Cancelled, engine.OriginControllerUser},
+		{"running out of cleanup time is a cleanup failure", context.DeadlineExceeded, engine.CleanupFailed, engine.OriginProtocol},
+		{"anything else is a cleanup failure", errors.New("close: broken pipe"), engine.CleanupFailed, engine.OriginProtocol},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := engine.CloseFailure(tc.err, "probe", "h1")
+			if tc.code == "" {
+				if got != tc.err {
+					t.Fatalf("CloseFailure = %v, want the error itself", got)
+				}
+				return
+			}
+			f, ok := got.(*engine.Failure)
+			if !ok || f.Code != tc.code || f.Origin != tc.origin || f.Phase != "probe" || f.HandleID != "h1" || !errors.Is(f, tc.err) {
+				t.Fatalf("CloseFailure = %#v, want %s from %s of phase probe and handle h1", got, tc.code, tc.origin)
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +23,15 @@ import (
 )
 
 // TestGHHelper is the GitHub API boundary: the gh PATH wrapper runs it in a
-// real subprocess that answers only the repository GET.
+// real subprocess that accepts only a REST GET of the target repository, its
+// pull requests, a compare, its branch refs or a branch's pull request list.
+// Pull requests are the records the fake Agent wrote under prs/, with the
+// head SHA read from the local origin at query time like GitHub; compare and
+// refs come from the real git on that origin. Per kind of read, gh-fail-<kind>
+// fails it, gh-body-<kind> replaces its body and pr-patch.json is merged into
+// a pull request; gh-move-head commits in that worktree during a pull
+// request read. With gh-require-closed, a branch ref or pull request list
+// read fails until implementer-closed exists.
 func TestGHHelper(t *testing.T) {
 	dir := os.Getenv("PWC_CC_GH")
 	if dir == "" {
@@ -38,18 +47,183 @@ func TestGHHelper(t *testing.T) {
 	}
 	_, _ = fmt.Fprintln(calls, strings.Join(args, " "))
 	_ = calls.Close()
-	if !reflect.DeepEqual(args, []string{"api", "--method", "GET", "--hostname", "github.com", "-H", "Accept: application/vnd.github+json", "repos/owner/repo"}) {
+	if len(args) != 8 || !reflect.DeepEqual(args[:7], []string{"api", "--method", "GET", "--hostname", "github.com", "-H", "Accept: application/vnd.github+json"}) {
 		os.Exit(2)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "gh-block")); err == nil {
 		block(dir)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "repo.json"))
+	endpoint := args[7]
+	kind, arg := ghKind(endpoint)
+	if kind == "" {
+		os.Exit(2)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "gh-fail-"+kind)); err == nil {
+		os.Exit(1)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "gh-require-closed")); err == nil && (kind == "refs" || kind == "pulls") {
+		if _, err := os.Stat(filepath.Join(dir, "implementer-closed")); err != nil {
+			os.Exit(1)
+		}
+	}
+	if raw, err := os.ReadFile(filepath.Join(dir, "gh-body-"+kind)); err == nil {
+		_, _ = os.Stdout.Write(raw)
+		os.Exit(0)
+	}
+	origin := filepath.Join(dir, "origin.git")
+	var out any
+	switch kind {
+	case "repo":
+		data, err := os.ReadFile(filepath.Join(dir, "repo.json"))
+		if err != nil {
+			os.Exit(2)
+		}
+		_, _ = os.Stdout.Write(data)
+		os.Exit(0)
+	case "pull":
+		if target, err := os.ReadFile(filepath.Join(dir, "gh-move-head")); err == nil {
+			if originGit(string(target), "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty", "-m", "moved") == "" {
+				_ = os.Remove(filepath.Join(dir, "gh-move-head"))
+			}
+		}
+		pr, ok := readPull(dir, origin, arg)
+		if !ok {
+			os.Exit(1)
+		}
+		if raw, err := os.ReadFile(filepath.Join(dir, "pr-patch.json")); err == nil {
+			var patch map[string]any
+			if json.Unmarshal(raw, &patch) != nil {
+				os.Exit(2)
+			}
+			merge(pr, patch)
+		}
+		out = pr
+	case "compare":
+		commit, head, _ := strings.Cut(arg, "...")
+		if originGit(origin, "cat-file", "-e", commit+"^{commit}") != "" || originGit(origin, "cat-file", "-e", head+"^{commit}") != "" {
+			os.Exit(1)
+		}
+		status, base := "diverged", ""
+		switch {
+		case commit == head:
+			status, base = "identical", commit
+		case originGit(origin, "merge-base", "--is-ancestor", commit, head) == "":
+			status, base = "ahead", commit
+		case originGit(origin, "merge-base", "--is-ancestor", head, commit) == "":
+			status, base = "behind", head
+		default:
+			base = originOutput(origin, "merge-base", commit, head)
+		}
+		out = map[string]any{"status": status, "merge_base_commit": map[string]any{"sha": base}, "commits": []any{}}
+	case "refs":
+		refs := []any{}
+		for _, line := range strings.Split(originOutput(origin, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"), "\n") {
+			ref, sha, _ := strings.Cut(line, " ")
+			if strings.HasPrefix(ref, "refs/heads/"+arg) {
+				refs = append(refs, map[string]any{"ref": ref, "object": map[string]any{"sha": sha}})
+			}
+		}
+		out = refs
+	case "pulls":
+		pulls := []any{}
+		entries, _ := os.ReadDir(filepath.Join(dir, "prs"))
+		for _, e := range entries {
+			pr, ok := readPull(dir, origin, strings.TrimSuffix(e.Name(), ".json"))
+			if ok && "owner:"+pr["head"].(map[string]any)["ref"].(string) == arg {
+				pulls = append(pulls, pr)
+			}
+		}
+		out = pulls
+	}
+	raw, err := json.Marshal(out)
 	if err != nil {
 		os.Exit(2)
 	}
-	_, _ = os.Stdout.Write(data)
+	_, _ = os.Stdout.Write(raw)
 	os.Exit(0)
+}
+
+// ghKind is the kind of read endpoint is and its argument: the pull request
+// number, the compare range, the branch ref prefix or the head filter.
+func ghKind(endpoint string) (string, string) {
+	const repo = "repos/owner/repo"
+	rest, ok := strings.CutPrefix(endpoint, repo)
+	switch {
+	case !ok:
+		return "", ""
+	case rest == "":
+		return "repo", ""
+	case strings.HasPrefix(rest, "/pulls/"):
+		return "pull", strings.TrimPrefix(rest, "/pulls/")
+	case strings.HasPrefix(rest, "/compare/"):
+		return "compare", strings.TrimPrefix(rest, "/compare/")
+	case strings.HasPrefix(rest, "/git/matching-refs/heads/"):
+		branch, err := url.PathUnescape(strings.TrimPrefix(rest, "/git/matching-refs/heads/"))
+		if err != nil {
+			return "", ""
+		}
+		return "refs", branch
+	case strings.HasPrefix(rest, "/pulls?"):
+		query, err := url.ParseQuery(strings.TrimPrefix(rest, "/pulls?"))
+		if err != nil || query.Get("state") != "all" || query.Get("per_page") != "100" || len(query) != 3 {
+			return "", ""
+		}
+		return "pulls", query.Get("head")
+	}
+	return "", ""
+}
+
+// readPull is the pull request record number with its head SHA read from
+// origin, or the recorded one once the branch is gone.
+func readPull(dir, origin, number string) (map[string]any, bool) {
+	raw, err := os.ReadFile(filepath.Join(dir, "prs", number+".json"))
+	if err != nil {
+		return nil, false
+	}
+	var pr map[string]any
+	if json.Unmarshal(raw, &pr) != nil {
+		os.Exit(2)
+	}
+	head := pr["head"].(map[string]any)
+	if sha := originOutput(origin, "for-each-ref", "--format=%(objectname)", "refs/heads/"+head["ref"].(string)); sha != "" {
+		head["sha"] = sha
+	}
+	return pr, true
+}
+
+// merge sets every field of patch in v, recursing into objects.
+func merge(v, patch map[string]any) {
+	for k, p := range patch {
+		if sub, ok := p.(map[string]any); ok {
+			if into, ok := v[k].(map[string]any); ok {
+				merge(into, sub)
+				continue
+			}
+		}
+		if p == nil {
+			delete(v, k)
+			continue
+		}
+		v[k] = p
+	}
+}
+
+// originGit runs the real git in dir and returns "" on success.
+func originGit(dir string, args ...string) string {
+	cmd := exec.Command(os.Getenv("PWC_CC_GIT"), append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.com", "GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.com")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return string(out) + err.Error()
+	}
+	return ""
+}
+
+func originOutput(dir string, args ...string) string {
+	out, err := exec.Command(os.Getenv("PWC_CC_GIT"), append([]string{"-C", dir}, args...)...).Output()
+	if err != nil {
+		os.Exit(2)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // TestGitHelper records each Controller git call, optionally blocks or fails
@@ -379,8 +553,13 @@ func TestDefinitionPolicy(t *testing.T) {
 	want := engine.DefaultRunPolicy()
 	want.RunTimeout = 8 * time.Hour
 	want.MaxLiveSessions, want.MaxTotalSessions, want.MaxTotalAttempts = 3, 22, 80
-	if def.Name != "code-change" || def.Version != "1" || def.Description == "" || !reflect.DeepEqual(def.Policy, want) {
+	want.Runtime.CleanupTimeout = 2 * time.Minute
+	if def.Name != "code-change" || def.Version != "1" || !reflect.DeepEqual(def.Policy, want) {
 		t.Fatalf("definition: %s %s %+v", def.Name, def.Version, def.Policy)
+	}
+	// The description says where this version stops.
+	if !strings.Contains(def.Description, "this version stops after the pull request is opened") {
+		t.Fatalf("description: %s", def.Description)
 	}
 	if _, err := engine.NewRegistry([]engine.Definition{def}); err != nil {
 		t.Fatal(err)
@@ -920,11 +1099,12 @@ func TestCleanupRegistrationFailureRemovesCheckout(t *testing.T) {
 	}
 }
 
-func (f *fixture) requireKept(t *testing.T, r *engine.Run) {
+// requireKept checks the run kept the worktree's checkout and registration.
+func requireKept(t *testing.T, r *engine.Run) {
 	t.Helper()
 	root := filepath.Join(r.Dir(), worktreeDir)
-	if raw, err := os.ReadFile(filepath.Join(root, "checkout", "tracked.txt")); err != nil || string(raw) != "base\n" {
-		t.Fatalf("worktree not kept: %q %v", raw, err)
+	if _, err := os.Stat(filepath.Join(root, "checkout", "tracked.txt")); err != nil {
+		t.Fatalf("worktree not kept: %v", err)
 	}
 	if info, err := os.Stat(filepath.Join(root, "repository.git", "worktrees", "checkout")); err != nil || !info.IsDir() {
 		t.Fatalf("worktree registration not kept: %v", err)
@@ -948,7 +1128,7 @@ func TestRegisteredWorktreeKeptUnlessRemoveSet(t *testing.T) {
 		if len(report.CleanupErrors) != 0 {
 			t.Fatal(report.CleanupErrors)
 		}
-		f.requireKept(t, r)
+		requireKept(t, r)
 	})
 	t.Run("cancelled-after-registration", func(t *testing.T) {
 		f := newFixture(t)
@@ -963,7 +1143,7 @@ func TestRegisteredWorktreeKeptUnlessRemoveSet(t *testing.T) {
 		if report.Outcome != engine.CancelledState || len(report.CleanupErrors) != 0 {
 			t.Fatalf("outcome %s cleanup %v", report.Outcome, report.CleanupErrors)
 		}
-		f.requireKept(t, r)
+		requireKept(t, r)
 	})
 	t.Run("remove-set", func(t *testing.T) {
 		f := newFixture(t)

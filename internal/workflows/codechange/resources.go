@@ -21,7 +21,17 @@ const ImplementSchema = "code-change.implement.v1"
 // ReviewSchema is a pre-PR reviewer's findings; both reviewers use it.
 const ReviewSchema = "code-change.review.v1"
 
-var schemaNames = []string{"input", "implement", "review"}
+// PublishSchema is the correction Step's dispositions and publication receipt.
+const PublishSchema = "code-change.publish.v1"
+
+// PullRequestSchema is the Controller record of the verified pull request.
+const PullRequestSchema = "code-change.pull-request.v1"
+
+// ExternalObjectsSchema is the Controller record of what exists after a
+// failure from the correction Step on.
+const ExternalObjectsSchema = "code-change.external-objects.v1"
+
+var schemaNames = []string{"input", "implement", "review", "publish", "pull-request", "external-objects"}
 
 func Resources() []contract.Resource {
 	var out []contract.Resource

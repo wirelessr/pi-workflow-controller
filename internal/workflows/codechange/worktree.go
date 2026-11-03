@@ -106,9 +106,9 @@ func (w *worktree) head(ctx context.Context) (string, error) {
 	return head, nil
 }
 
-// isNew reports whether head is neither the base nor one of its ancestors.
-func (w *worktree) isNew(ctx context.Context, head string) (bool, error) {
-	out, err := w.read(ctx, "rev-list", "--count", "--end-of-options", w.base+".."+head)
+// isNew reports whether head is neither last nor one of its ancestors.
+func (w *worktree) isNew(ctx context.Context, last, head string) (bool, error) {
+	out, err := w.read(ctx, "rev-list", "--count", "--end-of-options", last+".."+head)
 	if err != nil {
 		return false, fmt.Errorf("worktree history: %w", err)
 	}
@@ -117,6 +117,23 @@ func (w *worktree) isNew(ctx context.Context, head string) (bool, error) {
 		return false, fmt.Errorf("worktree history: rev-list count %q", out)
 	}
 	return n > 0, nil
+}
+
+// branch is the branch the worktree HEAD is on, or "" when it is detached.
+func (w *worktree) branch(ctx context.Context) (string, error) {
+	// Without --end-of-options, which this mode prints back; HEAD is fixed.
+	out, err := w.read(ctx, "rev-parse", "--symbolic-full-name", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("worktree branch: %w", err)
+	}
+	if out == "HEAD" {
+		return "", nil
+	}
+	branch, ok := strings.CutPrefix(out, "refs/heads/")
+	if !ok || branch == "" {
+		return "", fmt.Errorf("worktree branch: HEAD is %q, not a branch", out)
+	}
+	return branch, nil
 }
 
 // cleanup runs only after the workflow joined and Pi exit was confirmed.

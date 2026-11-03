@@ -151,7 +151,7 @@ func (ts TaskSession) Close(ctx context.Context, r *engine.Run, stage string, ou
 		if handle == "" {
 			handle = closed.Identity.HandleID
 		}
-		err = closeFailure(err, "triage-"+stage, handle)
+		err = engine.CloseFailure(err, "triage-"+stage, handle)
 		if recovery {
 			return &TaskFailure{Cause: err, Handle: ts.Handle, Identity: ts.Identity, Stage: stage, Attempt: out.AttemptID}
 		}

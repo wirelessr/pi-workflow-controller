@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/code-change/pull-request.v1.json",
+  "description": "Controller record of the pull request the correction Step reported, as a read-only GitHub read showed it once the receipt check passed: its identity and the heads downstream needs; it records and judges nothing else",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "url",
+    "number",
+    "branch",
+    "head_sha",
+    "reported_head",
+    "compare_status"
+  ],
+  "properties": {
+    "url": {
+      "type": "string"
+    },
+    "number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "branch": {
+      "description": "The pull request's head branch in the target repository, without refs/heads/",
+      "type": "string"
+    },
+    "head_sha": {
+      "description": "The pull request's head when it was read, which may be newer than reported_head",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "reported_head": {
+      "description": "The head the correction Step reported and the worktree confirmed, which is head_sha or one of its ancestors",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "compare_status": {
+      "description": "identical when reported_head is head_sha, without a compare read; otherwise the status GitHub's compare of reported_head to head_sha returned",
+      "enum": [
+        "identical",
+        "ahead"
+      ]
+    }
+  }
+}

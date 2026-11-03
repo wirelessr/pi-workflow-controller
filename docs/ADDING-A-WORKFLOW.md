@@ -86,7 +86,7 @@
 | `Parallel(CollectAll)` | group err==nil 不代表全部成功，逐一處理每個 BranchResult.Err；必要分支不可略過 |
 | `Retry` | 首次之外的額度，Again=true 需有效 Feedback；callback 明確把 Feedback 放入下次 Step。Provider auto retry 不是這個 budget |
 | `Decision` | 業務驗收／轉移留下理由與已 committed refs，不讓 TUI 或模型自行決定下一階段 |
-| `CloseSession`／`CloseSessionReport` | 可在活動 workflow 中提早關閉，共用同一次 close 結果與獨立 cleanup budget；report 回傳 defensive copy，未完成會保留 Unconfirmed 與錯誤。不要用 canceled context 的 defer 呼叫取代 engine cleanup |
+| `CloseSession`／`CloseSessionReport` | 可在活動 workflow 中提早關閉，共用同一次 close 結果與獨立 cleanup budget；report 回傳 defensive copy，未完成會保留 Unconfirmed 與錯誤。不要用 canceled context 的 defer 呼叫取代 engine cleanup；嚴格關閉時以 `engine.CloseFailure` 分類未分類的 close 錯誤 |
 | `SessionContextUsage` | 僅在 idle owned handle 按需取得當前 context estimate、Identity、SampledAt／Seq／ActivityEpoch；nil tokens／percent／window 表示 unknown，不是零。與 Step／Close 互斥，不增加 health polling，也不是 provider admission 保證 |
 | `AddCleanup` | 在把自有資源暴露給 Pi 前註冊；若 acquisition 部分失敗或註冊失敗，caller 仍負責 bounded cleanup。成功註冊後，engine 的 callback 等待 workflow join／確認 Pi exit 才清理；workflow 也可以在所有曾取得該資源的 session 都確認退出後提早自行移除（移除必須冪等，之後 callback 為 no-op） |
 

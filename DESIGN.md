@@ -245,6 +245,7 @@ type RetryAction struct {
 func (r *Run) OpenSession(ctx context.Context, role RoleSpec) (*SessionHandle, error)
 func (r *Run) CloseSession(ctx context.Context, h *SessionHandle) error
 func (r *Run) CloseSessionReport(ctx context.Context, h *SessionHandle) (runtime.CleanupReport, error)
+func CloseFailure(err error, phase, handleID string) error
 func (r *Run) SessionContextUsage(ctx context.Context, h *SessionHandle) (runtime.ContextUsage, error)
 func (r *Run) Root() *Scope
 func (r *Run) AddCleanup(ctx context.Context, name string,
@@ -270,6 +271,7 @@ func (r *Run) ControllerAttached(ref contract.Ref) bool
 - `Run`、`Scope`、`SessionHandle` 是 concrete type。Workflow 不持有底層 Session 或 `exec.Cmd`。
 - `Step` 自動建 attempt，落 request，派送，檢查 execution，驗證並發布 output。任何階段失敗都留下結構化原因。
 - `StepWithRepair` 是 contract repair：在 `repairs` 次以內，ContractInvalid 或 `validate` 回錯時，以同一 handle 在 `contract-repair-*` 子 scope 重派同一 key，Feedback 為具體診斷並保留原 Feedback 的 Refs；設定 `StepSpec.RepairKeepsWork` 的 Step（任務會寫入 contract 之外）在 repair 派送中，以「不新增或重複任何外部寫入或本機 commit，只依 feedback 重寫本 attempt 的 contract」取代「先執行任務」的開頭指示，其餘派送文字不變；其餘失敗原樣回傳。預算與驗收由 workflow 傳入；精確規則見該方法的 doc comment。
+- `CloseFailure` 給嚴格關閉 session 的 workflow 分類 `CloseSessionReport` 的錯誤：鏈中已分類的 Failure 或 contract error 原樣保留，裸取消為 `Cancelled`（`OriginControllerUser`），其餘（含 cleanup 期限用盡）為帶 phase 與 handle 的 `CleanupFailed`（`OriginProtocol`），不正規化成 WorkflowFailed；`ConfirmsLocalClose` 的確認仍由 caller 負責。Triage 與 code-change 使用。
 - `Attach` 把 Controller 自己產生的 data 與檔案（例如 caller 原始 Prompt、Controller 記錄的缺口）走同一條 BeginAttempt → Stage → Publish → journal commit 取得 exact Ref；沒有 session、派送與 execution，`AttemptState.Controller=true`、`HandleID` 為空、`DispatchAccepted=no`。它與 Step 共用 scope key 命名空間、attempt 配置與 `MaxTotalAttempts` 額度（不退還）、AttemptTimeout、AttemptStarted 與終態／成功提交（同一段程式碼），journal 只有 AttemptStarted 與終態事件。檔案路徑形狀、重複 ID／路徑（含只差大小寫）、檔案數與大小在結構 preflight 拒絕，不建立 attempt；檔案種類由 `evidence/`／`artifacts/` 目錄決定。Controller 的 data 不合 schema 時 attempt 為 Failed 並回傳 ContractInvalid；Storage／Journal 失敗照常 sticky fatal，寫到一半失敗會移除本次建立的檔案。`ControllerAttached(ref)` 只在 ref 是已 commit 且由 Attach 產生時為真；Agent Step 即使發布同 schema、同 file ID 與路徑也不是。被選為 final 的 attached Ref 沒有 session 可 resume，formatter 顯示 producer 為 controller。
 - `Result.Outputs` 只持有已 committed Ref，不用 memory-only JSON 傳給下一個 Pi；`Result.Final` 明確選 output key 與可選 artifact file ID，不是任意檔案路徑。
 - Workflow 透過 `engine.Decode[T](ctx, run, ref)` 讀取業務資料，供 B verdict 等 Go 分支判斷；內部走本 run 的統一 Ref resolver（第 8.3 節）。這是 package function，不是 generic method，也不把 Store 的寫入權限暴露給 workflow。
@@ -552,7 +554,7 @@ Run 終態仲裁：第一個已登記的 root stop cause（取消、deadline、r
 | Attempt | 30 分鐘 | Preparing 開始，包含 session 等待、provider retry、驗證 |
 | Run | 4 小時 | RunCreated 起，包括 session 初始化；cleanup 另計 |
 | Abort grace | 5 秒 | 等 abort／abort_bash 完成，不能無限等待 |
-| Cleanup | 全 run 15 秒 | 獨立 context，各 handle 平行清理 |
+| Cleanup | 全 run 15 秒 | 獨立 context，各 handle 平行清理；workflow 可在 Definition 的 `Policy.Runtime.CleanupTimeout` 改值（code-change 為 2 分鐘，也是成功時移除 worktree 的期限；期限不中斷進行中的移除，所以不是耗時上限） |
 | Health probe | 每 5 秒 | 避免重疊 probe；已有正常 response 可更新健康 |
 | 同時存活 session | 8 | 超限明確失敗，不等待可能永不釋放的 slot |
 | 每 run 總 session / attempt | 64 / 256 | 防止程式化 loop 失控 |

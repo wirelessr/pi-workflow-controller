@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/code-change/publish.v1.json",
+  "description": "The implementer's correction after the pre-PR review and the publication of the work: a disposition for every finding, the correction, the pushed branch and head, the pull request opened from it and the ticket transition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "dispositions",
+    "correction",
+    "branch",
+    "head",
+    "pull_request",
+    "ticket_transition"
+  ],
+  "properties": {
+    "dispositions": {
+      "description": "Exactly one item for each finding of the pre-PR review contracts in request.feedback.refs, identified by that contract's role and the finding's id; empty when they have no findings",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "review",
+          "id",
+          "action",
+          "reason"
+        ],
+        "properties": {
+          "review": {
+            "description": "The role of the review contract the finding is in",
+            "enum": [
+              "basic",
+              "consistency"
+            ]
+          },
+          "id": {
+            "description": "The finding's id in that review contract",
+            "type": "string",
+            "minLength": 1
+          },
+          "action": {
+            "description": "fixed: changed in a commit of this Step. not_fixed: left as it is",
+            "enum": [
+              "fixed",
+              "not_fixed"
+            ]
+          },
+          "reason": {
+            "description": "Why the finding was fixed this way or left as it is",
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "correction": {
+      "description": "committed: this Step committed in the worktree, so head is a new commit after the implement contract's local_head. no_change: it committed nothing, so head is that local_head",
+      "enum": [
+        "committed",
+        "no_change"
+      ]
+    },
+    "branch": {
+      "description": "The branch of the input's repository that was pushed and is the pull request's head, without refs/heads/",
+      "type": "string",
+      "minLength": 1
+    },
+    "head": {
+      "description": "The worktree HEAD after the last commit, which is the commit pushed to branch",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "pull_request": {
+      "description": "The pull request opened from branch, as GitHub shows it",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "number"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*$"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "ticket_transition": {
+      "description": "The ticket transition and its actual result; the Controller does not check it",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ticket",
+        "status",
+        "detail"
+      ],
+      "properties": {
+        "ticket": {
+          "description": "The ticket of the implement contract",
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "description": "The status the ticket was moved to, or was to be moved to",
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "description": "done: the ticket was transitioned. failed: the transition was attempted and did not happen. not_done: no transition was attempted",
+          "enum": [
+            "done",
+            "failed",
+            "not_done"
+          ]
+        },
+        "detail": {
+          "description": "What was done and its result, or why it failed or was not attempted",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}
