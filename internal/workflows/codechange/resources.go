@@ -18,7 +18,10 @@ const InputSchema = "code-change.input.v1"
 // ImplementSchema is the implementer's readiness and local implementation.
 const ImplementSchema = "code-change.implement.v1"
 
-var schemaNames = []string{"input", "implement"}
+// ReviewSchema is a pre-PR reviewer's findings; both reviewers use it.
+const ReviewSchema = "code-change.review.v1"
+
+var schemaNames = []string{"input", "implement", "review"}
 
 func Resources() []contract.Resource {
 	var out []contract.Resource

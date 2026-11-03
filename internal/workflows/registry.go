@@ -32,7 +32,7 @@ func Schemas() []contract.SchemaDefinition {
 // Definitions are the registered workflows; triageSkillsDir is the
 // jira-triage private skill directory, which the CLI reads from
 // triage.SkillsDirEnv, and piCWD is the unprocessed PWC_PI_CWD value that
-// code-change checks and uses as its implementer's CWD.
+// code-change checks and uses as its implementer's and reviewers' CWD.
 func Definitions(triageSkillsDir, piCWD string) []engine.Definition {
 	return []engine.Definition{{Name: "smoke-echo", Description: "Echo a one-line prompt through Pi and publish a verified contract", Version: "1", Policy: engine.DefaultRunPolicy(), Execute: smokeEcho}, review.Definition(), triage.Definition(triageSkillsDir), codechange.Definition(piCWD)}
 }

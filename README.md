@@ -10,11 +10,11 @@
 |---|---|
 | `smoke-echo` | 將單行 Prompt 當資料，經 Pi 產出 JSON contract；committed Decode 必須精確符合輸入。只有 contract，沒有 Markdown artifact |
 | `code-review` | 固定 deep 靜態 PR review：Prepare、Code／Scale-Failure／Simplicity 平行審閱、獨立 Validation，交付結構化 contract 與繁中 Markdown report |
-| `code-change` | 以已核可的 design doc 在 Controller 自有 worktree 內實作並本機 commit。此版本到本機實作為止：沒有發 PR 前審閱、push 或開 PR |
+| `code-change` | 以已核可的 design doc 在 Controller 自有 worktree 內實作並本機 commit，再由兩位審閱者做發 PR 前審閱（審閱者唯讀只靠 Step requirements，不是 Controller 的保證）。此版本到發 PR 前審閱為止：沒有更正、push 或開 PR |
 
 `code-review` 只讀 pinned code／來源，不執行被審 repository 的 tests/build/scripts，不發 comments 或其他外部寫入。合法 `limited` report 可以是執行成功，但不代表 PR 全面通過；必要 reviewer 失敗不能 exit 0。模型、來源及失敗語義見 [CODE-REVIEW](docs/CODE-REVIEW.md)。
 
-`code-change` 的 Prompt 為 `<owner/name> <design doc 路徑>`，程式在 `internal/workflows/codechange`，規劃與決策見 [CODE-CHANGE](docs/CODE-CHANGE.md)。Controller 以一次 gh GET 確認 repo 名稱與 push 權限，fetch default branch tip 建立 detached worktree（位於 run 目錄），由一個實作者 session 判斷 design doc 能否實作；可以則在 worktree 內依 Pi 正常載入的 git 流程 skill 本機 commit，Controller 只經 worktree registration 讀 HEAD 核對回報的 commit（等於 worktree HEAD，且不是 base 或其祖先）。成功（`ready`、Succeeded）時 Final 是實作 contract，只表示已本機 commit，不代表檢查通過；驗證項目與狀態在 contract 內，Controller 不判斷其意義。回報 gaps 時 worktree HEAD 必須仍等於 base：相等則交付同一 contract 為 Final，並以具名錯誤結束（Failed、exit 1）；不相等是 receipt 錯誤，不交付 Final。Worktree 一律保留，含未發佈的本機 commit。目前沒有 live 驗收。
+`code-change` 的 Prompt 為 `<owner/name> <design doc 路徑>`，程式在 `internal/workflows/codechange`，規劃與決策見 [CODE-CHANGE](docs/CODE-CHANGE.md)。Controller 以一次 gh GET 確認 repo 名稱與 push 權限，fetch default branch tip 建立 detached worktree（位於 run 目錄），由一個實作者 session 判斷 design doc 能否實作；可以則在 worktree 內依 Pi 正常載入的 git 流程 skill 本機 commit，Controller 只經 worktree registration 讀 HEAD 核對回報的 commit（等於 worktree HEAD，且不是 base 或其祖先）。核對通過後，Controller 在 run 目錄另建一個自有 bare repository，以 alternates 借用 worktree repository 的 objects，detached checkout 已核對的 commit 作為審閱用 checkout（不讀 Agent 可改的 worktree repository config，也不套用 tree 內 `.gitattributes` 的轉換），再平行派兩位 fresh 審閱者（基本 code review；design doc 對 code 的一致性），以同一個 findings schema 回報。審閱者不改檔、不 build／test 只是 Step requirements；checkout 的 objects 讀自 Agent 可寫的目錄且不驗證雜湊，所以內容也不是雜湊綁定的保證。兩位都必要，任一失敗即 run 失敗（不交付 Final，已接受的 findings 仍列在 outputs；兩位都失敗時以 basic 的失敗分類）。兩位的 session 都確認退出後，Controller 經 registration 重讀 worktree HEAD，必須仍是已核對的 commit（只偵測 HEAD 移動，不偵測其他改動），再移除審閱用 checkout。成功（Succeeded）時 Final 仍是實作 contract，只表示已本機 commit 並完成發 PR 前審閱，不代表檢查通過或 findings 已處理；驗證項目、findings 與其狀態在各 contract 內，Controller 不判斷其意義。回報 gaps 時不做審閱，worktree HEAD 必須仍等於 base：相等則交付同一 contract 為 Final，並以具名錯誤結束（Failed、exit 1）；不相等是 receipt 錯誤，不交付 Final。Worktree 一律保留，含未發佈的本機 commit。目前沒有 live 驗收。
 
 `jira-triage` 以固定階段調查一張 Jira 票（intake／facts、身分確認、調查 rounds、稽核、steward、對抗驗證、報告），程式在 `internal/workflows/triage`，設計與現況見 [JIRA-TRIAGE](docs/JIRA-TRIAGE.md)。執行需 `PWC_TRIAGE_SKILLS_DIR` 指向 repo 外的私有 skill 目錄，以及 `python3`（報告 renderer）。現況是 alpha：已以多張真實票 live 跑出報告，尚未 live 驗證的範圍見 JIRA-TRIAGE；成功產出報告不代表調查品質。
 
@@ -36,7 +36,7 @@ CI 不提供模型 credentials、不啟動 Pi／hub；bundled Pi 與 live-provid
 - 執行時需 PATH 中的 Pi **0.84.3**、其 Node.js runtime、已部署的 WebUI extension／hub 與可用 discovery。Controller 不打包 Pi、Node 或 credentials。
 - 須自行備妥固定 provider/model 的認證與使用權。`smoke-echo` 使用 `fireworks/accounts/fireworks/models/gpt-oss-120b`、thinking `low`。有配置不等於認證或推論成功，模型輸出仍可能不符合 contract。
 - `code-review` 額外需要 Python 3、git、已認證且有 repository 讀取權的 gh，以及其[工具 skills 前提](docs/CODE-REVIEW.md)。自有 skills/schema 已 embed，無須在 source repo cwd 執行；外部工具 skills 不包含在 binary。
-- `code-change` 額外需要支援 `--no-lazy-fetch` 的 git（2.45 以上；Controller 讀取 receipt 時使用，於 repo GET 之後、建立 worktree 之前檢查，不支援時 run 以具名錯誤失敗）、已認證且對目標 repo 有 push 權限的 gh、Agent 自己可用的 git identity，以及 `PWC_PI_CWD` 設為既有目錄的絕對路徑（實作者的 CWD；未設定、相對路徑或不是目錄時 run 在任何副作用前失敗）。
+- `code-change` 額外需要支援 `--no-lazy-fetch` 的 git（2.45 以上；Controller 讀取 receipt 時使用，於 repo GET 之後、建立 worktree 之前檢查，不支援時 run 以具名錯誤失敗）、已認證且對目標 repo 有 push 權限的 gh、Agent 自己可用的 git identity，以及 `PWC_PI_CWD` 設為既有目錄的絕對路徑（實作者與審閱者的 CWD；未設定、相對路徑或不是目錄時 run 在任何副作用前失敗）。
 - 不停用 Node TLS 驗證，不自動提升 project trust，不更動既有全域 skills/agents/settings。
 
 ```sh
@@ -59,7 +59,7 @@ PWC_PI_CWD=/absolute/path pi-workflow-controller run code-change "owner/repo /ab
 
 不從 stdin 讀 Prompt，不接受 task naming、input-file 或 config flags。未知 workflow、空／多行／非法 UTF-8／超限 Prompt 在建立 task 或啟動 Pi 前拒絕。每個 Controller 執行一個 run，資料路徑由 Controller 自動產生並顯示：`~/WIP/<task-id>/runs/<run-id>/`。
 
-`jira-triage` 另需 `PWC_TRIAGE_SKILLS_DIR` 指向私有 skill 目錄（CLI 啟動時讀取並交給 workflow 定義；未設定時 run 在任何 Step 之前失敗）。可用單次環境設定 `PWC_PI_CWD=/absolute/path/to/service pi-workflow-controller run ...` 指定 Pi 預設工作目錄。CLI 在 `run` 讀此值並傳入 `engine.Options.PiDefaultCWD`，另於啟動時把原值交給 `workflows.Definitions`，`code-change` 據以檢查並明設為實作者的 `Role.CWD`；不新增 flags 或全域設定。優先序為 workflow 明設的 `Role.CWD` → 預設目錄 → 啟動 Controller 時的 `Input.LaunchCWD`。相對值在建立 Run 時依 LaunchCWD 固定；unset／空字串停用，不 trim 空白、不展開 `~`。僅選用的 default 含 NUL 時提前拒絕，explicit Role.CWD／fallback LaunchCWD 保留原 runtime 驗證與會計；不存在或非目錄在實際 spawn 時失敗，未使用的壞 default 不阻擋 explicit role，`list` 不使用此設定。
+`jira-triage` 另需 `PWC_TRIAGE_SKILLS_DIR` 指向私有 skill 目錄（CLI 啟動時讀取並交給 workflow 定義；未設定時 run 在任何 Step 之前失敗）。可用單次環境設定 `PWC_PI_CWD=/absolute/path/to/service pi-workflow-controller run ...` 指定 Pi 預設工作目錄。CLI 在 `run` 讀此值並傳入 `engine.Options.PiDefaultCWD`，另於啟動時把原值交給 `workflows.Definitions`，`code-change` 據以檢查並明設為實作者與審閱者的 `Role.CWD`；不新增 flags 或全域設定。優先序為 workflow 明設的 `Role.CWD` → 預設目錄 → 啟動 Controller 時的 `Input.LaunchCWD`。相對值在建立 Run 時依 LaunchCWD 固定；unset／空字串停用，不 trim 空白、不展開 `~`。僅選用的 default 含 NUL 時提前拒絕，explicit Role.CWD／fallback LaunchCWD 保留原 runtime 驗證與會計；不存在或非目錄在實際 spawn 時失敗，未使用的壞 default 不阻擋 explicit role，`list` 不使用此設定。
 
 Review 保留 explicit `review-work` 與 pinned `task.Worktree`，smoke 使用一般 fallback。這是 cwd／任務接線，不是阻止 Agent 寫入來源的 sandbox；也不改變 Input、discovery anchor 或 session ownership。
 

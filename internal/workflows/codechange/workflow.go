@@ -12,12 +12,12 @@ import (
 )
 
 // Definition is the code-change workflow. piCWD is the raw PWC_PI_CWD value;
-// it is checked before any side effect and is the implementer's CWD.
+// it is checked before any side effect and is every Agent's CWD.
 func Definition(piCWD string) engine.Definition {
 	p := engine.DefaultRunPolicy()
 	p.RunTimeout = 8 * time.Hour
 	p.MaxLiveSessions, p.MaxTotalSessions, p.MaxTotalAttempts = 3, 22, 80
-	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree; this version stops there, with no review, push or pull request", Version: "1", Policy: p,
+	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree, then have two reviewers check them before a pull request; this version stops after that pre-PR review, with no push or pull request", Version: "1", Policy: p,
 		Execute: func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
 			return execute(ctx, r, in, piCWD, gitSource{remote: githubRemote})
 		}}
@@ -36,7 +36,11 @@ func execute(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, 
 	if err != nil {
 		return engine.Result{}, err
 	}
-	return implement(ctx, r, p, piCWD)
+	result, head, err := implement(ctx, r, p, piCWD)
+	if err != nil {
+		return result, err
+	}
+	return preReview(ctx, r, p, piCWD, result, head)
 }
 
 // prepare checks the prompt, PWC_PI_CWD, Node TLS and the design doc before

@@ -88,7 +88,7 @@
 | `Decision` | 業務驗收／轉移留下理由與已 committed refs，不讓 TUI 或模型自行決定下一階段 |
 | `CloseSession`／`CloseSessionReport` | 可在活動 workflow 中提早關閉，共用同一次 close 結果與獨立 cleanup budget；report 回傳 defensive copy，未完成會保留 Unconfirmed 與錯誤。不要用 canceled context 的 defer 呼叫取代 engine cleanup |
 | `SessionContextUsage` | 僅在 idle owned handle 按需取得當前 context estimate、Identity、SampledAt／Seq／ActivityEpoch；nil tokens／percent／window 表示 unknown，不是零。與 Step／Close 互斥，不增加 health polling，也不是 provider admission 保證 |
-| `AddCleanup` | 在把自有資源暴露給 Pi 前註冊；若 acquisition 部分失敗或註冊失敗，caller 仍負責 bounded cleanup。成功註冊後等待 workflow join／確認 Pi exit 才清理 |
+| `AddCleanup` | 在把自有資源暴露給 Pi 前註冊；若 acquisition 部分失敗或註冊失敗，caller 仍負責 bounded cleanup。成功註冊後，engine 的 callback 等待 workflow join／確認 Pi exit 才清理；workflow 也可以在所有曾取得該資源的 session 都確認退出後提早自行移除（移除必須冪等，之後 callback 為 no-op） |
 
 Timeout／context handoff 由 workflow 顯式編排：保留上一份 committed Ref，驗收 `CloseSessionReport` 的 identity、WaitCompleted／ProcessExited、Unconfirmed 與 cleanup errors 後，才 OpenSession fresh handle 並以 Step.Inputs 交接。新 session 不重置 run session／attempt 計數；engine 不自動 retry，不把未知 ProviderFailed 當作 overflow。本機 Wait 不證明遠端 async job 已停止，需另做 workflow-specific 安全判定。Step deadline 是取消觸發，不保證固定時刻返回；最後 durable commit 窗口沿用既有仲裁，不在已提交成功後追加相反終態。
 

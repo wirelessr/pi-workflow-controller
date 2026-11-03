@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/code-change/review.v1.json",
+  "description": "A pre-PR reviewer's findings on the change from the base commit to the head commit, read in the checkout",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "role",
+    "implement",
+    "findings",
+    "limitations"
+  ],
+  "properties": {
+    "role": {
+      "description": "The role in request.prompt",
+      "enum": [
+        "basic",
+        "consistency"
+      ]
+    },
+    "implement": {
+      "$ref": "https://pi-workflow-controller.local/schemas/code-change/implement.v1.json#/$defs/ref",
+      "description": "The implement Ref this request gave, whose local_head is the head commit, copied byte-exact from request.inputs"
+    },
+    "findings": {
+      "description": "One item per problem found. An empty list means none was found, which is not proof that the change is correct or matches the design doc",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "summary",
+          "detail"
+        ],
+        "dependentRequired": {
+          "line": [
+            "path"
+          ]
+        },
+        "properties": {
+          "id": {
+            "description": "Identifies the finding, unique among this contract's findings",
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "description": "The file the finding is about, relative to the repository root, when it has one",
+            "type": "string",
+            "minLength": 1
+          },
+          "line": {
+            "description": "The line in path at the head commit",
+            "type": "integer",
+            "minimum": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "detail": {
+            "description": "What is wrong and the evidence for it",
+            "type": "string",
+            "minLength": 1
+          },
+          "design_ref": {
+            "description": "Where the design doc snapshot states what the finding is measured against",
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "limitations": {
+      "description": "What could not be reviewed and why; empty when nothing was left out",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

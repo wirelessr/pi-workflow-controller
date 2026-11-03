@@ -19,6 +19,8 @@ import (
 const (
 	worktreeDir      = "code-change"
 	worktreeResource = "code-change-worktree"
+	// snapshotDir is both the snapshot's run directory and its cleanup name.
+	snapshotDir = "code-change-snapshot"
 )
 
 // gitSource is where the Controller's git fetches the target repository.
@@ -39,11 +41,18 @@ type worktree struct {
 	remove    atomic.Bool
 }
 
+// emptyTree is git's well-known empty tree, which git knows without the
+// object being stored; the Controller's repositories use SHA-1 like GitHub.
+const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
 // git ignores the user's system and global configuration and attributes, so
 // no hooks, filters or URL rewrites run while the Controller builds the
 // worktree, and adds review's acquisition transport and checkout limits
-// except that plain http is not allowed. Nothing is written to any config:
-// the Agent's git later uses the user's global configuration unchanged.
+// except that plain http is not allowed. It also reads attributes from the
+// empty tree instead of the checked-out tree, so a .gitattributes in the
+// repository cannot convert line endings or encodings or expand idents in
+// the bytes a checkout writes. Nothing is written to any config: the
+// Agent's git later uses the user's global configuration unchanged.
 func (w *worktree) git(ctx context.Context, args ...string) ([]byte, error) {
 	return w.gitAt(ctx, w.repo.Dir(), args...)
 }
@@ -51,7 +60,7 @@ func (w *worktree) git(ctx context.Context, args ...string) ([]byte, error) {
 // gitAt is git with the same policy on another git directory of the repository.
 func (w *worktree) gitAt(ctx context.Context, gitDir string, args ...string) ([]byte, error) {
 	fixed := []string{
-		"--no-pager", "--git-dir=" + gitDir,
+		"--no-pager", "--git-dir=" + gitDir, "--attr-source=" + emptyTree,
 		"-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null",
 		"-c", "core.autocrlf=false", "-c", "core.sparseCheckout=false",
 		"-c", "http.sslVerify=true", "-c", "http.followRedirects=false",
@@ -132,15 +141,7 @@ func createWorktree(ctx context.Context, r *engine.Run, source gitSource, reposi
 		return nil, err
 	}
 	w := &worktree{repo: repo, allowFile: source.allowFile}
-	defer func() {
-		if err != nil {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			if cleanupErr := repo.Cleanup(cleanupCtx); cleanupErr != nil {
-				err = errors.Join(err, fmt.Errorf("worktree cleanup: %w", cleanupErr))
-			}
-		}
-	}()
+	defer removeUnregistered(repo, "worktree cleanup", &err)
 	if err = repo.Init(ctx, w.git); err != nil {
 		return nil, fmt.Errorf("git init: %w", err)
 	}
@@ -166,4 +167,53 @@ func createWorktree(ctx context.Context, r *engine.Run, source gitSource, reposi
 		return nil, err
 	}
 	return w, nil
+}
+
+// removeUnregistered removes repo's checkout when *err reports a failure
+// before its cleanup was registered, while no Agent has seen it.
+func removeUnregistered(repo *gitrepo.Repo, what string, err *error) {
+	if *err == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if cleanupErr := repo.Cleanup(ctx); cleanupErr != nil {
+		*err = errors.Join(*err, fmt.Errorf("%s: %w", what, cleanupErr))
+	}
+}
+
+// createSnapshot checks out head detached for the pre-PR reviewers in a
+// fresh Controller-owned bare repository that borrows the worktree
+// repository's objects through alternates. A checkout in the worktree
+// repository would read the configuration the Agent may have changed and run
+// its filters; the fresh repository has only the Controller's configuration
+// and no remote, so a missing object fails instead of being fetched. The
+// snapshot holds no work, so its registered cleanup always removes it; a
+// failure before registration removes it at once.
+func (w *worktree) createSnapshot(ctx context.Context, r *engine.Run, head string) (_ *gitrepo.Repo, err error) {
+	root := filepath.Join(r.Dir(), snapshotDir)
+	if err := os.Mkdir(root, 0700); err != nil {
+		return nil, err
+	}
+	repo, err := gitrepo.Reserve(root)
+	if err != nil {
+		return nil, err
+	}
+	defer removeUnregistered(repo, "snapshot cleanup", &err)
+	// Another Controller-owned checkout, under the same git policy.
+	s := &worktree{repo: repo, allowFile: w.allowFile}
+	if err = repo.Init(ctx, s.git); err != nil {
+		return nil, fmt.Errorf("snapshot git init: %w", err)
+	}
+	alternates := filepath.Join(repo.Dir(), "objects", "info", "alternates")
+	if err = os.WriteFile(alternates, []byte(filepath.Join(w.repo.Dir(), "objects")+"\n"), 0600); err != nil {
+		return nil, fmt.Errorf("snapshot alternates: %w", err)
+	}
+	if _, err = s.git(ctx, "worktree", "add", "--detach", repo.Worktree(), head); err != nil {
+		return nil, fmt.Errorf("snapshot git worktree: %w", err)
+	}
+	if err = r.AddCleanup(ctx, snapshotDir, repo.Cleanup); err != nil {
+		return nil, err
+	}
+	return repo, nil
 }

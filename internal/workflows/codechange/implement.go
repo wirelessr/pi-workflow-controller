@@ -37,16 +37,16 @@ type implementation struct {
 
 // implement runs the implementer on its own session with CWD piCWD and the
 // worktree by absolute path, then checks the accepted contract's local head
-// receipt against the worktree once. The session stays open for the
-// correction Step that will reuse it.
-func implement(ctx context.Context, r *engine.Run, p prepared, piCWD string) (engine.Result, error) {
+// receipt against the worktree once. On ready it also returns the verified
+// head. The session stays open for the correction Step that will reuse it.
+func implement(ctx context.Context, r *engine.Run, p prepared, piCWD string) (engine.Result, string, error) {
 	h, err := r.OpenSession(ctx, engine.RoleSpec{Name: implementRole, Model: implementModel, CWD: piCWD})
 	if err != nil {
-		return engine.Result{}, err
+		return engine.Result{}, "", err
 	}
 	prompt, err := json.Marshal(task{Role: "implementer", Requirements: baselineRequirements + "\n\n" + implementRequirements, Worktree: p.worktree.repo.Worktree()})
 	if err != nil {
-		return engine.Result{}, err
+		return engine.Result{}, "", err
 	}
 	var accepted implementation
 	var readErr error
@@ -61,55 +61,55 @@ func implement(ctx context.Context, r *engine.Run, p prepared, piCWD string) (en
 				return nil
 			}
 			accepted = v
-			return checkImplementation(v, p.input)
+			// The acceptance a repair can fix: the input Ref echoed byte-exact.
+			return checkEcho("input", v.Input, p.input)
 		})
 	if err != nil {
-		return engine.Result{}, err
+		return engine.Result{}, "", err
 	}
 	if readErr != nil {
-		return engine.Result{}, readErr
+		return engine.Result{}, "", readErr
 	}
 	ref := results[len(results)-1].Output
 	// A receipt failure still reports the committed contracts, without a Final.
 	outputs := map[string]contract.Ref{"input": p.input, "implement": ref}
 	head, err := p.worktree.head(ctx)
 	if err != nil {
-		return engine.Result{Outputs: outputs}, err
+		return engine.Result{Outputs: outputs}, "", err
 	}
 	base := p.worktree.base
 	final := &engine.FinalSelection{Output: "implement"}
 	if accepted.Readiness == "gaps" {
 		if head != base {
-			return engine.Result{Outputs: outputs}, fmt.Errorf("%w: readiness gaps: the worktree HEAD is %s; want it unchanged at base %s", errReceipt, head, base)
+			return engine.Result{Outputs: outputs}, "", fmt.Errorf("%w: readiness gaps: the worktree HEAD is %s; want it unchanged at base %s", errReceipt, head, base)
 		}
 		if err := r.Root().Decision(ctx, "design-gaps-reported", "The implementer reported design doc gaps and the worktree HEAD is the base", []contract.Ref{ref}); err != nil {
-			return engine.Result{}, err
+			return engine.Result{}, "", err
 		}
-		return engine.Result{Outputs: outputs, Final: final}, errDesignGaps
+		return engine.Result{Outputs: outputs, Final: final}, "", errDesignGaps
 	}
 	if accepted.LocalHead != head {
-		return engine.Result{Outputs: outputs}, fmt.Errorf("%w: local_head: got %s; want the worktree HEAD %s", errReceipt, accepted.LocalHead, head)
+		return engine.Result{Outputs: outputs}, "", fmt.Errorf("%w: local_head: got %s; want the worktree HEAD %s", errReceipt, accepted.LocalHead, head)
 	}
 	fresh, err := p.worktree.isNew(ctx, head)
 	if err != nil {
-		return engine.Result{Outputs: outputs}, err
+		return engine.Result{Outputs: outputs}, "", err
 	}
 	if !fresh {
-		return engine.Result{Outputs: outputs}, fmt.Errorf("%w: local_head: got %s, which is base %s or one of its ancestors; want a commit that is neither", errReceipt, head, base)
+		return engine.Result{Outputs: outputs}, "", fmt.Errorf("%w: local_head: got %s, which is base %s or one of its ancestors; want a commit that is neither", errReceipt, head, base)
 	}
 	if err := r.Root().Decision(ctx, "implementation-recorded", "The reported local head is the worktree HEAD, which is not the base or one of its ancestors", []contract.Ref{ref}); err != nil {
-		return engine.Result{}, err
+		return engine.Result{}, "", err
 	}
-	return engine.Result{Outputs: outputs, Final: final}, nil
+	return engine.Result{Outputs: outputs, Final: final}, head, nil
 }
 
-// checkImplementation is the acceptance a repair can fix: the input Ref
-// echoed byte-exact.
-func checkImplementation(v implementation, input contract.Ref) error {
-	if v.Input != input {
-		got, _ := json.Marshal(v.Input)
-		want, _ := json.Marshal(input)
-		return fmt.Errorf("input: got %s; want the input Ref copied byte-exact from request.inputs: %s", got, want)
+// checkEcho requires field, a Ref the request gave, copied byte-exact.
+func checkEcho(field string, got, want contract.Ref) error {
+	if got != want {
+		g, _ := json.Marshal(got)
+		w, _ := json.Marshal(want)
+		return fmt.Errorf("%s: got %s; want the %s Ref copied byte-exact from request.inputs: %s", field, g, field, w)
 	}
 	return nil
 }

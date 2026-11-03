@@ -56,7 +56,10 @@ func TestGHHelper(t *testing.T) {
 // one subcommand or acts as a git without --no-lazy-fetch, and otherwise
 // replaces itself with the real git. Before a failure it can replace the
 // reserved checkout with a symlink to git-swap's target, so the workflow's
-// cleanup of the partial worktree fails.
+// cleanup of the partial worktree fails. Before the implement receipt's
+// history read, which runs after the HEAD it verifies was read, it can commit
+// in git-move-head's worktree, so that worktree's HEAD moves after the
+// Controller read it.
 func TestGitHelper(t *testing.T) {
 	real := os.Getenv("PWC_CC_GIT")
 	if real == "" {
@@ -88,6 +91,13 @@ func TestGitHelper(t *testing.T) {
 		os.Exit(129)
 	}
 	sub := subcommand(args)
+	if target, err := os.ReadFile(filepath.Join(dir, "git-move-head")); err == nil && sub == "rev-list" {
+		move := exec.Command(real, "-C", string(target), "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty", "-m", "moved")
+		move.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.com", "GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.com")
+		if move.Run() != nil {
+			os.Exit(2)
+		}
+	}
 	if raw, err := os.ReadFile(filepath.Join(dir, "git-block")); err == nil && string(raw) == sub {
 		block(dir)
 	}
@@ -608,7 +618,7 @@ func commandFailure(report engine.Report, prefix string) string {
 // written out literally; fixture runs append the file protocol allowance.
 func controllerPolicy(repoDir string) []string {
 	return []string{
-		"--no-pager", "--git-dir=" + repoDir,
+		"--no-pager", "--git-dir=" + repoDir, "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
 		"-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null",
 		"-c", "core.autocrlf=false", "-c", "core.sparseCheckout=false",
 		"-c", "http.sslVerify=true", "-c", "http.followRedirects=false",
@@ -775,6 +785,46 @@ func TestGlobalGitConfigurationIgnored(t *testing.T) {
 	if raw, err := os.ReadFile(filepath.Join(r.Dir(), worktreeDir, "checkout", "tracked.txt")); err != nil || string(raw) != "base\n" {
 		t.Fatalf("checkout content: %q %v", raw, err)
 	}
+}
+
+// writeAttributes commits files whose checkout bytes a .gitattributes in the
+// same tree would change in dir, then that .gitattributes, so the files were
+// added without it, and returns the files' committed bytes.
+func (f *fixture) writeAttributes(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	files := map[string]string{"crlf.txt": "a\nb\n", "ident.txt": "$Id$\n", "encoding.txt": "plain\n"}
+	for name, data := range files {
+		f.write(filepath.Join(dir, name), data)
+	}
+	f.gitIn(dir, "add", "crlf.txt", "ident.txt", "encoding.txt")
+	f.gitIn(dir, "commit", "-qm", "files")
+	f.write(filepath.Join(dir, ".gitattributes"), "crlf.txt text eol=crlf\nident.txt ident\nencoding.txt working-tree-encoding=UTF-16LE\n")
+	f.gitIn(dir, "add", ".gitattributes")
+	f.gitIn(dir, "commit", "-qm", "attributes")
+	return files
+}
+
+func requireBytes(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, want := range files {
+		if raw, err := os.ReadFile(filepath.Join(dir, name)); err != nil || string(raw) != want {
+			t.Fatalf("%s checked out as %q (%v), want the committed %q", name, raw, err, want)
+		}
+	}
+}
+
+// A .gitattributes in the fetched tree does not change the bytes the
+// Controller checks out: no line ending or encoding conversion and no ident
+// expansion.
+func TestRepositoryAttributesIgnored(t *testing.T) {
+	f := newFixture(t)
+	files := f.writeAttributes(t, f.source)
+	f.gitIn(f.origin, "fetch", "-q", f.source, "main:main")
+	r, report := f.execute(f.definition(f.prepareOnly), prompt)
+	if report.Outcome != engine.Succeeded {
+		t.Fatalf("outcome %s: %v", report.Outcome, report.Failure)
+	}
+	requireBytes(t, filepath.Join(r.Dir(), worktreeDir, "checkout"), files)
 }
 
 // Before the worktree is registered no Agent has seen it, so a failure

@@ -36,7 +36,7 @@ func TestRegistryContainsProductWorkflows(t *testing.T) {
 		}
 	}
 	schemas, err := contract.NewRegistry(workflows.Resources(), workflows.Schemas())
-	if err != nil || !schemas.Has("smoke.echo.v1") || !schemas.Has("triage.report.v1") || !schemas.Has("triage.round.v1") || !schemas.Has("code-change.input.v1") || !schemas.Has("code-change.implement.v1") {
+	if err != nil || !schemas.Has("smoke.echo.v1") || !schemas.Has("triage.report.v1") || !schemas.Has("triage.round.v1") || !schemas.Has("code-change.input.v1") || !schemas.Has("code-change.implement.v1") || !schemas.Has("code-change.review.v1") {
 		t.Fatalf("product schemas unavailable: %v", err)
 	}
 }

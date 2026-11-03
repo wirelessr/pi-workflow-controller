@@ -46,11 +46,15 @@ type recordingRuntime struct {
 	mu         sync.Mutex
 	specs      []runtime.SessionSpec
 	dispatches []string
+	// close, when set, replaces the close of the role's sessions; it stands
+	// for a runtime that reports a close the engine does not confirm.
+	close func(ctx context.Context, role string, s runtime.Session) (runtime.CleanupReport, error)
 }
 
 type recordingSession struct {
 	runtime.Session
 	owner *recordingRuntime
+	role  string
 }
 
 func (r *recordingRuntime) Start(ctx context.Context, spec runtime.SessionSpec) (runtime.Session, error) {
@@ -61,7 +65,14 @@ func (r *recordingRuntime) Start(ctx context.Context, spec runtime.SessionSpec) 
 	if err != nil {
 		return nil, err
 	}
-	return &recordingSession{Session: s, owner: r}, nil
+	return &recordingSession{Session: s, owner: r, role: spec.Name}, nil
+}
+
+func (s *recordingSession) Close(ctx context.Context) (runtime.CleanupReport, error) {
+	if s.owner.close != nil {
+		return s.owner.close(ctx, s.role, s.Session)
+	}
+	return s.Session.Close(ctx)
 }
 
 func (s *recordingSession) Execute(ctx context.Context, dispatch runtime.Dispatch) (runtime.Execution, error) {
@@ -71,7 +82,7 @@ func (s *recordingSession) Execute(ctx context.Context, dispatch runtime.Dispatc
 	return s.Session.Execute(ctx, dispatch)
 }
 
-// agentCall is one implementer dispatch as the fake Agent sees it.
+// agentCall is one dispatch as the fake Agent sees it.
 type agentCall struct {
 	n         int
 	request   contract.Request
@@ -90,12 +101,30 @@ type a1Run struct {
 	defaultCWD string
 }
 
-// runA1 executes the workflow with only its GitHub git remote replaced, over
-// the real engine, Store, runtime and Pi RPC. agent acts as the implementer:
-// it may change the worktree, writes the candidate and returns the fake Pi's
-// answer, "" to settle or "hold" to keep the prompt running, which cancels
-// the run.
-func (f *fixture) runA1(t *testing.T, agent func(t *testing.T, c agentCall) string) a1Run {
+// agents act as the Agent at each dispatch: they may change the worktree,
+// write the candidate and return the fake Pi's answer: "" to settle, "hold"
+// to keep the prompt running, which cancels the run, "defer" to answer it
+// later with settle, or another prompt barrier answer.
+type agents struct {
+	implement func(t *testing.T, c agentCall) string
+	// review answers both reviewers; nil accepts with no findings.
+	review func(t *testing.T, c agentCall) string
+	// release reports whether the deferred prompts are settled after c was
+	// answered; nil settles them after any answer that is not "defer".
+	release func(t *testing.T, r *engine.Run, c agentCall) bool
+	// policy adjusts the workflow's run policy.
+	policy func(*engine.RunPolicy)
+	// before runs before the workflow, to take a name the workflow needs.
+	before func(ctx context.Context, r *engine.Run) error
+	// returned observes the workflow's return, before the run's cleanup.
+	returned func(r *engine.Run)
+	// close is the recording runtime's close of a role's sessions.
+	close func(ctx context.Context, role string, s runtime.Session) (runtime.CleanupReport, error)
+}
+
+// run executes the workflow with only its GitHub git remote replaced, over
+// the real engine, Store, runtime and Pi RPC, with as acting as the Agent.
+func (f *fixture) run(t *testing.T, as agents) a1Run {
 	t.Helper()
 	bridge := filepath.Join(f.dir, "bridge")
 	defaultCWD := filepath.Join(f.dir, "default-cwd")
@@ -121,8 +150,20 @@ func (f *fixture) runA1(t *testing.T, agent func(t *testing.T, c agentCall) stri
 		return nil
 	}, 8*time.Second, "fixture host close: ", "fixture run did not join")
 	def := f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-		return execute(ctx, r, in, f.piCWD, f.fileSource())
+		if as.before != nil {
+			if err := as.before(ctx, r); err != nil {
+				return engine.Result{}, err
+			}
+		}
+		result, err := execute(ctx, r, in, f.piCWD, f.fileSource())
+		if as.returned != nil {
+			as.returned(r)
+		}
+		return result, err
 	})
+	if as.policy != nil {
+		as.policy(&def.Policy)
+	}
 	def.Policy.Runtime.StartupTimeout = 5 * time.Second
 	def.Policy.Runtime.CleanupTimeout = 3 * time.Second
 	def.Policy.Runtime.AbortGrace = 50 * time.Millisecond
@@ -137,7 +178,7 @@ func (f *fixture) runA1(t *testing.T, agent func(t *testing.T, c agentCall) stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := &recordingRuntime{Runtime: pi}
+	rt := &recordingRuntime{Runtime: pi, close: as.close}
 	registry, err := contract.NewRegistry(Resources(), Schemas())
 	if err != nil {
 		t.Fatal(err)
@@ -150,6 +191,7 @@ func (f *fixture) runA1(t *testing.T, agent func(t *testing.T, c agentCall) stri
 	}
 	out := a1Run{run: r, runtime: rt, defaultCWD: defaultCWD}
 	go func() { out.report = r.Execute(); close(done) }()
+	var deferred []protocol.Event
 	for {
 		select {
 		case <-done:
@@ -177,12 +219,31 @@ func (f *fixture) runA1(t *testing.T, agent func(t *testing.T, c agentCall) stri
 					t.Fatalf("request prompt is not a task: %v", err)
 				}
 				out.calls = append(out.calls, c)
+				agent := as.implement
+				if c.task.Role != "implementer" {
+					agent = as.review
+					if agent == nil {
+						agent = acceptReview
+					}
+				}
 				ack := agent(t, c)
+				if ack == "defer" {
+					deferred = append(deferred, e)
+					continue
+				}
 				if ack == "" {
 					ack = "settle"
 				}
 				if err := e.Reply(protocol.Control{Type: ack}); err != nil {
 					t.Fatal(err)
+				}
+				if as.release == nil || as.release(t, r, c) {
+					for _, d := range deferred {
+						if err := d.Reply(protocol.Control{Type: "settle"}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					deferred = nil
 				}
 			}
 		}
@@ -214,24 +275,37 @@ func writeCandidate(t *testing.T, c agentCall, data any) {
 	}
 }
 
-// requireOneSessionClosed checks the implementer ran on exactly one session
-// whose process exit the run confirmed before returning.
-func (a a1Run) requireOneSessionClosed(t *testing.T) {
+// requireSessionsClosed checks the run started n sessions and confirmed each
+// one's process exit before returning, without cleanup errors.
+func (a a1Run) requireSessionsClosed(t *testing.T, n int) {
 	t.Helper()
-	if len(a.report.Snapshot.Sessions) != 1 || len(a.hellos) != 1 || len(a.runtime.specs) != 1 {
-		t.Fatalf("sessions %d hellos %d starts %d, want one", len(a.report.Snapshot.Sessions), len(a.hellos), len(a.runtime.specs))
+	if len(a.report.Snapshot.Sessions) != n || len(a.hellos) != n || len(a.runtime.specs) != n {
+		t.Fatalf("sessions %d hellos %d starts %d, want %d", len(a.report.Snapshot.Sessions), len(a.hellos), len(a.runtime.specs), n)
 	}
-	confirmed := false
-	for _, c := range a.report.Cleanup {
-		confirmed = confirmed || c.ConfirmsLocalClose(a.hellos[0].SessionID)
+	a.requireExitsConfirmed(t)
+}
+
+// requireExitsConfirmed checks the run confirmed the process exit of every
+// session it started before returning, without cleanup errors.
+func (a a1Run) requireExitsConfirmed(t *testing.T) {
+	t.Helper()
+	// The run's cleanup reports every handle, also those the workflow closed.
+	for _, hello := range a.hellos {
+		confirmed := false
+		for _, c := range a.report.Cleanup {
+			confirmed = confirmed || c.ConfirmsLocalClose(hello.SessionID)
+		}
+		if !confirmed {
+			t.Fatalf("session %s exit not confirmed: %+v", hello.SessionID, a.report.Cleanup)
+		}
 	}
-	if !confirmed || len(a.report.CleanupErrors) != 0 {
-		t.Fatalf("session exit not confirmed: %+v errors %v", a.report.Cleanup, a.report.CleanupErrors)
+	if len(a.report.CleanupErrors) != 0 {
+		t.Fatalf("cleanup errors: %v", a.report.CleanupErrors)
 	}
 }
 
 // requireAttempts checks the run's accounting: the input Attach plus steps
-// implementer attempts.
+// Agent attempts.
 func (a a1Run) requireAttempts(t *testing.T, steps int) {
 	t.Helper()
 	if len(a.report.Snapshot.Attempts) != steps+1 || len(a.calls) != steps || len(a.runtime.dispatches) != steps {
@@ -249,25 +323,37 @@ type decision struct {
 	Refs  []contract.Ref `json:"refs"`
 }
 
-// decisions are the run's Decision events as committed to the journal.
-func (a a1Run) decisions(t *testing.T) []decision {
+type event struct {
+	Kind    string          `json:"kind"`
+	Details json.RawMessage `json:"details"`
+}
+
+// events are the run's journal events in commit order.
+func (a a1Run) events(t *testing.T) []event {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(a.run.Dir(), "events.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out []decision
+	var out []event
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-		var event struct {
-			Kind    string          `json:"kind"`
-			Details json.RawMessage `json:"details"`
-		}
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
+		var e event
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			t.Fatal(err)
 		}
-		if event.Kind == "Decision" {
+		out = append(out, e)
+	}
+	return out
+}
+
+// decisions are the run's Decision events as committed to the journal.
+func (a a1Run) decisions(t *testing.T) []decision {
+	t.Helper()
+	var out []decision
+	for _, e := range a.events(t) {
+		if e.Kind == "Decision" {
 			var d decision
-			if err := json.Unmarshal(event.Details, &d); err != nil {
+			if err := json.Unmarshal(e.Details, &d); err != nil {
 				t.Fatal(err)
 			}
 			out = append(out, d)
@@ -276,22 +362,33 @@ func (a a1Run) decisions(t *testing.T) []decision {
 	return out
 }
 
+// requireDecision checks the run's only Decision is name on the implement contract.
 func (a a1Run) requireDecision(t *testing.T, name string) {
 	t.Helper()
-	want := []decision{{Scope: "root", Name: name, Refs: []contract.Ref{a.report.Result.Outputs["implement"]}}}
+	a.requireDecisions(t, decision{Scope: "root", Name: name, Refs: []contract.Ref{a.report.Result.Outputs["implement"]}})
+}
+
+func (a a1Run) requireDecisions(t *testing.T, want ...decision) {
+	t.Helper()
 	if got := a.decisions(t); !reflect.DeepEqual(got, want) {
 		t.Fatalf("decisions %+v, want %+v", got, want)
 	}
 }
 
+// requireNoSnapshot checks the run never created the pre-PR review snapshot.
+func (a a1Run) requireNoSnapshot(t *testing.T) {
+	t.Helper()
+	requireMissing(t, filepath.Join(a.run.Dir(), snapshotDir))
+}
+
 func TestImplementReadyKeepsWorktree(t *testing.T) {
 	f := newFixture(t)
 	var head string
-	a := f.runA1(t, func(t *testing.T, c agentCall) string {
+	a := f.run(t, agents{implement: func(t *testing.T, c agentCall) string {
 		head = f.commit(t, c.task.Worktree, "implemented\n")
 		writeCandidate(t, c, readyData(c, head))
 		return ""
-	})
+	}})
 	report := a.report
 	if report.Outcome != engine.Succeeded || report.ExitCode != 0 || report.Failure != nil {
 		t.Fatalf("outcome %s exit %d failure %v", report.Outcome, report.ExitCode, report.Failure)
@@ -299,9 +396,11 @@ func TestImplementReadyKeepsWorktree(t *testing.T) {
 	if report.Final == nil || report.Final.Output != "implement" || report.Final.Step != "implement" || report.Final.Ref != report.Result.Outputs["implement"] {
 		t.Fatalf("final: %+v", report.Final)
 	}
-	a.requireOneSessionClosed(t)
-	a.requireAttempts(t, 1)
-	a.requireDecision(t, "implementation-recorded")
+	// The implementer's session and both reviewers'.
+	a.requireSessionsClosed(t, 3)
+	a.requireAttempts(t, 3)
+	a.requireDecisions(t, decision{Scope: "root", Name: "implementation-recorded", Refs: []contract.Ref{report.Result.Outputs["implement"]}},
+		decision{Scope: "root", Name: "pre-pr-reviewed", Refs: []contract.Ref{report.Result.Outputs["review-basic"], report.Result.Outputs["review-consistency"]}})
 	// The implementer runs in PWC_PI_CWD, not the engine default, and is
 	// given the worktree by absolute path.
 	spec := a.runtime.specs[0]
@@ -317,23 +416,38 @@ func TestImplementReadyKeepsWorktree(t *testing.T) {
 	if got := f.gitIn(a.worktree(), "rev-parse", "HEAD"); got != head {
 		t.Fatalf("worktree HEAD %s, want the Agent's commit %s", got, head)
 	}
-	// After the Agent had the repository, the Controller's git only reads the
-	// worktree registration, with lazy fetches and replace refs disabled.
-	registration := "--git-dir=" + filepath.Join(a.run.Dir(), worktreeDir, "repository.git", "worktrees", "checkout")
-	var reads []string
-	for _, call := range f.gitCalls() {
-		sub := subcommand(call.Args)
-		if sub == "version" || slices.Contains(call.Args, "--git-dir="+filepath.Join(a.run.Dir(), worktreeDir, "repository.git")) {
-			continue
-		}
-		i := slices.Index(call.Args, sub)
-		if !slices.Contains(call.Args, registration) || !reflect.DeepEqual(call.Args[i-2:i], []string{"--no-lazy-fetch", "--no-replace-objects"}) {
-			t.Fatalf("receipt git call %q, want a read of the registration without lazy fetches or replace refs", call.Args)
-		}
-		reads = append(reads, sub)
+	// After the worktree is handed over, the Controller's git never runs on
+	// its repository except to read the worktree registration, with lazy
+	// fetches and replace refs disabled; the snapshot's git, under the same
+	// policy and environment, only creates the snapshot in its own repository.
+	repository := filepath.Join(a.run.Dir(), worktreeDir, "repository.git")
+	readPolicy := append(append(controllerPolicy(filepath.Join(repository, "worktrees", "checkout")), fileProtocol...), "--no-lazy-fetch", "--no-replace-objects")
+	snapshotPolicy := append(controllerPolicy(a.snapshotRepo()), fileProtocol...)
+	calls := f.gitCalls()
+	handed := slices.IndexFunc(calls, func(c gitCall) bool {
+		return subcommand(c.Args) == "worktree" && slices.Contains(c.Args, "--git-dir="+repository)
+	})
+	if handed < 0 {
+		t.Fatalf("no worktree creation in %q", calls)
 	}
-	if !reflect.DeepEqual(reads, []string{"rev-parse", "rev-list"}) {
-		t.Fatalf("receipt git calls %v, want rev-parse then rev-list", reads)
+	var reads, snapshot []string
+	for _, call := range calls[handed+1:] {
+		sub := subcommand(call.Args)
+		policy := call.Args[slices.Index(call.Args, "--no-pager"):slices.Index(call.Args, sub)]
+		switch {
+		case !slices.Contains(call.Env, "GIT_CONFIG_GLOBAL=/dev/null"):
+			t.Fatalf("git call %q env %q", call.Args, call.Env)
+		case slices.Equal(policy, readPolicy):
+			reads = append(reads, sub)
+		case slices.Equal(policy, snapshotPolicy):
+			snapshot = append(snapshot, sub)
+		default:
+			t.Fatalf("git call %q after the worktree was handed over, want a registration read or the snapshot's creation", call.Args)
+		}
+	}
+	// The receipt's HEAD and history, then the HEAD after the review.
+	if !reflect.DeepEqual(reads, []string{"rev-parse", "rev-list", "rev-parse"}) || !reflect.DeepEqual(snapshot, []string{"init", "worktree"}) {
+		t.Fatalf("registration reads %v, snapshot git %v", reads, snapshot)
 	}
 }
 
@@ -341,10 +455,10 @@ func TestImplementReadyKeepsWorktree(t *testing.T) {
 // the contract is the Final and the run fails with the named error.
 func TestImplementGapsDeliverFinal(t *testing.T) {
 	f := newFixture(t)
-	a := f.runA1(t, func(t *testing.T, c agentCall) string {
+	a := f.run(t, agents{implement: func(t *testing.T, c agentCall) string {
 		writeCandidate(t, c, gapsData(c))
 		return ""
-	})
+	}})
 	report := a.report
 	if report.Outcome != engine.Failed || report.ExitCode != 1 || !errors.Is(report.Failure, errDesignGaps) {
 		t.Fatalf("outcome %s exit %d failure %v, want Failed with errDesignGaps", report.Outcome, report.ExitCode, report.Failure)
@@ -352,9 +466,10 @@ func TestImplementGapsDeliverFinal(t *testing.T) {
 	if report.Final == nil || report.Final.Output != "implement" || report.Final.Ref != report.Result.Outputs["implement"] {
 		t.Fatalf("final: %+v", report.Final)
 	}
-	a.requireOneSessionClosed(t)
+	a.requireSessionsClosed(t, 1)
 	a.requireAttempts(t, 1)
 	a.requireDecision(t, "design-gaps-reported")
+	a.requireNoSnapshot(t)
 	if got := f.gitIn(a.worktree(), "rev-parse", "HEAD"); got != f.head {
 		t.Fatalf("worktree HEAD %s, want base %s", got, f.head)
 	}
@@ -425,11 +540,11 @@ func TestImplementReceiptRejected(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
 			var call agentCall
-			a := f.runA1(t, func(t *testing.T, c agentCall) string {
+			a := f.run(t, agents{implement: func(t *testing.T, c agentCall) string {
 				call = c
 				writeCandidate(t, c, tc.act(t, f, c))
 				return ""
-			})
+			}})
 			report := a.report
 			if report.Outcome != engine.Failed || report.ExitCode != 1 || errors.Is(report.Failure, errReceipt) == tc.unreadable || !strings.Contains(report.Failure.Error(), tc.want) {
 				t.Fatalf("outcome %s exit %d failure %v, want Failed with %q (errReceipt: %v)", report.Outcome, report.ExitCode, report.Failure, tc.want, !tc.unreadable)
@@ -444,8 +559,9 @@ func TestImplementReceiptRejected(t *testing.T) {
 			if got := a.decisions(t); len(got) != 0 {
 				t.Fatalf("decisions recorded: %+v", got)
 			}
-			a.requireOneSessionClosed(t)
+			a.requireSessionsClosed(t, 1)
 			a.requireAttempts(t, 1)
+			a.requireNoSnapshot(t)
 			if info, err := os.Stat(filepath.Join(a.run.Dir(), worktreeDir, "repository.git", "worktrees", "checkout")); err != nil || !info.IsDir() {
 				t.Fatalf("worktree registration not kept: %v", err)
 			}
@@ -456,7 +572,7 @@ func TestImplementReceiptRejected(t *testing.T) {
 // Every field of the echoed input Ref must match.
 func TestCheckImplementationEcho(t *testing.T) {
 	input := contract.Ref{RunID: "run", AttemptID: "attempt", Path: "/runs/input.json", SchemaID: InputSchema, SHA256: strings.Repeat("1", 64), ManifestSHA256: strings.Repeat("2", 64)}
-	if err := checkImplementation(implementation{Input: input}, input); err != nil {
+	if err := checkEcho("input", input, input); err != nil {
 		t.Fatalf("exact echo rejected: %v", err)
 	}
 	for name, change := range map[string]func(*contract.Ref){
@@ -470,7 +586,7 @@ func TestCheckImplementationEcho(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			echoed := input
 			change(&echoed)
-			if err := checkImplementation(implementation{Input: echoed}, input); err == nil || !strings.HasPrefix(err.Error(), "input: got ") {
+			if err := checkEcho("input", echoed, input); err == nil || !strings.HasPrefix(err.Error(), "input: got ") {
 				t.Fatalf("changed %s accepted: %v", name, err)
 			}
 		})
@@ -509,7 +625,7 @@ func TestImplementRepair(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
 			var head string
-			a := f.runA1(t, func(t *testing.T, c agentCall) string {
+			a := f.run(t, agents{implement: func(t *testing.T, c agentCall) string {
 				if c.n == 1 {
 					head = f.commit(t, c.task.Worktree, "implemented\n")
 					writeCandidate(t, c, tc.bad(c, head))
@@ -517,12 +633,13 @@ func TestImplementRepair(t *testing.T) {
 					writeCandidate(t, c, readyData(c, head))
 				}
 				return ""
-			})
+			}})
 			report := a.report
 			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Ref != report.Result.Outputs["implement"] {
 				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 			}
-			a.requireAttempts(t, 2)
+			// Two implementer attempts and one per reviewer.
+			a.requireAttempts(t, 4)
 			if got := f.gitIn(a.worktree(), "rev-list", "--count", f.head+"..HEAD"); got != "1" {
 				t.Fatalf("commits on base: %s, want the single commit of the first attempt", got)
 			}
@@ -542,16 +659,17 @@ func TestImplementRepair(t *testing.T) {
 // session's exit is confirmed, with the worktree kept.
 func TestImplementCancelled(t *testing.T) {
 	f := newFixture(t)
-	a := f.runA1(t, func(t *testing.T, c agentCall) string {
+	a := f.run(t, agents{implement: func(t *testing.T, c agentCall) string {
 		f.commit(t, c.task.Worktree, "partial\n")
 		return "hold"
-	})
+	}})
 	report := a.report
 	if report.Outcome != engine.CancelledState || report.ExitCode != 130 || report.Final != nil {
 		t.Fatalf("outcome %s exit %d final %+v", report.Outcome, report.ExitCode, report.Final)
 	}
-	a.requireOneSessionClosed(t)
+	a.requireSessionsClosed(t, 1)
 	a.requireAttempts(t, 1)
+	a.requireNoSnapshot(t)
 	if raw, err := os.ReadFile(filepath.Join(a.worktree(), "tracked.txt")); err != nil || string(raw) != "partial\n" {
 		t.Fatalf("worktree not kept: %q %v", raw, err)
 	}
