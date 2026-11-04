@@ -164,7 +164,7 @@ func (f *fixture) run(t *testing.T, as agents) a1Run {
 				return engine.Result{}, err
 			}
 		}
-		result, err := execute(ctx, r, in, f.piCWD, f.fileSource())
+		result, err := execute(ctx, r, in, f.piCWD, f.fileSource(), testState)
 		if as.returned != nil {
 			as.returned(r)
 		}

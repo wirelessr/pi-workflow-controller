@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -26,14 +27,23 @@ import (
 // TestGHHelper is the GitHub API boundary: the gh PATH wrapper runs it in a
 // real subprocess that accepts only a REST GET of the target repository, its
 // pull requests, a compare, its branch refs, a branch's pull request list or,
-// paginated, a pull request's comments, which are always none. Pull requests
+// paginated, a pull request's comments, which are always none, a commit's
+// check runs or combined status, and the review threads GraphQL query of
+// pull request 1. Pull requests
 // are the records the fake Agent wrote under prs/, with the base and head SHAs
 // read from the local origin at query time like GitHub; compare and refs come
 // from the real git on that origin. Per kind of read, gh-fail-<kind>
 // fails it, gh-body-<kind> replaces its body and pr-patch.json is merged into
 // a pull request; gh-move-head commits in that worktree during a pull
 // request read. With gh-require-closed, a branch ref or pull request list
-// read fails until implementer-closed exists.
+// read fails until implementer-closed exists. The k-th check runs or status
+// read answers entry k of checks.json or statuses.json, the last entry once
+// k is past it, and fails for a null entry; without the file there are none.
+// Each check runs read appends its time to checks-times; each of the first
+// as many as gh-move-on-checks says first moves the pull request branch on
+// the origin to a new commit and writes it to gh-moved. Once there were as many check runs
+// reads as gh-fail-pull-after-checks says, a pull request read fails.
+// gh-block-threads blocks the review threads query like gh-block.
 func TestGHHelper(t *testing.T) {
 	dir := os.Getenv("PWC_CC_GH")
 	if dir == "" {
@@ -47,8 +57,30 @@ func TestGHHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(2)
 	}
-	_, _ = fmt.Fprintln(calls, strings.Join(args, " "))
+	logged := slices.Clone(args)
+	if len(logged) > 5 && logged[5] == "query="+reviewThreadsQuery {
+		logged[5] = "query=<review threads>"
+	}
+	_, _ = fmt.Fprintln(calls, strings.Join(logged, " "))
 	_ = calls.Close()
+	if len(args) > 1 && args[1] == "graphql" {
+		want := []string{"api", "graphql", "--hostname", "github.com", "-f", "query=" + reviewThreadsQuery, "-f", "name=repo", "-f", "owner=owner", "-F", "number=1", "--paginate", "--slurp"}
+		if !slices.Equal(args, want) {
+			os.Exit(2)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "gh-fail-threads")); err == nil {
+			os.Exit(1)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "gh-block-threads")); err == nil {
+			block(dir)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, "gh-body-threads"))
+		if err != nil {
+			raw = []byte(`[{"data":{"repository":{"pullRequest":{"reviewThreads":{"totalCount":0,"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}]`)
+		}
+		_, _ = os.Stdout.Write(raw)
+		os.Exit(0)
+	}
 	if len(args) < 8 || !reflect.DeepEqual(args[:7], []string{"api", "--method", "GET", "--hostname", "github.com", "-H", "Accept: application/vnd.github+json"}) {
 		os.Exit(2)
 	}
@@ -57,7 +89,8 @@ func TestGHHelper(t *testing.T) {
 	}
 	endpoint := args[7]
 	kind, arg := ghKind(endpoint)
-	if kind == "" || (kind == "comments") != reflect.DeepEqual(args[8:], []string{"--paginate", "--slurp"}) || (kind != "comments" && len(args) != 8) {
+	paginated := kind == "comments" || kind == "checks" || kind == "statuses"
+	if kind == "" || paginated != reflect.DeepEqual(args[8:], []string{"--paginate", "--slurp"}) || (!paginated && len(args) != 8) {
 		os.Exit(2)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "gh-fail-"+kind)); err == nil {
@@ -77,6 +110,28 @@ func TestGHHelper(t *testing.T) {
 	switch kind {
 	case "comments":
 		out = []any{[]any{}}
+	case "checks", "statuses":
+		k := stateReads(dir, kind)
+		if kind == "checks" {
+			stateChecks(dir, origin, k)
+		}
+		file, none := "checks.json", `[{"total_count":0,"check_runs":[]}]`
+		if kind == "statuses" {
+			file, none = "statuses.json", `[{"state":"pending","sha":"`+arg+`","total_count":0,"statuses":[]}]`
+		}
+		body := []byte(none)
+		if raw, err := os.ReadFile(filepath.Join(dir, file)); err == nil {
+			var seq []json.RawMessage
+			if json.Unmarshal(raw, &seq) != nil || len(seq) == 0 {
+				os.Exit(2)
+			}
+			body = seq[min(k, len(seq))-1]
+			if string(body) == "null" {
+				os.Exit(1)
+			}
+		}
+		_, _ = os.Stdout.Write(body)
+		os.Exit(0)
 	case "repo":
 		data, err := os.ReadFile(filepath.Join(dir, "repo.json"))
 		if err != nil {
@@ -85,6 +140,11 @@ func TestGHHelper(t *testing.T) {
 		_, _ = os.Stdout.Write(data)
 		os.Exit(0)
 	case "pull":
+		if raw, err := os.ReadFile(filepath.Join(dir, "gh-fail-pull-after-checks")); err == nil {
+			if n, err := strconv.Atoi(string(raw)); err != nil || stateReads(dir, "checks") >= n {
+				os.Exit(1)
+			}
+		}
 		if target, err := os.ReadFile(filepath.Join(dir, "gh-move-head")); err == nil {
 			if originGit(string(target), "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty", "-m", "moved") == "" {
 				_ = os.Remove(filepath.Join(dir, "gh-move-head"))
@@ -147,8 +207,60 @@ func TestGHHelper(t *testing.T) {
 	os.Exit(0)
 }
 
+// stateReads is how many check runs or status reads gh-calls holds, the
+// current one included.
+func stateReads(dir, kind string) int {
+	raw, err := os.ReadFile(filepath.Join(dir, "gh-calls"))
+	if err != nil {
+		os.Exit(2)
+	}
+	suffix := map[string]string{"checks": "/check-runs?per_page=100", "statuses": "/status?per_page=100"}[kind]
+	n := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.Contains(line, suffix+" --paginate") {
+			n++
+		}
+	}
+	return n
+}
+
+// stateChecks records the time of check runs read k and, while k is at most
+// gh-move-on-checks, moves pull request 1's branch on origin.
+func stateChecks(dir, origin string, k int) {
+	times, err := os.OpenFile(filepath.Join(dir, "checks-times"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		os.Exit(2)
+	}
+	_, _ = fmt.Fprintln(times, time.Now().UnixNano())
+	_ = times.Close()
+	raw, err := os.ReadFile(filepath.Join(dir, "gh-move-on-checks"))
+	if err != nil {
+		return
+	}
+	if n, err := strconv.Atoi(string(raw)); err != nil || k > n {
+		return
+	}
+	pr, ok := readPull(dir, origin, "1")
+	if !ok {
+		os.Exit(2)
+	}
+	ref := "refs/heads/" + pr["head"].(map[string]any)["ref"].(string)
+	tip := originOutput(origin, "rev-parse", ref)
+	cmd := exec.Command(os.Getenv("PWC_CC_GIT"), "-C", origin, "commit-tree", tip+"^{tree}", "-p", tip, "-m", "moved during the wait")
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.com", "GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.com")
+	out, err := cmd.Output()
+	if err != nil {
+		os.Exit(2)
+	}
+	moved := strings.TrimSpace(string(out))
+	if originGit(origin, "update-ref", ref, moved) != "" || os.WriteFile(filepath.Join(dir, "gh-moved"), []byte(fmt.Sprintf("%s %d", moved, time.Now().UnixNano())), 0600) != nil {
+		os.Exit(2)
+	}
+}
+
 // ghKind is the kind of read endpoint is and its argument: the pull request
-// number, the compare range, the branch ref prefix or the head filter.
+// number, the compare range, the branch ref prefix, the head filter or the
+// commit of a check runs or status read.
 func ghKind(endpoint string) (string, string) {
 	const repo = "repos/owner/repo"
 	rest, ok := strings.CutPrefix(endpoint, repo)
@@ -161,6 +273,10 @@ func ghKind(endpoint string) (string, string) {
 		return "comments", ""
 	case strings.HasPrefix(rest, "/pulls/"):
 		return "pull", strings.TrimPrefix(rest, "/pulls/")
+	case strings.HasPrefix(rest, "/commits/") && strings.HasSuffix(rest, "/check-runs?per_page=100"):
+		return "checks", strings.TrimSuffix(strings.TrimPrefix(rest, "/commits/"), "/check-runs?per_page=100")
+	case strings.HasPrefix(rest, "/commits/") && strings.HasSuffix(rest, "/status?per_page=100"):
+		return "statuses", strings.TrimSuffix(strings.TrimPrefix(rest, "/commits/"), "/status?per_page=100")
 	case strings.HasPrefix(rest, "/compare/"):
 		return "compare", strings.TrimPrefix(rest, "/compare/")
 	case strings.HasPrefix(rest, "/git/matching-refs/heads/"):
@@ -592,8 +708,12 @@ func TestDefinitionPolicy(t *testing.T) {
 		t.Fatalf("definition: %s %s %+v", def.Name, def.Version, def.Policy)
 	}
 	// The description says where this version stops.
-	if !strings.Contains(def.Description, "this version stops after triage and fix of the deep-review report") {
+	if !strings.Contains(def.Description, "this version stops after taking a snapshot of the pull request state") {
 		t.Fatalf("description: %s", def.Description)
+	}
+	// The production wait and read bounds, which await live data.
+	if prStatePolicy != (statePolicy{wait: 30 * time.Minute, settle: 3 * time.Minute, poll: 30 * time.Second, reads: 10 * time.Minute}) {
+		t.Fatalf("state policy %+v", prStatePolicy)
 	}
 	if _, err := engine.NewRegistry([]engine.Definition{def}); err != nil {
 		t.Fatal(err)
@@ -1065,7 +1185,7 @@ func TestPartialWorktreeFailureRemovesCheckout(t *testing.T) {
 				source = tc.source(f)
 			}
 			r, report := f.execute(f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-				return execute(ctx, r, in, f.piCWD, source)
+				return execute(ctx, r, in, f.piCWD, source, testState)
 			}), prompt)
 			want := tc.want
 			if errors.Is(report.Failure, syscall.EPERM) {

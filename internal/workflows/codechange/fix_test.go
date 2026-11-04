@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
@@ -183,11 +184,28 @@ func TestFixSucceeds(t *testing.T) {
 				t.Fatalf("last decision %+v", got[len(got)-1])
 			}
 			// The receipt check's one PR GET, and no compare: the pushed head
-			// is the pull request head.
+			// is the pull request head. Then the final state: one poll, which
+			// the fake GitHub's terminal state settles, and the snapshot.
 			const get = "api --method GET --hostname github.com -H Accept: application/vnd.github+json "
+			state := []string{get + "repos/owner/repo/pulls/1", get + "repos/owner/repo/commits/" + pushed + "/check-runs?per_page=100 --paginate --slurp", get + "repos/owner/repo/commits/" + pushed + "/status?per_page=100 --paginate --slurp"}
+			want := append(append([]string{get + "repos/owner/repo/pulls/1"}, state...), append(state, "api graphql --hostname github.com -f query=<review threads> -f name=repo -f owner=owner -F number=1 --paginate --slurp")...)
 			gh := f.ghCalls()
-			if last := slices.Index(gh, get+"repos/owner/repo/pulls/1/reviews?per_page=100 --paginate --slurp"); last < 0 || !slices.Equal(gh[last+1:], []string{get + "repos/owner/repo/pulls/1"}) {
-				t.Fatalf("gh calls %q", gh)
+			if last := slices.Index(gh, get+"repos/owner/repo/pulls/1/reviews?per_page=100 --paginate --slurp"); last < 0 || !slices.Equal(gh[last+1:], want) {
+				t.Fatalf("gh calls %q, want %q after the deep review", gh, want)
+			}
+			// The snapshot is attached after the fix Step; the fix contract
+			// stays the Final.
+			var fixDone, snapshotAt time.Time
+			for _, at := range report.Snapshot.Attempts {
+				switch at.Key {
+				case "fix":
+					fixDone = at.FinishedAt
+				case "final-snapshot":
+					snapshotAt = at.StartedAt
+				}
+			}
+			if s := snapshot(t, report); snapshotAt.IsZero() || !snapshotAt.After(fixDone) || s.PullRequest.HeadSHA != pushed || s.Wait.Outcome != "settled" || s.Wait.LastPolledHead != pushed {
+				t.Fatalf("final snapshot at %s after fix at %s: %+v", snapshotAt, fixDone, s)
 			}
 			a.requireExitsConfirmed(t)
 			if checkoutAtReturn != nil {
@@ -567,11 +585,13 @@ func TestFixCancelled(t *testing.T) {
 }
 
 // The run succeeds within exactly three live sessions, nine sessions and
-// fourteen attempts when the fix Step uses all three of its attempts: input,
+// fifteen attempts when the fix Step uses all three of its attempts: input,
 // implementer, two pre-PR reviewers, correction, pull-request, the deep
-// review's five and the fixer's three. One session less stops the run before
-// the fix Step is dispatched, one attempt less at its last repair, with a
-// run-scope LimitExceeded, no Final and no external objects record.
+// review's five, the fixer's three and the final snapshot. One session less
+// stops the run before the fix Step is dispatched, one attempt less at the
+// final snapshot's Attach and two less at the fix Step's last repair, each
+// with a run-scope LimitExceeded, no Final, no external objects record and
+// no snapshot.
 func TestFixLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
@@ -580,8 +600,9 @@ func TestFixLimits(t *testing.T) {
 		dispatched int
 		want       string
 	}{
-		{"exact", 9, 14, 3, ""},
-		{"sessions", 8, 14, 0, "session limit exceeded"},
+		{"exact", 9, 15, 3, ""},
+		{"sessions", 8, 15, 0, "session limit exceeded"},
+		{"attempts-at-snapshot", 9, 14, 3, "run attempt limit exceeded"},
 		{"attempts", 9, 13, 2, "run attempt limit exceeded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -619,6 +640,9 @@ func TestFixLimits(t *testing.T) {
 			}
 			if _, ok := report.Result.Outputs["external-objects"]; ok || report.Final != nil {
 				t.Fatalf("outputs %+v final %+v", report.Result.Outputs, report.Final)
+			}
+			if _, ok := report.Result.Outputs["final-snapshot"]; ok {
+				t.Fatalf("outputs %+v", report.Result.Outputs)
 			}
 			requireKept(t, a.run)
 		})

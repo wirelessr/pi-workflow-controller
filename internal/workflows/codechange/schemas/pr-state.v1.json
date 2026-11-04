@@ -1,0 +1,244 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/code-change/pr-state.v1.json",
+  "description": "Controller record of the pull request state as read-only GitHub reads showed it after a mechanical wait: identities, states, locations and links, nullable fields as GitHub gave them. A field that cannot be null missing from GitHub's answer failed the read, and each list matched the total count GitHub reported on every page with no key repeated, or nothing was recorded. It holds no bodies, logs or comment text. The Controller used no state or conclusion beyond the wait's test and judged nothing; their meaning is the reader's to judge",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "wait",
+    "observed_at",
+    "pull_request",
+    "check_runs",
+    "statuses",
+    "unresolved_threads"
+  ],
+  "$defs": {
+    "time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "link": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "properties": {
+    "wait": {
+      "description": "The wait before the reads. Its only test was whether every check run was completed and every commit status was success, failure or error, on the same pull request head, at every poll for the settle window",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "started_at",
+        "ended_at",
+        "polls",
+        "failed_polls"
+      ],
+      "properties": {
+        "outcome": {
+          "description": "settled: the test held for the settle window. timed_out: the wait reached its cap first, which is recorded and is not an error",
+          "enum": [
+            "settled",
+            "timed_out"
+          ]
+        },
+        "started_at": {
+          "$ref": "#/$defs/time"
+        },
+        "ended_at": {
+          "$ref": "#/$defs/time"
+        },
+        "polls": {
+          "description": "Polls that completed, failed ones included",
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_polls": {
+          "description": "Polls with a failed or unreadable read; each restarted the settle window",
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_poll_error": {
+          "description": "The error of the last failed poll",
+          "type": "string"
+        },
+        "last_polled_head": {
+          "description": "The pull request head of the last poll that read the state in full; a settled wait settled on it. Absent when no poll did",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "settled"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "last_polled_head"
+        ]
+      }
+    },
+    "observed_at": {
+      "$ref": "#/$defs/time",
+      "description": "When the reads of this record began, after the wait"
+    },
+    "pull_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number",
+        "url",
+        "state",
+        "draft",
+        "merged",
+        "head_sha",
+        "head_ref",
+        "base_ref"
+      ],
+      "properties": {
+        "number": {
+          "description": "The number of the committed pull-request record, which the read checked",
+          "type": "integer"
+        },
+        "url": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "draft": {
+          "type": "boolean"
+        },
+        "merged": {
+          "type": "boolean"
+        },
+        "head_sha": {
+          "description": "The head the check runs and commit statuses below are of",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "head_ref": {
+          "type": "string"
+        },
+        "base_ref": {
+          "type": "string"
+        }
+      }
+    },
+    "check_runs": {
+      "description": "Every check run of head_sha GitHub listed, ids unique",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "app",
+          "status",
+          "conclusion",
+          "html_url",
+          "details_url"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "app": {
+            "description": "The slug of the app that created the check run",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "conclusion": {
+            "description": "As GitHub gave it; null until the check run completed",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "html_url": {
+            "$ref": "#/$defs/link"
+          },
+          "details_url": {
+            "$ref": "#/$defs/link"
+          }
+        }
+      }
+    },
+    "statuses": {
+      "description": "The latest commit status of each context of head_sha, contexts unique",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "context",
+          "state",
+          "target_url"
+        ],
+        "properties": {
+          "context": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "target_url": {
+            "$ref": "#/$defs/link"
+          }
+        }
+      }
+    },
+    "unresolved_threads": {
+      "description": "The pull request's review threads GitHub shows as not resolved, in its order, ids unique",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "path",
+          "line",
+          "outdated",
+          "url"
+        ],
+        "properties": {
+          "id": {
+            "description": "The thread's GraphQL node ID",
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string"
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "outdated": {
+            "type": "boolean"
+          },
+          "url": {
+            "description": "The link of the thread's first comment",
+            "$ref": "#/$defs/link"
+          }
+        }
+      }
+    }
+  }
+}

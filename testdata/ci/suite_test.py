@@ -50,6 +50,7 @@ class SuiteTest(unittest.TestCase):
         expected = {'TestFixSucceeds': base + '-fix', 'TestFixLater': base + '-fix',
                     'TestPublishSucceeds': base + '-publish', 'TestPrePRReviewSucceeds': base + '-review',
                     'TestPrePRReviewerFailure': base + '-review', 'TestDeepReviewLimits': base + '-review',
+                    'TestStateWaitSettle': base + '-state', 'TestStateFinalReadFailureKeepsWorktree': base + '-state',
                     'TestImplementReady': base, 'TestCheckReview': base, 'TestFi': base,
                     'TestBrandNewFamily': base, 'TestReviewFix': base}
         tops = {package: sorted(expected), 'other/pkg': ['TestFixOther']}

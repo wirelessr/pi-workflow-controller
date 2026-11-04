@@ -22,9 +22,9 @@ func Definition(piCWD string) engine.Definition {
 	// remove the deep review's checkout and a successful run's worktree; a
 	// removal under way is not interrupted. The value awaits live data.
 	p.Runtime.CleanupTimeout = 2 * time.Minute
-	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree, have two reviewers check them, correct the work, push one branch and open a pull request, deep-review the pull request at the verified head with the code-review flow, then have a fresh fixer triage the deep review's findings, fix them and push to the same branch; this version stops after triage and fix of the deep-review report, with no convergence or final cleanup", Version: "1", Policy: p,
+	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree, have two reviewers check them, correct the work, push one branch and open a pull request, deep-review the pull request at the verified head with the code-review flow, then have a fresh fixer triage the deep review's findings, fix them and push to the same branch; this version stops after taking a snapshot of the pull request state, once its checks and statuses settled or the wait reached its cap, with no convergence or final cleanup", Version: "1", Policy: p,
 		Execute: func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-			return execute(ctx, r, in, piCWD, gitSource{remote: githubRemote})
+			return execute(ctx, r, in, piCWD, gitSource{remote: githubRemote}, prStatePolicy)
 		}}
 }
 
@@ -38,7 +38,7 @@ type prepared struct {
 	worktree      *worktree
 }
 
-func execute(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, source gitSource) (engine.Result, error) {
+func execute(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, source gitSource, state statePolicy) (engine.Result, error) {
 	p, err := prepare(ctx, r, in, piCWD, source)
 	if err != nil {
 		return engine.Result{}, err
@@ -59,9 +59,14 @@ func execute(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, 
 	if result, err = fix(ctx, r, p, piCWD, result); err != nil {
 		return result, err
 	}
+	// The fix contract stays the Final: the snapshot is the Controller's
+	// observation of the pull request, not a report of the work.
+	if result, err = p.finalState(ctx, r, result, state); err != nil {
+		return result, err
+	}
 	// Only here may the run's cleanup remove the worktree: every session was
 	// confirmed closed, the fixer's last with the HEAD still the head
-	// verified on the pull request.
+	// verified on the pull request, and the snapshot is recorded.
 	p.worktree.remove.Store(true)
 	return result, nil
 }

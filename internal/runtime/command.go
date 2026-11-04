@@ -5,8 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -41,6 +45,48 @@ func GitHubGET(ctx context.Context, dir, endpoint string, paginate bool) ([]byte
 		args = append(args, "--paginate", "--slurp")
 	}
 	return command(ctx, dir, "gh", args, nil)
+}
+
+// graphQLName is a GraphQL variable name.
+var graphQLName = regexp.MustCompile(`^[_A-Za-z][_0-9A-Za-z]*$`)
+
+// GitHubGraphQL runs gh api graphql --hostname github.com -f query=<query>,
+// then each of strs as -f name=value and each of ints as -F name=<n>, each
+// group in name order, then --paginate --slurp: the result is the array of
+// pages, which the caller checks. To page, the query declares $endCursor and
+// selects pageInfo of the connection.
+//
+// The read-only guarantee comes from query being a Controller constant that
+// is a query operation. The check that the document starts with the query
+// keyword only catches a programming error: it is not a parser and admits a
+// constant that also holds another operation. Before gh starts it rejects
+// such a document, a variable name that is not a GraphQL name, is query or
+// operationName (gh sends those two as request fields, not variables), and
+// a name in both groups; a NUL in the document or a value fails at exec,
+// also before gh starts. -f values are sent as strings and never expanded
+// from a file.
+func GitHubGraphQL(ctx context.Context, dir, query string, strs map[string]string, ints map[string]int) ([]byte, error) {
+	rest, ok := strings.CutPrefix(strings.TrimLeft(query, " \t\r\n"), "query")
+	if !ok || rest == "" || !strings.ContainsRune(" \t\r\n({", rune(rest[0])) {
+		return nil, errors.New("invalid GitHub GraphQL query: want a query operation")
+	}
+	variable := func(name string) bool {
+		return graphQLName.MatchString(name) && name != "query" && name != "operationName"
+	}
+	args := []string{"api", "graphql", "--hostname", "github.com", "-f", "query=" + query}
+	for _, name := range slices.Sorted(maps.Keys(strs)) {
+		if _, both := ints[name]; !variable(name) || both {
+			return nil, errors.New("invalid GitHub GraphQL variable")
+		}
+		args = append(args, "-f", name+"="+strs[name])
+	}
+	for _, name := range slices.Sorted(maps.Keys(ints)) {
+		if !variable(name) {
+			return nil, errors.New("invalid GitHub GraphQL variable")
+		}
+		args = append(args, "-F", name+"="+strconv.Itoa(ints[name]))
+	}
+	return command(ctx, dir, "gh", append(args, "--paginate", "--slurp"), nil)
 }
 
 // Git runs git from PATH in dir with the gh credential helper and the

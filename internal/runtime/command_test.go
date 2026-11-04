@@ -221,6 +221,9 @@ func TestCommandFixedEntryPoints(t *testing.T) {
 		{"github-get-paginate", "gh", func(ctx context.Context, dir string) ([]byte, error) {
 			return GitHubGET(ctx, dir, "repos/o/r/issues/1/comments?per_page=100", true)
 		}, []string{"api", "--method", "GET", "--hostname", "github.com", "-H", "Accept: application/vnd.github+json", "repos/o/r/issues/1/comments?per_page=100", "--paginate", "--slurp"}, nil},
+		{"github-graphql", "gh", func(ctx context.Context, dir string) ([]byte, error) {
+			return GitHubGraphQL(ctx, dir, "query($owner: String!) { x }", map[string]string{"owner": "o", "name": "-r @file", "path": "@file"}, map[string]int{"number": 7, "first": -1})
+		}, []string{"api", "graphql", "--hostname", "github.com", "-f", "query=query($owner: String!) { x }", "-f", "name=-r @file", "-f", "owner=o", "-f", "path=@file", "-F", "first=-1", "-F", "number=7", "--paginate", "--slurp"}, nil},
 		{"git", "git", func(ctx context.Context, dir string) ([]byte, error) {
 			return Git(ctx, dir, []string{"CALLER_GIT_ENV=1"}, "--no-pager", "rev-parse", "HEAD")
 		}, []string{
@@ -279,6 +282,64 @@ func TestGitHubGETRejectsEndpoint(t *testing.T) {
 			t.Fatalf("accepted endpoint did not start gh: %v", err)
 		}
 	})
+}
+
+// A document that is not a query operation and a variable gh could not pass
+// as given are rejected before gh starts.
+func TestGitHubGraphQLRejects(t *testing.T) {
+	const valid = "query { viewer { login } }"
+	const badQuery, badVariable, notStarted = "invalid GitHub GraphQL query: want a query operation", "invalid GitHub GraphQL variable", "acquisition command could not start"
+	for _, tc := range []struct {
+		name, query string
+		strs        map[string]string
+		ints        map[string]int
+		want        string
+	}{
+		{"empty", "", nil, nil, badQuery},
+		{"keyword-only", "query", nil, nil, badQuery},
+		{"mutation", "mutation { addComment { id } }", nil, nil, badQuery},
+		{"subscription", "subscription { x }", nil, nil, badQuery},
+		{"shorthand", "{ viewer { login } }", nil, nil, badQuery},
+		{"longer-name", "queryX { x }", nil, nil, badQuery},
+		{"upper-case", "Query { x }", nil, nil, badQuery},
+		{"comment-first", "# c\nquery { x }", nil, nil, badQuery},
+		{"string-name-not-a-name", valid, map[string]string{"a-b": "v"}, nil, badVariable},
+		{"string-name-leading-digit", valid, map[string]string{"1a": "v"}, nil, badVariable},
+		{"string-name-empty", valid, map[string]string{"": "v"}, nil, badVariable},
+		{"string-name-with-equals", valid, map[string]string{"a=b": "v"}, nil, badVariable},
+		{"string-name-query", valid, map[string]string{"query": "mutation { x }"}, nil, badVariable},
+		{"int-name-query", valid, nil, map[string]int{"query": 1}, badVariable},
+		{"string-name-operation-name", valid, map[string]string{"operationName": "Other"}, nil, badVariable},
+		{"int-name-operation-name", valid, nil, map[string]int{"operationName": 1}, badVariable},
+		{"int-name-not-a-name", valid, nil, map[string]int{"a b": 1}, badVariable},
+		{"name-in-both", valid, map[string]string{"n": "1"}, map[string]int{"n": 1}, badVariable},
+		// exec rejects a NUL in an argument before the process exists.
+		{"nul-in-query", "query { x }\x00", nil, nil, notStarted},
+		{"nul-in-value", valid, map[string]string{"v": "a\x00b"}, nil, notStarted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCommandFixture(t, "sentinel")
+			pathexec.Install(t, "gh", "TestCommandHelper")
+			if raw, err := GitHubGraphQL(context.Background(), f.dir, tc.query, tc.strs, tc.ints); raw != nil || err == nil || err.Error() != tc.want {
+				t.Fatalf("accepted or wrong error: %q %v, want %q", raw, err, tc.want)
+			}
+			if _, err := os.Stat(filepath.Join(f.dir, "started")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("gh started for a rejected call: %v", err)
+			}
+		})
+	}
+	for _, query := range []string{valid, " \t\r\nquery { x }", "query\n{ x }", "query{ x }", "query($a: Int) { x }", "query Named { x }"} {
+		t.Run("accepted/"+strings.TrimSpace(query), func(t *testing.T) {
+			f := newCommandFixture(t, "sentinel")
+			pathexec.Install(t, "gh", "TestCommandHelper")
+			if _, err := GitHubGraphQL(context.Background(), f.dir, query, map[string]string{"_v1": ""}, map[string]int{"N": 0}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(f.dir, "started")); err != nil {
+				t.Fatalf("accepted query did not start gh: %v", err)
+			}
+		})
+	}
 }
 
 // The values review used before the definition moved here; a caller that

@@ -36,7 +36,11 @@ const FixSchema = "code-change.fix.v1"
 // closing.
 const ExternalObjectsSchema = "code-change.external-objects.v1"
 
-var schemaNames = []string{"input", "implement", "review", "publish", "pull-request", "fix", "external-objects"}
+// PRStateSchema is the Controller record of the pull request state after a
+// mechanical wait.
+const PRStateSchema = "code-change.pr-state.v1"
+
+var schemaNames = []string{"input", "implement", "review", "publish", "pull-request", "fix", "external-objects", "pr-state"}
 
 func Resources() []contract.Resource {
 	var out []contract.Resource

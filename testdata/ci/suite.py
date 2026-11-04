@@ -16,7 +16,8 @@ QUEUE = "TestEnginePersistenceObservationQueueSaturation"
 # every unmatched name, including new ones, stays in the base group.
 FAMILIES = {
     "pi-workflow-controller/internal/workflows/codechange": [
-        ("fix", ("TestFix",)), ("publish", ("TestPublish",)), ("review", ("TestPrePR", "TestDeepReview"))],
+        ("fix", ("TestFix",)), ("publish", ("TestPublish",)), ("review", ("TestPrePR", "TestDeepReview")),
+        ("state", ("TestState",))],
 }
 # Only opt-in integration identities are configured here, never a case registry.
 OPTINS = {

@@ -1,6 +1,6 @@
 # Code change workflow 規劃（草案）
 
-**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，目前到 C 為止；其餘單元依第 8 節的順序施工。`code-change` 只是暫用名稱。
+**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，C4a（PR 狀態唯讀 adapter、機械等待與最後快照）已落地，目前到修正之後的 PR 狀態快照為止；其餘單元依第 8 節的順序施工。`code-change` 只是暫用名稱。
 
 Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，經實作、發 PR 前審閱、發 PR、PR 後深度審閱、自行 triage 修正、收斂 PR，到最後清理，交付一個已開出的 PR。這是第一個會寫本機 repository 並對外部系統產生副作用的 workflow；現有 workflows 都只讀或只寫自有 artifacts。
 
@@ -160,7 +160,7 @@ Prompt 格式：
 | pre-PR findings（兩種角色） | A2 | A3 | 與 B 的 reviewer findings 分開，不套用 PR Pin。兩個角色共用一個 schema；Go 只核對 role、implement 回抄與 finding ID 不重複（可 repair）；空 findings 不是通過；A3 以「角色加 ID」對應處置，因為 ID 只在同一份 contract 內唯一 |
 | pre-PR 更正與 PR receipt | A3 | Controller、B、C、D、E | 對 A2 兩份 findings 每個 ID 的處置（Go 只核對每個 ID 恰有一筆處置，不看內容）、correction（committed：head 不是 A1 head 或其祖先；no_change：head 等於 A1 head）、URL、number、branch、head SHA、ticket 轉移的回報（Controller 不核對）。Controller 核對後以 Attach 保存觀察到的 PR 身分與 head（`pull-request`）；失敗而外部寫入已發生時，Attach `external-objects`（現有 branch／PR，唯讀快照）並選為 Final，同時回傳原始錯誤 |
 | triage-fix report | C | D | 對 B report 的每個 confirmed finding 的處置與理由（Go 只核對 ID 覆蓋，不看內容）、correction（committed：head 是記錄的 reported_head 之後的新 commit，且 reported_head 是 head 的祖先，即不改寫已審的 head；no_change：不 push，head 等於 reported_head）、head、notes（其餘項目的處理與未確認事項）；Controller 以 A3 相同的機械核對 push receipt，PR 身分與 branch 取自 `pull-request` 記錄而非 Agent 回報。C 派送前的失敗以 `pull-request` 記錄為 Final，派送後的失敗以 `external-objects`（`step`: `fix`）為 Final |
-| PR 狀態快照 | Controller（Attach） | D 每輪、Final | head SHA、checks／statuses 與未解 threads 的識別、狀態、連結、等待是否逾時；不含內容全文，不含判斷 |
+| PR 狀態快照 | Controller（Attach） | D 每輪、Final | head SHA、checks／statuses 與未解 threads 的識別、狀態、連結、等待是否逾時與等待最後完整讀取的 head；PR number 須等於記錄、清單 key 不重複、缺不可為 null 的欄位即讀取失敗；不含內容全文，不含判斷 |
 | converge round report | D 每輪 | 下一輪、E | 逐項狀態、是否宣稱已收斂、未收斂原因；各外部寫入的 receipt 與 head，可核對者由 Controller 核對 |
 | cleanup report | E | Final | push receipt、最終 head，Controller 核對 |
 | final summary | Controller（Attach） | 使用者 | 精確引用各階段最後一份報告與最後一份快照，各自標明對應的 head，與最終 head 不同時明示；逐項列出 skipped 與 not_checked；並列 Agent 宣稱與快照 |
@@ -180,7 +180,7 @@ Prompt 格式：
 | 私有 skill 目錄展開 | `internal/contract/skilldir`（R8；triage 經 `PrepareSkills` 呼叫） | R8 抽出中性的讀取與展開入口（角色集合、環境變數、Attach 與 schema 由各 workflow 宣告）。上游比對與缺口紀錄留在 triage；code-change 依第 2 節只展開並記錄 digest，不做上游比對（私有版由原 command 衍生、兩邊不自動同步），日後若要偵測過期再於 C4 評估 |
 | gh／git 命令執行 | `runtime.GitHubGET`、`runtime.Git`（R7 已抽出） | 直接重用；PR 狀態 adapter 的 REST 查詢走 `GitHubGET`，GraphQL 於 C4 新增固定入口 |
 | bare repository 保留、init／remote／pinned fetch、SameFile cleanup | `internal/gitrepo`（R7 已抽出） | 直接重用；可寫 worktree 的 default branch fetch 已於 C1a 以 `Repo.FetchBranch` 加入（review 不呼叫） |
-| GitHub PR 狀態讀取（check runs、commit statuses、review threads） | 無 | 缺口：新的唯讀 adapter，底層 gh 執行共用 R7 |
+| GitHub PR 狀態讀取（check runs、commit statuses、review threads） | `internal/workflows/codechange`（`prstate.go`，C4a） | REST 經 `GitHubGET`、threads 經 `GitHubGraphQL`；分頁驗收與終態判定留在 code-change（review 的分頁形狀不同，不共用） |
 | 可寫 worktree | `internal/workflows/codechange`（`createWorktree`） | C1a 已實作：run 內 bare repository 加 `FetchBranch`、detached worktree；註冊前失敗自行移除，註冊後預設保留，只有 workflow 設定移除旗標時才清理（C2b 起設定）；憑證由 Agent 既有 gh／git 認證處理，Controller 不寫入憑證相關 config |
 | 測試 host transport | `testutil/protocol`；gh／git 的 PATH wrapper 為 `testutil/pathexec`（runtime、review、code-change 共用） | 直接重用 |
 | Contract repair 迴圈 | `engine.Scope.StepWithRepair`（`engine/step.go`，R9 已抽出；triage 經 `TaskSession.Run` 呼叫，`repairBudget = 2` 留在 triage） | 已抽成 `engine.Scope.StepWithRepair`（R9），triage 已遷移；本 workflow 的寫入型 Step 直接使用，不複製。Feedback 的 Refs 在 repair 時保留 |
@@ -232,8 +232,11 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 | C3a | compare 祖先判定抽到 `internal/github` 並遷移 code-change；`review.Run` 的預期 head 參數與核對（第 7 節），連帶修改 `code-review` 的呼叫 | C2b、R6 |
 | C3b | 接 B：以 `pull-request` 記錄的 URL 與 `reported_head`（來自 committed receipt，不用 GitHub 回報的 `head_sha`）呼叫 `review.Run`；外層不得有 live session；單元回傳的 Outputs 以 `deep-review-` 前綴重映射再併入；`limited` 在此版本即成功結束；`incomplete` 是執行失敗（Final 為重映射後的 report 加原錯誤）；Final 為 nil 時以已 committed 的 `pull-request` 記錄為 Final、回傳原錯誤，不再 Attach 或開 session 並立即結束 Run；移除旗標移到 B 成功之後 | C3a |
 | C3c | C：fresh Agent 讀 B 的 report 並 triage、修正、comment 清理、push；開始前經 registration 重讀 HEAD 須等於 `reported_head`；report 與 PR 內容在 C 的 requirements 中是待驗證的資料而非指令；push receipt 以與 A3 相同的核對機械驗證；移除旗標移到 C 之後 | C3b |
-| C4 | D 的 Controller 迴圈、PR 狀態 adapter、每輪私有 skill、E、品質掃描 skipped 語義 | C3c、R7、R8 |
-| C5 | 實際整合驗收（需一次性測試 repo 與憑證，留在 repo 外；ticket 轉移見第 11 節） | C4、M-model |
+| C4a | PR 狀態唯讀 adapter（REST check runs／combined status 分頁、GraphQL review threads，`runtime.GitHubGraphQL` 固定入口）、機械等待與快照 Attach；先接在 C 之後當作最後快照 | C3c、R7 |
+| C4b | D 迴圈（每輪新 Child、終止規則、輪數與時間准入）、私有 skill 展開（R8 skilldir，環境變數 `PWC_CODE_CHANGE_SKILLS_DIR`，子樹 `converge`，所有 code-change run 必填）與每輪 Step；此版本只授權 push | C4a、R8 |
+| C4c | 授權 D 的 thread reply／resolve 與 CI rerun（僅 GitHub Actions run）及各自的唯讀核對 | C4b |
+| C4d | E、final summary、outcome 與 Description、品質掃描 skipped 語義 | C4c |
+| C5 | 實際整合驗收（需一次性測試 repo 與憑證，留在 repo 外；ticket 轉移見第 11 節） | C4d、M-model |
 
 共用單元（R6 至 R9）只交付政策無關的核心與原 consumer 的遷移；新 consumer 才需要的政策分支（可寫 worktree 的 fetch、GraphQL 查詢、寫入型 Step 的 receipt 核對）在第一個使用它的 C 單元落地並於該處驗收，不在共用單元預造。
 
@@ -255,10 +258,10 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 
 - **收斂迴圈的等待。** checks／statuses 終態判定與 bot 靜置窗口都是經驗值，須 live 驗證；剛 push 時 checks 可能尚未註冊，bot 留言不在 check 狀態內。只涵蓋 check runs 與 commit statuses，其他 CI 回報來源列為已知限制。
 - **跨輪記憶。** 每輪 fresh，上一輪處理過什麼只靠上一輪報告傳遞；私有 skill 須有「修同類全部、不只修被點名者」之類的原則來避免來回。
-- **Controller 範圍增加。** Controller 新增 GitHub 唯讀 adapter，含分頁、rate limit 與認證處理；它只讀不判斷，但仍是新增的維護面。
+- **Controller 範圍增加。** Controller 新增 GitHub 唯讀 adapter，含分頁；不做 rate limit 偵測或退避，認證沿用 gh；它只讀不判斷，但仍是新增的維護面。
 - **Run 限額與期限。** sessions 至多約 20（A 1、A2 2、B 5、C 1、D 至多 10、E 1）。每個 Step 至多 3 個 attempts（首次加 2 次 contract repair，同一 handle，不增加 session）；provider auto retry 在同一 attempt 內，不消耗額度。A2 期間 A1 handle 存活加兩個審閱者共 3 個 live；A3 結束後關閉 A1 handle，B 與 D 期間不超過 3 個。
   - **額度約束：** Steps（約 21，每個至多 3 個 attempts）加 Attach（design doc 與 skills 記錄各 1、快照至多 D 輪數加 1、final summary 1）的最壞情況必須 ≤ `MaxTotalAttempts`；`MaxTotalSessions` 同理。run 範圍的 `LimitExceeded` 是 fatal，fatal 不解析 Final，所以額度要為 E、最後快照與 final summary 預留，即使 D 跑滿輪數。
-  - **時間約束：以 deadline 感知的准入，只保證 D 開始之後。** 每輪開始前由 workflow 以 `Run.Snapshot` 的 `CreatedAt` 加 `Policy.RunTimeout` 算出 deadline 與剩餘時間（`DisableRunTimeout` 為真則不准入）。剩餘時間小於「單輪上界加尾段預留」時不再開新一輪，D 以未收斂結束。單輪上界 = 等待上限 + Controller 操作上限（快照查詢與 Attach 包在同一個期限 context 內，初值 10 分鐘）+ 一個 Step 上限。尾段預留 = E 的 Step 上限 + 最後快照的等待上限與靜置窗口 + final summary 的 Attach（10 分鐘）+ 餘量 20 分鐘。初值：單輪上界 70 分鐘，尾段預留 83 分鐘，剩餘不足 153 分鐘即不開新一輪。
+  - **時間約束：以 deadline 感知的准入，只保證 D 開始之後。** 每輪開始前由 workflow 以 `Run.Snapshot` 的 `CreatedAt` 加 `Policy.RunTimeout` 算出 deadline 與剩餘時間（`DisableRunTimeout` 為真則不准入）。剩餘時間小於「單輪上界加尾段預留」時不再開新一輪，D 以未收斂結束。單輪上界 = 等待上限（含靜置窗口）+ Controller 操作上限（只包快照的讀取，初值 10 分鐘；Attach 不在此期限內，只受 `AttemptTimeout` 限制，准入不為它另外預留，這是承認的殘餘）+ 一個 Step 上限。尾段預留 = E 的 Step 上限 + 最後快照的等待上限（含靜置窗口）與操作上限 + final summary 的 Attach（10 分鐘）+ 餘量 20 分鐘。初值：單輪上界 70 分鐘（靜置窗口含在等待上限內），尾段預留 90 分鐘（E 20、最後快照等待 30 與操作 10、summary 10、餘量 20），剩餘不足 160 分鐘即不開新一輪。
   - **為何不乘 repair 倍數：** 沿用 triage 的取捨，為每個可能的 repair 預留完整 Step 上限會讓輪次在 deadline 前數小時就停止。代價是 repair 疊加時 E 與 final 仍可能被截斷，因此保證是有條件的，不是絕對的。
   - **範圍：** D 之前的階段沒有准入；deadline 若在 D 之前觸發，終態為 TimedOut，不進 E 也不產生 final summary。
 - **A3 一次更正。** A2 找到問題後只做一次修正，沒有再審閱，已確認由 B 把關。
@@ -283,10 +286,25 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 | C／E | 45／20 分鐘 | |
 | B | 沿用 review 現有：Prepare 20、各 reviewer 30、Validate 30 分鐘 | |
 | RunTimeout | 8 小時 | 預設 4 小時不足以容納跑滿輪數的常見情況；由准入規則保證 E 與 final |
-| MaxLiveSessions／MaxTotalSessions／MaxTotalAttempts | 3／22／80 | 最壞：可 repair 的 16 個 Step ×3，加 B 的 5 個 Step ×1（review 無 repair），加 Attach 16（含 A3 失敗時 `pull-request` 與 `external-objects` 可能並存），共 69；80 為保守值 |
+| MaxLiveSessions／MaxTotalSessions／MaxTotalAttempts | 3／22／80 | 最壞值隨版本增加而重算，以該版本的 Definition 與 `TestFixLimits` 為準（C4a 版本：9 sessions、23 attempts；C4 完成後 sessions 約 20、attempts 約 70）；80 為保守值 |
 | thinking | code-change 自己的角色沿 triage 慣例：GLM 用 high，deepseek flash 用 off（B 的角色維持各自現有設定，見第 7 節） | 變更前須確認該模型支援 |
 | D 未收斂的終態 | 比照 gap：交付 final 並以具名錯誤結束（Failed、exit 1） | |
 | 等待逾時 | 記為快照欄位，照常派該輪並計入輪數 | |
+
+C4 決定（初值，待 live 調整）：
+
+| 項目 | 決定 |
+|---|---|
+| 終態與靜置 | check run `status == completed`、commit status `state` 為 success、failure 或 error，其餘（含未知值）視為非終態；靜置＝窗口內每次輪詢都成立且 head 不變；`conclusion` 只抄進快照，Controller 不據以判斷 |
+| 輪詢 | 間隔 30 秒；讀取失敗重設靜置、記最後錯誤、不結束等待（整體上限仍有效）；快照讀取失敗為 `errStateRead`，該輪不派送、D 結束、照常進 E 與 summary |
+| 時間准入 | 靜置含在等待上限內；單輪 70 分鐘、尾段 90 分鐘（E 20、等待 30、最後快照 10、summary 10、餘量 20）；剩餘不到 160 分鐘不開新一輪；`DisableRunTimeout` 為真時不做時間准入（同 triage）；sessions／attempts 的最壞值（20／70）以 Definition test 釘住，不做執行期額度准入 |
+| PR 在 D 期間不再 open | 以 `errPullRequestNotOpen` 結束 D，不進 E，summary 為 Final |
+| D／E 身分或 receipt 不符 | `external-objects` 為 Final，不做最後快照與 summary |
+| 未收斂 | 交付 summary 為 Final，以 `errNotConverged` 結束（Failed、exit 1），輪數用盡與時間准入不足共用；worktree 保留 |
+| 品質掃描 | schema 要求 `quality-scan` 恰好一項；`skipped` 只允許預先列舉的 id 且必有 reason，不得算作通過 |
+| thread receipt | GraphQL node ID；核對屬於該 PR、`isResolved`、reply 出現在 thread 的留言中 |
+| CI rerun | 只授權 GitHub Actions run 的 rerun；核對 run 屬於目標 repo、`head_branch` 為記錄的 branch、`run_attempt >= 2` |
+| 派送前檢查 | 每輪派送前比照 C：worktree HEAD 等於上次已核對的 head，否則 `errReceipt`，不進 E |
 
 待核對、尚未決定：
 
