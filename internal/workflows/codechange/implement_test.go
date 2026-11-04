@@ -82,11 +82,13 @@ func (s *recordingSession) Execute(ctx context.Context, dispatch runtime.Dispatc
 	return s.Session.Execute(ctx, dispatch)
 }
 
-// agentCall is one dispatch as the fake Agent sees it.
+// agentCall is one dispatch as the fake Agent sees it: a code-change task or,
+// for the deep review, review's task.
 type agentCall struct {
 	n         int
 	request   contract.Request
 	task      task
+	review    reviewTask
 	candidate string
 }
 
@@ -111,6 +113,8 @@ type agents struct {
 	review func(t *testing.T, c agentCall) string
 	// publish answers the correction Step; nil publishes without a change.
 	publish func(t *testing.T, c agentCall) string
+	// deepReview answers every deep review stage; nil is acceptDeepReview.
+	deepReview func(t *testing.T, c agentCall) string
 	// release reports whether the deferred prompts are settled after c was
 	// answered; nil settles them after any answer that is not "defer".
 	release func(t *testing.T, r *engine.Run, c agentCall) bool
@@ -181,10 +185,7 @@ func (f *fixture) run(t *testing.T, as agents) a1Run {
 		t.Fatal(err)
 	}
 	rt := &recordingRuntime{Runtime: pi, close: as.close}
-	registry, err := contract.NewRegistry(Resources(), Schemas())
-	if err != nil {
-		t.Fatal(err)
-	}
+	registry := schemaRegistry(t)
 	// The fixture deadline cancels the run through the cleanup above.
 	r, err = engine.New(context.Background(), def, engine.Input{Prompt: prompt, LaunchCWD: f.launch},
 		engine.Options{BaseDir: filepath.Join(f.dir, "base"), Schemas: registry, Runtime: rt, PiVersion: "0.84.3", PiDefaultCWD: defaultCWD})
@@ -217,15 +218,27 @@ func (f *fixture) run(t *testing.T, as agents) a1Run {
 				if err := protocol.ReadJSON(e.Message.RequestPath, &c.request); err != nil {
 					t.Fatal(err)
 				}
-				if err := json.Unmarshal([]byte(c.request.Prompt), &c.task); err != nil {
+				deep := deepReviewCall(c)
+				if deep {
+					// Review's task is the prompt's last line.
+					prompt := c.request.Prompt
+					if err := json.Unmarshal([]byte(prompt[strings.LastIndex(prompt, "\n")+1:]), &c.review); err != nil {
+						t.Fatalf("review prompt has no task: %v", err)
+					}
+				} else if err := json.Unmarshal([]byte(c.request.Prompt), &c.task); err != nil {
 					t.Fatalf("request prompt is not a task: %v", err)
 				}
 				out.calls = append(out.calls, c)
 				var agent func(t *testing.T, c agentCall) string
-				switch c.request.Output.SchemaID {
-				case ImplementSchema:
+				switch {
+				case deep:
+					agent = as.deepReview
+					if agent == nil {
+						agent = acceptDeepReview
+					}
+				case c.request.Output.SchemaID == ImplementSchema:
 					agent = as.implement
-				case PublishSchema:
+				case c.request.Output.SchemaID == PublishSchema:
 					agent = as.publish
 					if agent == nil {
 						agent = f.acceptPublish
@@ -464,7 +477,7 @@ func TestImplementReady(t *testing.T) {
 	if report.Outcome != engine.Succeeded || report.ExitCode != 0 || report.Failure != nil {
 		t.Fatalf("outcome %s exit %d failure %v", report.Outcome, report.ExitCode, report.Failure)
 	}
-	a.requireSessionsClosed(t, 3)
+	a.requireExitsConfirmed(t)
 	implemented := decision{Scope: "root", Name: "implementation-recorded", Refs: []contract.Ref{report.Result.Outputs["implement"]}}
 	if got := a.decisions(t); len(got) == 0 || !reflect.DeepEqual(got[0], implemented) {
 		t.Fatalf("decisions %+v, want %+v first", got, implemented)
@@ -484,7 +497,8 @@ func TestImplementReady(t *testing.T) {
 	// After the worktree is handed over, the Controller's git never runs on
 	// its repository except to read the worktree registration, with lazy
 	// fetches and replace refs disabled; the snapshot's git, under the same
-	// policy and environment, only creates the snapshot in its own repository.
+	// policy and environment, only creates the snapshot in its own
+	// repository. The deep review's git runs only on review's own repository.
 	repository := filepath.Join(a.run.Dir(), worktreeDir, "repository.git")
 	readPolicy := append(append(controllerPolicy(filepath.Join(repository, "worktrees", "checkout")), fileProtocol...), "--no-lazy-fetch", "--no-replace-objects")
 	snapshotPolicy := append(controllerPolicy(a.snapshotRepo()), fileProtocol...)
@@ -497,6 +511,9 @@ func TestImplementReady(t *testing.T) {
 	}
 	var reads, snapshot []string
 	for _, call := range calls[handed+1:] {
+		if deepReviewGit(call.Args) {
+			continue
+		}
 		sub := subcommand(call.Args)
 		policy := call.Args[slices.Index(call.Args, "--no-pager"):slices.Index(call.Args, sub)]
 		switch {
@@ -701,11 +718,12 @@ func TestImplementRepair(t *testing.T) {
 				return ""
 			}})
 			report := a.report
-			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "publish" || report.Result.Outputs["implement"] != *a.attempt(a.calls[1]).Output {
+			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "deep-review-report" || report.Result.Outputs["implement"] != *a.attempt(a.calls[1]).Output {
 				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 			}
-			// Two implementer attempts, one per reviewer and the correction.
-			a.requireAttempts(t, 5, "input", "pull-request")
+			// Two implementer attempts, one per reviewer, the correction and
+			// the deep review's five.
+			a.requireAttempts(t, 10, "input", "pull-request")
 			if got := f.gitIn(f.origin, "rev-list", "--count", f.head+".."+workBranch); got != "1" {
 				t.Fatalf("commits on base: %s, want the single commit of the first attempt", got)
 			}

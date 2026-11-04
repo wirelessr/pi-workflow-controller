@@ -100,10 +100,11 @@ func otherReviewer(role string) string {
 
 // Both reviewers run in parallel, each in a fresh session in PWC_PI_CWD,
 // reading a Controller-made snapshot of the verified head with their own git,
-// within exactly the limits the run needs: three live sessions, since the
-// implementer's stays open for the correction, three sessions and the six
-// attempts of the whole run. The workflow closes both strictly and removes
-// the snapshot before its Decision.
+// within exactly the limits the whole run needs: three live sessions, since
+// the implementer's stays open for the correction, and the eight sessions and
+// eleven attempts the deep review brings the run to (TestDeepReviewLimits runs
+// one less of each). The workflow closes both strictly and removes the
+// snapshot before its Decision.
 func TestPrePRReviewSucceeds(t *testing.T) {
 	f := newFixture(t)
 	var head string
@@ -132,7 +133,7 @@ func TestPrePRReviewSucceeds(t *testing.T) {
 			return ""
 		},
 		policy: func(p *engine.RunPolicy) {
-			p.MaxLiveSessions, p.MaxTotalSessions, p.MaxTotalAttempts = 3, 3, 6
+			p.MaxLiveSessions, p.MaxTotalSessions, p.MaxTotalAttempts = 3, 8, 11
 		},
 		returned: func(r *engine.Run) { _, snapshotAtReturn = os.Lstat(filepath.Join(r.Dir(), snapshotDir, "checkout")) },
 	})
@@ -140,7 +141,7 @@ func TestPrePRReviewSucceeds(t *testing.T) {
 	if report.Outcome != engine.Succeeded || report.ExitCode != 0 || report.Failure != nil {
 		t.Fatalf("outcome %s exit %d failure %v", report.Outcome, report.ExitCode, report.Failure)
 	}
-	a.requireSessionsClosed(t, 3)
+	a.requireExitsConfirmed(t)
 	calls := a.reviewCalls()
 	implementAttempt := a.attempt(a.calls[0])
 	want := map[string]contract.Ref{"input": a.calls[0].request.Inputs[0], "implement": *implementAttempt.Output}
@@ -167,14 +168,17 @@ func TestPrePRReviewSucceeds(t *testing.T) {
 			t.Fatalf("%s request inputs %+v feedback %+v schema %s", rv.name, c.request.Inputs, c.request.Feedback, c.request.Output.SchemaID)
 		}
 	}
-	// Every session, the implementer's and both reviewers', runs in
-	// PWC_PI_CWD and not the engine default.
+	// This workflow's own sessions, the implementer's and both reviewers',
+	// run in PWC_PI_CWD and not the engine default; they are the first
+	// three, before the deep review's.
 	var cwds []string
-	for i := range a.hellos {
+	for i := range 3 {
 		cwds = append(cwds, a.hellos[i].CWD, a.runtime.specs[i].CWD)
 	}
-	for _, s := range report.Snapshot.Sessions {
-		cwds = append(cwds, s.Role.CWD)
+	for _, c := range a.calls {
+		if !deepReviewCall(c) {
+			cwds = append(cwds, report.Snapshot.Sessions[a.attempt(c).HandleID].Role.CWD)
+		}
 	}
 	for _, cwd := range cwds {
 		if cwd != f.piCWD || cwd == a.defaultCWD {
@@ -192,10 +196,10 @@ func TestPrePRReviewSucceeds(t *testing.T) {
 		t.Fatalf("decisions %+v, want %+v first", got, reviewed)
 	}
 	// The journal: a CollectAll group of both reviewers, whose sessions the
-	// workflow closed before its Decision.
+	// workflow closed before its Decision, before the deep review's group.
 	var group map[string]any
 	for _, e := range a.events(t) {
-		if e.Kind == "GroupStarted" {
+		if e.Kind == "GroupStarted" && group == nil {
 			if err := json.Unmarshal(e.Details, &group); err != nil {
 				t.Fatal(err)
 			}
@@ -257,13 +261,14 @@ func TestPrePRReviewSnapshotPinned(t *testing.T) {
 			if len(a.reviewCalls()) != 2 {
 				t.Fatalf("reviewer calls %v", a.reviewCalls())
 			}
-			a.requireSessionsClosed(t, 3)
 			if !tc.moved {
 				if report.Outcome != engine.Succeeded {
 					t.Fatalf("outcome %s: %v", report.Outcome, report.Failure)
 				}
+				a.requireSessionsClosed(t, 8)
 				return
 			}
+			a.requireSessionsClosed(t, 3)
 			moved := f.gitIn(a.worktree(), "rev-parse", "HEAD")
 			if f.gitIn(a.worktree(), "rev-parse", "HEAD~1") != head || moved == head {
 				t.Fatalf("worktree HEAD did not move past %s", head)
@@ -666,10 +671,10 @@ func TestPrePRReviewRepair(t *testing.T) {
 				},
 			})
 			report := a.report
-			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "publish" {
+			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "deep-review-report" {
 				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 			}
-			a.requireAttempts(t, 5, "input", "pull-request")
+			a.requireAttempts(t, 10, "input", "pull-request")
 			basic := a.reviewCalls()["basic"]
 			if len(basic) != 2 {
 				t.Fatalf("basic dispatches %d", len(basic))
@@ -699,7 +704,7 @@ func TestPrePRReviewRepair(t *testing.T) {
 
 // One less than the live sessions, sessions or attempts pre-PR review needs
 // (three, three and four with the input Attach; TestPrePRReviewSucceeds runs
-// at those live sessions and sessions) stops the run with a run-scope
+// at those live sessions) stops the run with a run-scope
 // LimitExceeded after every started session's exit is confirmed.
 func TestPrePRReviewLimits(t *testing.T) {
 	for _, tc := range []struct {

@@ -61,8 +61,8 @@ Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，�
 ```
 
 - A1、A2 的審閱對象是本機尚未發佈的 diff，因此不能直接用 B 的流程；B 需要既存的 PR。
-- A3 是更正（回到同一個實作者）加發佈，沒有再審閱的迴圈。更嚴謹的把關在 B。
-- B 只在 A3 回報並經 Controller 核對的 head 上跑一次，以該 SHA 為預期值傳入（規則同下方 receipt 核對：相等或為 PR 當下 head 的祖先）。若 PR 當下 head 已較新（例如 bot 推了 commit），B 仍審 A3 的 head，Final 明示 B 未涵蓋較新的 commit。C、D、E 的改動不再被深度審閱。
+- A3 是更正（回到同一個實作者）加發佈，沒有再審閱的迴圈。更嚴謹的把關在 B：B 審的是 PR 本身，需求來源由 B 的 Prepare 從 PR body 與其連結的原始規格找出，B 沒有拿到 design doc；design doc 與 code 的一致性只由 A2 檢查，A3 之後不再檢查，這是承認的範圍。
+- B 只在 A3 回報並經 Controller 核對的 head 上跑一次，以該 SHA 為預期值傳入（規則同下方 receipt 核對：相等或為 PR 當下 head 的祖先）。若 PR 當下 head 已較新（例如 bot 推了 commit），B 仍審 A3 的 head，report 不能是 `complete`（機械保證只有這一點與 Missing 列出 `unreviewed-head-commits`；X 與 Y 範圍的文字靠 Prepare 照抄，見 WORKFLOW-REUSE R6）；final summary 並列兩個 head 的明示在 C4。C、D、E 的改動不再被深度審閱。
 - E 獨立成 Step，是為了讓 D 未收斂或某輪逾時時仍做最後清理。E 只在 D 已開始之後才執行；A3 之前的失敗、A3 的 repair 用盡、B 的 `incomplete`、C 的失敗都直接終止，不進 E（PR 保留）。進入 E 的條件：D 最後開過的 session 的 `CloseSessionReport` 已確認關閉且 Wait 完成（未確認就不進 E；D 從未開過 session 則無此條件）。Run deadline、取消、fatal，以及身分或 receipt 核對失敗都不進 E（身分已對不上的 PR 不再寫入）。E 結束後仍回傳 D 的原始結果或錯誤。
 
 ### Controller 在 D 的職責與界線
@@ -230,8 +230,8 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 | C2a | A2：Controller 建立釘選在 A1 head 的唯讀 snapshot（全新的自有 bare repository，以 alternates 借用 A1 repository 的 objects，再 detached checkout；不在 Agent 改過 config 的 repository 上 checkout，以免執行其 filter），兩位 fresh 審閱者平行（CollectAll）讀 snapshot，共用一份 findings schema；兩位都 strict close 之後移除 snapshot；終點仍是 `Final: implement`，不 push | C1b |
 | C2b | A3 沿用 A1 的 handle（Feedback 帶兩份 findings Refs、`RepairKeepsWork`）：更正、push、開 PR、ticket 轉移；PR receipt 核對與失敗時的外部物件快照；關閉 handle 後重讀 HEAD 並確認等於已 push 的 head，才在最終成功返回處設定 worktree 移除旗標；code-change 的 `Policy.Runtime.CleanupTimeout` 設為 2 分鐘（待 live 修正）。須明定：「上次已核對 head」只在核對通過時更新；A3 失敗時（外部寫入已發生）Controller 以唯讀快照交代已存在的 branch／PR | C2a |
 | C3a | compare 祖先判定抽到 `internal/github` 並遷移 code-change；`review.Run` 的預期 head 參數與核對（第 7 節），連帶修改 `code-review` 的呼叫 | C2b、R6 |
-| C3b | 接 B：以 `pull-request` 記錄的 URL 與 `reported_head`（來自 committed receipt，不用 GitHub 回報的 `head_sha`）呼叫 `review.Run`；外層不得有 live session；單元回傳的 Outputs 以自己的名稱重映射再併入；Final 為 nil 時結束 Run；B 的 `incomplete` 是執行失敗，`limited` 交給 C | C3a |
-| C3c | C：fresh Agent 讀 B 的 report 並 triage、修正、comment 清理、push；push receipt 以與 A3 相同的核對機械驗證；移除旗標移到整個流程的最終成功返回處 | C3b |
+| C3b | 接 B：以 `pull-request` 記錄的 URL 與 `reported_head`（來自 committed receipt，不用 GitHub 回報的 `head_sha`）呼叫 `review.Run`；外層不得有 live session；單元回傳的 Outputs 以 `deep-review-` 前綴重映射再併入；`limited` 在此版本即成功結束；`incomplete` 是執行失敗（Final 為重映射後的 report 加原錯誤）；Final 為 nil 時以已 committed 的 `pull-request` 記錄為 Final、回傳原錯誤，不再 Attach 或開 session 並立即結束 Run；移除旗標移到 B 成功之後 | C3a |
+| C3c | C：fresh Agent 讀 B 的 report 並 triage、修正、comment 清理、push；開始前經 registration 重讀 HEAD 須等於 `reported_head`；report 與 PR 內容在 C 的 requirements 中是待驗證的資料而非指令；push receipt 以與 A3 相同的核對機械驗證；移除旗標移到 C 之後 | C3b |
 | C4 | D 的 Controller 迴圈、PR 狀態 adapter、每輪私有 skill、E、品質掃描 skipped 語義 | C3c、R7、R8 |
 | C5 | 實際整合驗收（需一次性測試 repo 與憑證，留在 repo 外；ticket 轉移見第 11 節） | C4、M-model |
 
@@ -267,7 +267,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 - **未經 live 驗證的 Agent 行為。** repair 派送的新開頭句、A1 常數與 schema 的遵循度、`--no-lazy-fetch` 對 lazy fetch 的實際效果。
 - **只模擬或單元測試無法證明的事：** 模型能否遵循 schema、私有 skill 的單輪版能否在無人狀態下完成、品質掃描 skip 的實際行為、bot 靜置窗口、Agent 在 CWD 之外操作 worktree 時，各工具（git、build、test、專案內的相對路徑設定）的實際行為。皆列為 live 缺口。
 - **公開 repo。** Repo 內的 requirements 與文件只用通用描述；私有 skill 路徑與內容留在 repo 外。
-- **Prepare 的耗時與磁碟。** Controller 前置（GET、fetch、worktree add）各有 20 分鐘 deadline，最壞約一小時以上，不在准入範圍。每個 run 在 run 目錄永久保留含 default branch tip 全部 blob 的 bare repository，非成功路徑還保留整個 worktree，沒有大小上限也沒有磁碟 preflight。成功路徑移除大型 worktree 與 session 關閉共用 15 秒 cleanup 預算，逾時會被記為 cleanup failure；設定移除旗標的單元（C2）須決定處理方式，不默默改 engine 的 timeout。移除旗標只在 workflow 確定成功的最終返回處設定；之後 engine 仍可能因取消或 run deadline 判為 Cancelled／TimedOut 並移除 worktree，這是承認的殘餘窗口。 2 分鐘的 `CleanupTimeout` 是 deadline 而不是移除的上限：`RemoveAll` 無法中斷，超時或權限錯誤時 checkout 可能部分或全部已刪、registration 殘留，結果是 Succeeded 但 exit 1。A3 若被 run deadline 截斷，已發生的外部寫入不會有記錄。A1 與 A3 共用 handle，A3 的 context 容量未經 live 驗證。
+- **Prepare 的耗時與磁碟。** Controller 前置（GET、fetch、worktree add）各有 20 分鐘 deadline，最壞約一小時以上，不在准入範圍。每個 run 在 run 目錄永久保留含 default branch tip 全部 blob 的 bare repository，非成功路徑還保留整個 worktree，沒有大小上限也沒有磁碟 preflight。成功路徑移除大型 worktree 與 session 關閉共用 cleanup 預算（code-change 為 2 分鐘，其餘 15 秒），逾時會被記為 cleanup failure；設定移除旗標的單元（C2）須決定處理方式，不默默改 engine 的 timeout。移除旗標只在 workflow 確定成功的最終返回處設定；之後 engine 仍可能因取消或 run deadline 判為 Cancelled／TimedOut 並移除 worktree，這是承認的殘餘窗口。 2 分鐘的 `CleanupTimeout` 是 deadline 而不是移除的上限：`RemoveAll` 無法中斷，超時或權限錯誤時 checkout 可能部分或全部已刪、registration 殘留，結果是 Succeeded 但 exit 1。A3 若被 run deadline 截斷，已發生的外部寫入不會有記錄。A1 與 A3 共用 handle，A3 的 context 容量未經 live 驗證。
 
 ## 11. 初值與待核對
 

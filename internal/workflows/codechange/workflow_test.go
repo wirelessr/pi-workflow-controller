@@ -20,14 +20,16 @@ import (
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/runtime"
 	"pi-workflow-controller/internal/testutil/pathexec"
+	"pi-workflow-controller/internal/workflows/review"
 )
 
 // TestGHHelper is the GitHub API boundary: the gh PATH wrapper runs it in a
 // real subprocess that accepts only a REST GET of the target repository, its
-// pull requests, a compare, its branch refs or a branch's pull request list.
-// Pull requests are the records the fake Agent wrote under prs/, with the
-// head SHA read from the local origin at query time like GitHub; compare and
-// refs come from the real git on that origin. Per kind of read, gh-fail-<kind>
+// pull requests, a compare, its branch refs, a branch's pull request list or,
+// paginated, a pull request's comments, which are always none. Pull requests
+// are the records the fake Agent wrote under prs/, with the base and head SHAs
+// read from the local origin at query time like GitHub; compare and refs come
+// from the real git on that origin. Per kind of read, gh-fail-<kind>
 // fails it, gh-body-<kind> replaces its body and pr-patch.json is merged into
 // a pull request; gh-move-head commits in that worktree during a pull
 // request read. With gh-require-closed, a branch ref or pull request list
@@ -47,7 +49,7 @@ func TestGHHelper(t *testing.T) {
 	}
 	_, _ = fmt.Fprintln(calls, strings.Join(args, " "))
 	_ = calls.Close()
-	if len(args) != 8 || !reflect.DeepEqual(args[:7], []string{"api", "--method", "GET", "--hostname", "github.com", "-H", "Accept: application/vnd.github+json"}) {
+	if len(args) < 8 || !reflect.DeepEqual(args[:7], []string{"api", "--method", "GET", "--hostname", "github.com", "-H", "Accept: application/vnd.github+json"}) {
 		os.Exit(2)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "gh-block")); err == nil {
@@ -55,7 +57,7 @@ func TestGHHelper(t *testing.T) {
 	}
 	endpoint := args[7]
 	kind, arg := ghKind(endpoint)
-	if kind == "" {
+	if kind == "" || (kind == "comments") != reflect.DeepEqual(args[8:], []string{"--paginate", "--slurp"}) || (kind != "comments" && len(args) != 8) {
 		os.Exit(2)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "gh-fail-"+kind)); err == nil {
@@ -73,6 +75,8 @@ func TestGHHelper(t *testing.T) {
 	origin := filepath.Join(dir, "origin.git")
 	var out any
 	switch kind {
+	case "comments":
+		out = []any{[]any{}}
 	case "repo":
 		data, err := os.ReadFile(filepath.Join(dir, "repo.json"))
 		if err != nil {
@@ -153,6 +157,8 @@ func ghKind(endpoint string) (string, string) {
 		return "", ""
 	case rest == "":
 		return "repo", ""
+	case slices.Contains([]string{"/issues/1/comments?per_page=100", "/pulls/1/comments?per_page=100", "/pulls/1/reviews?per_page=100"}, rest):
+		return "comments", ""
 	case strings.HasPrefix(rest, "/pulls/"):
 		return "pull", strings.TrimPrefix(rest, "/pulls/")
 	case strings.HasPrefix(rest, "/compare/"):
@@ -173,8 +179,8 @@ func ghKind(endpoint string) (string, string) {
 	return "", ""
 }
 
-// readPull is the pull request record number with its head SHA read from
-// origin, or the recorded one once the branch is gone.
+// readPull is the pull request record number with its base and head SHAs
+// read from origin, or the recorded ones once a branch is gone.
 func readPull(dir, origin, number string) (map[string]any, bool) {
 	raw, err := os.ReadFile(filepath.Join(dir, "prs", number+".json"))
 	if err != nil {
@@ -184,9 +190,11 @@ func readPull(dir, origin, number string) (map[string]any, bool) {
 	if json.Unmarshal(raw, &pr) != nil {
 		os.Exit(2)
 	}
-	head := pr["head"].(map[string]any)
-	if sha := originOutput(origin, "for-each-ref", "--format=%(objectname)", "refs/heads/"+head["ref"].(string)); sha != "" {
-		head["sha"] = sha
+	for _, side := range []string{"base", "head"} {
+		s := pr[side].(map[string]any)
+		if sha := originOutput(origin, "for-each-ref", "--format=%(objectname)", "refs/heads/"+s["ref"].(string)); sha != "" {
+			s["sha"] = sha
+		}
 	}
 	return pr, true
 }
@@ -228,7 +236,9 @@ func originOutput(dir string, args ...string) string {
 
 // TestGitHelper records each Controller git call, optionally blocks or fails
 // one subcommand or acts as a git without --no-lazy-fetch, and otherwise
-// replaces itself with the real git. Before a failure it can replace the
+// replaces itself with the real git. For the deep review's git only, it
+// replaces the GitHub remote review uses with the local origin and allows the
+// file protocol; the call is recorded as review made it. Before a failure it can replace the
 // reserved checkout with a symlink to git-swap's target, so the workflow's
 // cleanup of the partial worktree fails. Before the implement receipt's
 // history read, which runs after the HEAD it verifies was read, it can commit
@@ -283,9 +293,25 @@ func TestGitHelper(t *testing.T) {
 		}
 		os.Exit(3)
 	}
+	if deepReviewGit(args) {
+		for i, a := range args {
+			if a == "https://github.com/owner/repo.git" {
+				args[i] = "file://" + filepath.Join(dir, "origin.git")
+			}
+		}
+		args = append([]string{"-c", "protocol.file.allow=always"}, args...)
+	}
 	if err := syscall.Exec(real, append([]string{"git"}, args...), os.Environ()); err != nil {
 		os.Exit(2)
 	}
+}
+
+// deepReviewGit reports whether args is a git call on the deep review's own
+// repository, which review.Run creates under the deep-review directory.
+func deepReviewGit(args []string) bool {
+	return slices.ContainsFunc(args, func(a string) bool {
+		return strings.HasPrefix(a, "--git-dir=") && strings.HasSuffix(a, string(filepath.Separator)+filepath.Join(deepReviewName, "repository.git"))
+	})
 }
 
 // block publishes that the command started, then waits for the cancellation
@@ -429,6 +455,17 @@ func (f *fixture) prepareOnly(ctx context.Context, r *engine.Run, in engine.Inpu
 	return engine.Result{Outputs: map[string]contract.Ref{"input": p.input}, Final: &engine.FinalSelection{Output: "input"}}, nil
 }
 
+// schemaRegistry has this workflow's schemas and review's, which the
+// production registry also registers.
+func schemaRegistry(t *testing.T) *contract.Registry {
+	t.Helper()
+	registry, err := contract.NewRegistry(append(Resources(), review.Resources()...), append(Schemas(), review.Schemas()...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return registry
+}
+
 type started struct {
 	run  *engine.Run
 	done chan engine.Report
@@ -438,10 +475,7 @@ type started struct {
 // missing executable: no Pi can start.
 func (f *fixture) start(def engine.Definition, prompt string) started {
 	f.t.Helper()
-	registry, err := contract.NewRegistry(Resources(), Schemas())
-	if err != nil {
-		f.t.Fatal(err)
-	}
+	registry := schemaRegistry(f.t)
 	bridge := filepath.Join(f.dir, "bridge")
 	if err := os.MkdirAll(bridge, 0700); err != nil {
 		f.t.Fatal(err)
@@ -558,7 +592,7 @@ func TestDefinitionPolicy(t *testing.T) {
 		t.Fatalf("definition: %s %s %+v", def.Name, def.Version, def.Policy)
 	}
 	// The description says where this version stops.
-	if !strings.Contains(def.Description, "this version stops after the pull request is opened") {
+	if !strings.Contains(def.Description, "this version stops after the deep review of the opened pull request") {
 		t.Fatalf("description: %s", def.Description)
 	}
 	if _, err := engine.NewRegistry([]engine.Definition{def}); err != nil {

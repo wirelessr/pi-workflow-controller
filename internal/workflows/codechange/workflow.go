@@ -12,16 +12,17 @@ import (
 )
 
 // Definition is the code-change workflow. piCWD is the raw PWC_PI_CWD value;
-// it is checked before any side effect and is every Agent's CWD.
+// it is checked before any side effect and is the CWD of every Agent this
+// workflow starts itself; the deep review's Agents run in review's own.
 func Definition(piCWD string) engine.Definition {
 	p := engine.DefaultRunPolicy()
 	p.RunTimeout = 8 * time.Hour
 	p.MaxLiveSessions, p.MaxTotalSessions, p.MaxTotalAttempts = 3, 22, 80
 	// The deadline, shared with closing sessions, for the run's cleanup to
-	// remove a successful run's worktree; a removal under way is not
-	// interrupted. The value awaits live data.
+	// remove the deep review's checkout and a successful run's worktree; a
+	// removal under way is not interrupted. The value awaits live data.
 	p.Runtime.CleanupTimeout = 2 * time.Minute
-	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree, have two reviewers check them, then correct the work, push one branch and open a pull request; this version stops after the pull request is opened, with no post-PR review, triage, convergence or final cleanup", Version: "1", Policy: p,
+	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree, have two reviewers check them, correct the work, push one branch and open a pull request, then deep-review the pull request at the verified head with the code-review flow; this version stops after the deep review of the opened pull request, with no triage, fixes, convergence or final cleanup", Version: "1", Policy: p,
 		Execute: func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
 			return execute(ctx, r, in, piCWD, gitSource{remote: githubRemote})
 		}}
@@ -52,9 +53,12 @@ func execute(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, 
 	if result, err = publish(ctx, r, p, hand, result); err != nil {
 		return result, err
 	}
-	// Only here, with the implementer's session confirmed closed and the
-	// HEAD still the head verified on the pull request, may the run's
-	// cleanup remove the worktree.
+	if result, err = deepReview(ctx, r, result); err != nil {
+		return result, err
+	}
+	// Only here may the run's cleanup remove the worktree: the implementer's
+	// session was confirmed closed with the HEAD still the head verified on
+	// the pull request, and the deep review confirmed its sessions closed.
 	p.worktree.remove.Store(true)
 	return result, nil
 }

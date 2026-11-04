@@ -155,9 +155,9 @@ func output[T any](t *testing.T, a a1Run, key string) T {
 // The correction Step runs on the implementer's session with both review
 // contracts as Feedback; its receipt is checked once against the worktree and
 // GitHub, the pull request is recorded and the session strictly closed.
-// Only the workflow's successful return sets the removal, so the worktree is
-// still there when it returns and the run's cleanup removes it. The run fits
-// exactly three live sessions, three sessions and six attempts.
+// Only the workflow's successful return, after the deep review
+// (TestDeepReviewSucceeds), sets the removal, so the worktree is still there
+// when it returns and the run's cleanup removes it.
 func TestPublishSucceeds(t *testing.T) {
 	for _, correction := range []string{"committed", "no_change"} {
 		t.Run(correction, func(t *testing.T) {
@@ -177,27 +177,17 @@ func TestPublishSucceeds(t *testing.T) {
 					writeCandidate(t, c, data)
 					return ""
 				},
-				policy: func(p *engine.RunPolicy) {
-					p.MaxLiveSessions, p.MaxTotalSessions, p.MaxTotalAttempts = 3, 3, 6
-				},
 				returned: func(r *engine.Run) { _, checkoutAtReturn = os.Lstat(filepath.Join(r.Dir(), worktreeDir, "checkout")) },
 			})
 			report := a.report
 			if report.Outcome != engine.Succeeded || report.ExitCode != 0 || report.Failure != nil {
 				t.Fatalf("outcome %s exit %d failure %v", report.Outcome, report.ExitCode, report.Failure)
 			}
-			if report.Final == nil || report.Final.Output != "publish" || report.Final.Step != "publish" || report.Final.Ref != report.Result.Outputs["publish"] {
-				t.Fatalf("final: %+v", report.Final)
-			}
 			if (pushed == implemented) != (correction == "no_change") {
 				t.Fatalf("pushed %s, implemented %s", pushed, implemented)
 			}
-			a.requireSessionsClosed(t, 3)
-			a.requireAttempts(t, 4, "input", "pull-request")
+			a.requireExitsConfirmed(t)
 			outputs := report.Result.Outputs
-			if keys := slices.Sorted(maps.Keys(outputs)); !slices.Equal(keys, []string{"implement", "input", "publish", "pull-request", "review-basic", "review-consistency"}) {
-				t.Fatalf("outputs %v", keys)
-			}
 			calls := a.publishCalls()
 			if len(calls) != 1 {
 				t.Fatalf("publisher dispatches %d", len(calls))
@@ -215,18 +205,25 @@ func TestPublishSucceeds(t *testing.T) {
 				c.request.Feedback == nil || c.request.Feedback.Message != publishFeedback || !reflect.DeepEqual(c.request.Feedback.Refs, reviews) {
 				t.Fatalf("publish request inputs %+v feedback %+v schema %s", c.request.Inputs, c.request.Feedback, c.request.Output.SchemaID)
 			}
-			// Equal heads need no compare read; every read is a GET.
+			// Equal heads need no compare read, neither for the receipt nor
+			// for the deep review's reads that follow it; every read is a GET.
 			const get = "api --method GET --hostname github.com -H Accept: application/vnd.github+json "
-			if calls := f.ghCalls(); !slices.Equal(calls, []string{get + "repos/owner/repo", get + "repos/owner/repo/pulls/1"}) {
+			if calls := f.ghCalls(); !slices.Equal(calls, []string{get + "repos/owner/repo", get + "repos/owner/repo/pulls/1", get + "repos/owner/repo/pulls/1",
+				get + "repos/owner/repo/issues/1/comments?per_page=100 --paginate --slurp", get + "repos/owner/repo/pulls/1/comments?per_page=100 --paginate --slurp",
+				get + "repos/owner/repo/pulls/1/reviews?per_page=100 --paginate --slurp"}) {
 				t.Fatalf("gh calls %q", calls)
 			}
 			want := pullRequestRecord{URL: pullURL(1), Number: 1, Branch: workBranch, HeadSHA: pushed, ReportedHead: pushed, CompareStatus: "identical"}
 			if got := output[pullRequestRecord](t, a, "pull-request"); got != want {
 				t.Fatalf("pull request record %+v, want %+v", got, want)
 			}
-			a.requireDecisions(t, decision{Scope: "root", Name: "implementation-recorded", Refs: []contract.Ref{outputs["implement"]}},
-				decision{Scope: "root", Name: "pre-pr-reviewed", Refs: reviews},
-				decision{Scope: "root", Name: "pull-request-verified", Refs: []contract.Ref{outputs["publish"], outputs["pull-request"]}})
+			// The deep review's Decisions follow (TestDeepReviewSucceeds).
+			first := []decision{{Scope: "root", Name: "implementation-recorded", Refs: []contract.Ref{outputs["implement"]}},
+				{Scope: "root", Name: "pre-pr-reviewed", Refs: reviews},
+				{Scope: "root", Name: "pull-request-verified", Refs: []contract.Ref{outputs["publish"], outputs["pull-request"]}}}
+			if got := a.decisions(t); len(got) < 3 || !reflect.DeepEqual(got[:3], first) {
+				t.Fatalf("decisions %+v, want %+v first", got, first)
+			}
 			// One session served the implementer and the correction; the
 			// workflow closed it once, after recording the pull request.
 			closed, finalizing, decided := a.journalIndex(t)
@@ -271,7 +268,13 @@ func TestPublishPullRequestAhead(t *testing.T) {
 	if record.HeadSHA != newer || record.ReportedHead != pushed || record.CompareStatus != "ahead" {
 		t.Fatalf("record %+v, want head %s reported %s", record, newer, pushed)
 	}
-	if calls := f.ghCalls(); len(calls) != 3 || !strings.HasSuffix(calls[2], " repos/owner/repo/compare/"+pushed+"..."+newer) {
+	// One compare for the receipt and one for the deep review that follows
+	// it; every read is a GET.
+	const get = "api --method GET --hostname github.com -H Accept: application/vnd.github+json "
+	compare := get + "repos/owner/repo/compare/" + pushed + "..." + newer
+	if calls := f.ghCalls(); !slices.Equal(calls, []string{get + "repos/owner/repo", get + "repos/owner/repo/pulls/1", compare, get + "repos/owner/repo/pulls/1", compare,
+		get + "repos/owner/repo/issues/1/comments?per_page=100 --paginate --slurp", get + "repos/owner/repo/pulls/1/comments?per_page=100 --paginate --slurp",
+		get + "repos/owner/repo/pulls/1/reviews?per_page=100 --paginate --slurp"}) {
 		t.Fatalf("gh calls %q", calls)
 	}
 }
@@ -493,7 +496,7 @@ func TestPublishRepair(t *testing.T) {
 				},
 			})
 			report := a.report
-			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "publish" {
+			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "deep-review-report" {
 				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 			}
 			calls := a.publishCalls()
@@ -512,14 +515,15 @@ func TestPublishRepair(t *testing.T) {
 				t.Fatal("repair task or inputs changed")
 			}
 			a.requireRepairKeepsWork(t, calls...)
-			// One push, one pull request, one receipt read.
+			// One push, one pull request, one receipt read before the deep
+			// review's four.
 			if f.pulls(t) != 1 || f.originTip(workBranch) != implemented {
 				t.Fatalf("pull requests %d, branch %s", f.pulls(t), f.originTip(workBranch))
 			}
-			if calls := f.ghCalls(); len(calls) != 2 {
+			if calls := f.ghCalls(); len(calls) != 6 {
 				t.Fatalf("gh calls %q", calls)
 			}
-			a.requireAttempts(t, 5, "input", "pull-request")
+			a.requireAttempts(t, 10, "input", "pull-request")
 		})
 	}
 }
@@ -833,10 +837,10 @@ func TestPublishTailFailure(t *testing.T) {
 	}
 }
 
-// One attempt less than a successful run needs (TestPublishSucceeds runs at
-// exactly six) stops the run with a run-scope LimitExceeded: before the
-// correction Step is dispatched, or after it pushed and opened the pull
-// request, when the record cannot be attached. The run is stopped, so there
+// One attempt less than the correction Step or the pull request record needs
+// stops the run with a run-scope LimitExceeded: before the correction Step is
+// dispatched, or after it pushed and opened the pull request, when the record
+// cannot be attached. The run is stopped, so there
 // is no external objects record; the worktree is kept.
 func TestPublishLimits(t *testing.T) {
 	for _, tc := range []struct {

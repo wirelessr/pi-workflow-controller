@@ -88,7 +88,7 @@ func publish(ctx context.Context, r *engine.Run, p prepared, hand handoff, revie
 	if err != nil {
 		return p.externalObjects(ctx, r, hand, outputs, reported, err)
 	}
-	return engine.Result{Outputs: outputs, Final: &engine.FinalSelection{Output: "publish"}}, nil
+	return engine.Result{Outputs: outputs}, nil
 }
 
 // publishTail checks the accepted receipt v, attaches the pull request

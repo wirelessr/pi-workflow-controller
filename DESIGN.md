@@ -556,7 +556,7 @@ Run 終態仲裁：第一個已登記的 root stop cause（取消、deadline、r
 | Attempt | 30 分鐘 | Preparing 開始，包含 session 等待、provider retry、驗證 |
 | Run | 4 小時 | RunCreated 起，包括 session 初始化；cleanup 另計 |
 | Abort grace | 5 秒 | 等 abort／abort_bash 完成，不能無限等待 |
-| Cleanup | 全 run 15 秒 | 獨立 context，各 handle 平行清理；workflow 可在 Definition 的 `Policy.Runtime.CleanupTimeout` 改值（code-change 為 2 分鐘，也是成功時移除 worktree 的期限；期限不中斷進行中的移除，所以不是耗時上限） |
+| Cleanup | 全 run 15 秒 | 獨立 context，各 handle 平行清理；workflow 可在 Definition 的 `Policy.Runtime.CleanupTimeout` 改值（code-change 為 2 分鐘，也是移除深度審閱 checkout 與成功時移除 worktree 的共同期限；期限不中斷進行中的移除，所以不是耗時上限） |
 | Health probe | 每 5 秒 | 避免重疊 probe；已有正常 response 可更新健康 |
 | 同時存活 session | 8 | 超限明確失敗，不等待可能永不釋放的 slot |
 | 每 run 總 session / attempt | 64 / 256 | 防止程式化 loop 失控 |
