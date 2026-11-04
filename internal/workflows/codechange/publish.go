@@ -10,6 +10,7 @@ import (
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/github"
 )
 
 const publishTimeout = 45 * time.Minute
@@ -223,7 +224,7 @@ func (p prepared) verifyPullRequest(ctx context.Context, r *engine.Run, last str
 	if len(mismatches) > 0 {
 		return pullRequestRecord{}, fmt.Errorf("%w: %s", errReceipt, strings.Join(mismatches, "; "))
 	}
-	ancestor, status, err := githubAncestor(ctx, r.Dir(), p.repository, v.Head, pr.Head.SHA)
+	ancestor, status, err := github.Ancestor(ctx, r.Dir(), p.repository, v.Head, pr.Head.SHA)
 	if err != nil {
 		return pullRequestRecord{}, fmt.Errorf("%w: %w", errUnverifiable, err)
 	}

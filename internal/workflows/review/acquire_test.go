@@ -74,6 +74,8 @@ type acquisitionFixture struct {
 	source    acquisitionSource
 	metadata  map[string]any
 	requests  chan string
+	// expectedHead is passed to acquire, and to run by the workflow fixture.
+	expectedHead string
 
 	gitMu      sync.Mutex
 	gitHistory []string
@@ -218,7 +220,7 @@ func (f *acquisitionFixture) saveMetadata(t *testing.T) {
 	fixtureWrite(t, filepath.Join(f.dir, "metadata.json"), data)
 }
 func (f *acquisitionFixture) acquire(ctx context.Context) (*Checkout, error) {
-	return acquire(ctx, f.root, "https://github.com/owner/repo/pull/17/", f.source)
+	return acquire(ctx, f.root, "https://github.com/owner/repo/pull/17/", f.expectedHead, f.source)
 }
 
 func TestAcquisitionSeedIsolation(t *testing.T) {
@@ -588,6 +590,102 @@ func TestAcquireRejectsIncompleteOrAmbiguousHistory(t *testing.T) {
 			}
 		})
 	}
+}
+
+// advanceFork pushes a commit after the fixture head to the fork's topic and
+// makes it the PR head metadata reports; the fixture head becomes its parent.
+func (f *acquisitionFixture) advanceFork(t *testing.T) string {
+	t.Helper()
+	fixtureWrite(t, filepath.Join(f.sourceRepo, "shared.txt"), []byte("unreviewed head\n"))
+	fixtureWrite(t, filepath.Join(f.sourceRepo, "after.txt"), []byte("after the expected head\n"))
+	fixtureGit(t, f.sourceRepo, "add", ".")
+	fixtureGit(t, f.sourceRepo, "commit", "-m", "after the expected head")
+	fixtureGit(t, f.sourceRepo, "push", f.headRepo, "topic")
+	newer := fixtureGit(t, f.sourceRepo, "rev-parse", "HEAD")
+	f.metadata["head"].(map[string]any)["sha"] = newer
+	f.saveMetadata(t)
+	return newer
+}
+
+func (f *acquisitionFixture) apiCalls(t *testing.T) string {
+	t.Helper()
+	calls, err := os.ReadFile(filepath.Join(f.dir, "calls"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return string(calls)
+}
+
+// An expected head equal to the PR head needs no compare; an ancestor of the
+// PR head pins every acquisition product to it and records the newer commits
+// as Missing.
+func TestAcquireExpectedHead(t *testing.T) {
+	const comments = "issues\ninline\nreviews\n"
+	setup := func(t *testing.T) (f *acquisitionFixture, x, y string) {
+		f = newAcquisitionFixture(t)
+		x = f.head
+		y = f.advanceFork(t)
+		fixtureWrite(t, filepath.Join(f.dir, "compare.json"), []byte(`{"status":"ahead","merge_base_commit":{"sha":"`+x+`"}}`))
+		return f, x, y
+	}
+	t.Run("equal-to-PR-head", func(t *testing.T) {
+		f, _, y := setup(t)
+		f.expectedHead = y
+		c, err := f.acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { checkError(t, c.Cleanup(context.Background()), "") })
+		if got := f.apiCalls(t); got != "metadata\n"+comments {
+			t.Fatalf("API calls = %q", got)
+		}
+		if c.HeadSHA != y || c.prHead != "" || len(c.Missing) != 0 {
+			t.Fatalf("head %s prHead %q missing %v; want head %s and nothing missing", c.HeadSHA, c.prHead, c.Missing, y)
+		}
+	})
+	t.Run("ancestor-of-PR-head", func(t *testing.T) {
+		f, x, y := setup(t)
+		metadata, err := os.ReadFile(filepath.Join(f.dir, "metadata.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.expectedHead = x
+		c, err := f.acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { checkError(t, c.Cleanup(context.Background()), "") })
+		if got, want := f.apiCalls(t), "metadata\ncompare/"+x+"..."+y+"\n"+comments; got != want {
+			t.Fatalf("API calls = %q; want %q", got, want)
+		}
+		if c.HeadSHA != x || c.prHead != y || !reflect.DeepEqual(c.Missing, []string{unreviewedHead}) || c.MergeBase != f.mergeBase || c.DiffRange != f.mergeBase+".."+x {
+			t.Fatalf("pin: head %s prHead %q missing %v range %s; want head %s prHead %s", c.HeadSHA, c.prHead, c.Missing, c.DiffRange, x, y)
+		}
+		id := sha256.Sum256([]byte(fmt.Sprintf("owner/repo\n17\n%s\n%s\n%s", f.base, x, f.mergeBase)))
+		if c.ContextID != fmt.Sprintf("%x", id) {
+			t.Fatalf("ContextID is not computed from the pinned head %s", x)
+		}
+		if got := fixtureGit(t, c.Worktree, "rev-parse", "HEAD"); got != x {
+			t.Fatalf("checkout HEAD = %s; want %s", got, x)
+		}
+		repository := "--git-dir=" + filepath.Join(f.root, "repository.git")
+		if got := fixtureGit(t, f.root, repository, "rev-parse", "refs/review/head"); got != x {
+			t.Fatalf("fetched head ref = %s; want %s", got, x)
+		}
+		// Listing stored objects never triggers a promisor fetch.
+		if objects := fixtureGit(t, f.root, repository, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)"); strings.Contains(objects, y) {
+			t.Fatalf("PR head %s fetched", y)
+		}
+		diff, _ := os.ReadFile(c.Snapshots["diff"])
+		changed, _ := os.ReadFile(c.Snapshots["changed-files"])
+		if !bytes.Contains(diff, []byte("+pinned head")) || bytes.Contains(diff, []byte("after.txt")) || bytes.Contains(diff, []byte("unreviewed head")) || bytes.Contains(changed, []byte("after.txt")) {
+			t.Fatalf("diff or changed-files not pinned to the expected head: %s / %s", diff, changed)
+		}
+		if raw, err := os.ReadFile(c.Snapshots["metadata"]); err != nil || !bytes.Equal(raw, metadata) {
+			t.Fatalf("metadata snapshot is not the raw PR head metadata: %v", err)
+		}
+		checkError(t, c.Verify(context.Background()), "")
+	})
 }
 
 func TestAcquireSubmoduleGitlinksWithoutContentOrTransport(t *testing.T) {
@@ -1288,6 +1386,7 @@ func (f *acquisitionFixture) gitOutput(ctx context.Context, cwd string, args []s
 
 // Both acquisition fixtures use this raw GitHub boundary. The default fixture
 // still serves Git HTTP requests with real git over temporary repositories.
+// A compare answers compare.json for any range and fails without it.
 func TestAcquisitionGHHelper(t *testing.T) {
 	dir := os.Getenv("PWC_ACQUIRE_FIXTURE")
 	if dir == "" {
@@ -1312,19 +1411,27 @@ func TestAcquisitionGHHelper(t *testing.T) {
 	case "repos/owner/repo/pulls/17/reviews?per_page=100":
 		key = "reviews"
 	default:
+		if !strings.HasPrefix(args[7], "repos/owner/repo/compare/") {
+			os.Exit(2)
+		}
+		key = "compare"
+	}
+	if key != "metadata" && key != "compare" && !reflect.DeepEqual(args[8:], []string{"--paginate", "--slurp"}) {
 		os.Exit(2)
 	}
-	if key != "metadata" && !reflect.DeepEqual(args[8:], []string{"--paginate", "--slurp"}) {
-		os.Exit(2)
-	}
-	if key == "metadata" && len(args) != 8 {
+	if (key == "metadata" || key == "compare") && len(args) != 8 {
 		os.Exit(2)
 	}
 	calls, err := os.OpenFile(filepath.Join(dir, "calls"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		os.Exit(2)
 	}
-	_, _ = fmt.Fprintln(calls, key)
+	// A compare is recorded with its range, so tests see which SHAs it asked.
+	record := key
+	if key == "compare" {
+		record = strings.TrimPrefix(args[7], "repos/owner/repo/")
+	}
+	_, _ = fmt.Fprintln(calls, record)
 	_ = calls.Close()
 	if _, err := os.Stat(filepath.Join(dir, "block")); err == nil && key == "issues" {
 		child := exec.Command("/bin/sleep", "60")

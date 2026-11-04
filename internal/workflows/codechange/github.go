@@ -63,35 +63,6 @@ func getPullRequest(ctx context.Context, dir, repository string, number int) (pu
 	return pr, nil
 }
 
-// githubAncestor reports whether commit is head or one of its ancestors in
-// repository on GitHub, with the compare status GitHub reported. Equal
-// commits are "identical" without a query; otherwise one compare GET decides:
-// commit is an ancestor when head is ahead of it and it is the merge base.
-func githubAncestor(ctx context.Context, dir, repository, commit, head string) (bool, string, error) {
-	if commit == head {
-		return true, "identical", nil
-	}
-	raw, err := runtime.GitHubGET(ctx, dir, "repos/"+repository+"/compare/"+commit+"..."+head, false)
-	if err != nil {
-		return false, "", fmt.Errorf("compare GET: %w", err)
-	}
-	var c struct {
-		Status    string `json:"status"`
-		MergeBase struct {
-			SHA string `json:"sha"`
-		} `json:"merge_base_commit"`
-	}
-	if json.Unmarshal(raw, &c) != nil {
-		return false, "", errors.New("compare GET: not a compare object")
-	}
-	switch c.Status {
-	case "ahead", "behind", "diverged", "identical":
-	default:
-		return false, "", fmt.Errorf("compare GET: status %q is not ahead, behind, diverged or identical", c.Status)
-	}
-	return c.Status == "ahead" && c.MergeBase.SHA == commit, c.Status, nil
-}
-
 // remoteBranch reads branch of repository on GitHub: its tip, or "" when the
 // branch does not exist.
 func remoteBranch(ctx context.Context, dir, repository, branch string) (string, error) {

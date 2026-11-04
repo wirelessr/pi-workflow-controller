@@ -89,6 +89,16 @@ Gate：各必要 case 的預期行為成立，無 race；實際執行交付 bina
 | Root、`repository.git`、`checkout` 被替換或 `checkout` 換成 symlink | 回 ownership mismatch，不刪替換內容或外部檔案；還原後可完成 cleanup |
 | Cleanup 前已取消、兩次刪除之間取消、重複呼叫、`checkout` 已不存在 | 保留 cause；再次呼叫完成剩餘 registration；成功後冪等；repository objects 與其他歷史保留 |
 
+### GitHub 讀取
+
+入口：[github_test.go](../internal/github/github_test.go)。gh 經 PATH wrapper 執行測試 binary，仍是真 subprocess 與真 `runtime.GitHubGET`。
+
+| 方法／情境 | 必須成立的 gate |
+|---|---|
+| 兩個 SHA 相等；compare 為 ahead 且 merge base 是 commit、ahead 但 merge base 不同或缺、behind、diverged、identical | 相等時不啟動 gh；其餘至多一次 compare GET，端點為 `<commit>...<head>`；只有 ahead 且 merge base 等於 commit 是祖先，並回報 GitHub 的 status |
+| status 不認得、回應不是 JSON 物件、gh 失敗、取消 | 以 `compare GET:` 開頭的錯誤；取消保留 cause 且不啟動 gh |
+| 任一 SHA 不是 40 位小寫 hex（大寫、路徑字元、兩者相等但不合格） | 以 `compare:` 開頭的錯誤在啟動 gh 前拒絕 |
+
 ### Store／JSON／schema
 
 入口：[contract_test.go](../internal/contract/contract_test.go)、[schema_test.go](../internal/contract/schema_test.go)、[json_test.go](../internal/contract/json_test.go)。全部用真 temp filesystem 與 registry。
@@ -196,6 +206,7 @@ PWC_LIVE_PI=1 go test -race -count=1 ./internal/engine \
 - Git config/hooks/external diff/textconv/submodule recursion 安全限制（含 HOME／XDG 下的全域 config 不生效）、metadata command 失敗與 deadline 的錯誤包裝及 cause、partial acquisition cancellation/Wait 及 AddCleanup 失敗責任。Stdout cap 與 checkout ownership/replacement 拒絕的機械 gate 分屬上方 Runtime 與 Git repository 節。
 - Deterministic renderer 在同一 Validation Step 執行，JSON identity/files/artifact ID、symlink/collision、完整原 statement/Refs 與 Go 逐值附錄驗收一致。異 cwd／binary 離 source 的完整 embed tree 可讀。
 - 組合單元 `review.Run`：外層在 root 佔用同名 Step/Attach key、Decision/Parallel 名、run 目錄與 cleanup 名時仍能在 Child scope 完成；外層 Run 限額恰需 5 sessions、3 live、5 attempts，任一不足為 run-scope LimitExceeded；不合格 name（含 `-skills`／`-work` 結尾）、URL 與停用的 Node TLS 依序在任何目錄、session、gh／git 呼叫前拒絕；Validation session 由單元在 report 驗收後關閉，關閉失敗不交付 final，incomplete 路徑保留 reviewer 的原分類。
+- `review.Run` 的預期 head（compare status 的判定矩陣在上方 GitHub 讀取節）：等於 PR head 時不查 compare、Missing 不變；格式錯誤（大寫、換行、`HEAD`）在 URL 之後、TLS 之前拒絕，無任何副作用；為 PR head 的祖先時恰好一次 compare，checkout HEAD、`refs/review/head`、diff、changed-files、ContextID 與三階段 Pin 都是預期 head，PR head 的 commit 不被 fetch，metadata snapshot 為 PR head 的原始 bytes，Prepare 的 required sources 含 `unreviewed-head-commits`（missing、note 逐字含兩個 SHA），`limited` report 被接受（Missing 使 complete 被拒的規則由既有 Missing 來源 cases 驗）；不是祖先時錯誤逐字列出收到的預期 head、PR head 與 compare status，compare 讀不懂時錯誤為 `expected head: compare GET:` 前綴加原訊息，兩者都是 WorkflowFailed，無 session、attempt、git 命令、work 目錄或 checkout，metadata snapshot 保留。
 - Timeout 分層：縮短外部 runtime context 的 fixture 可驗 branch failure/incomplete，但不冒稱等過產品完整 Step timer；真正 Step timer 另由 engine bundled/live gate 驗。
 - 此 workflow 的真 Pi/provider/獲授權 PR E2E 另行進行，不能以 smoke-echo 或 substitute 代替。範例目標使用 `https://github.com/owner/repo/pull/123`，執行時的真目標只記 repo 外。
 - 真 E2E 核對所有角色/read skills/resources/refs/report/cleanup、global resources 不變、未執行被審 code/tests/build/scripts 或外部 writes。這是採證方法，不是 OS sandbox／全面 syscall/network 稽核或模型推理正確率保證。

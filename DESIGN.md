@@ -29,16 +29,18 @@
 cmd/pi-workflow-controller
   ├── workflows ──> engine ──> runtime
   │       │           └─────> contract
-  │       └──> gitrepo
+  │       ├──> gitrepo
+  │       └──> github ──> runtime
   └── tui ─────────> engine 的唯讀狀態與取消入口
 
-runtime、contract 不依賴 engine；gitrepo 不依賴其他內部 package；所有核心 package 不依賴 tui。
+runtime、contract 不依賴 engine；gitrepo 不依賴其他內部 package；github 只依賴 runtime；所有核心 package 不依賴 tui。
 ```
 
 | Package | 責任 | 明確排除 |
 |---|---|---|
 | `internal/runtime` | Pi 啟動、RPC codec、request map、session 觀測、dispatch 完成歸屬、process ownership 與清理；固定 gh／git 命令執行（deadline、stdout 上限、stderr 不落地） | 業務 schema、workflow 轉移、任意執行檔的命令執行 |
 | `internal/gitrepo` | 自有 bare repository 與 worktree 的路徑保留；bare repository init、remote、pinned fetch 與可變 branch tip fetch 序列，git 經 caller 提供的 runner 執行；SameFile cleanup | Process 執行、唯讀或寫入政策、import 其他 internal package |
+| `internal/github` | 多個 workflow 共用的唯讀 GitHub REST 回應解讀（目前只有 compare 的祖先判定），命令經 `runtime.GitHubGET` | 命令執行、寫入、判定結果對 workflow 的意義 |
 | `internal/contract` | Run 目錄、attempt 檔案、schema registry、驗證與發布、digest 引用 | Pi RPC、業務真假判斷 |
 | `internal/engine` | Workflow 執行、scope、step/attempt、retry、parallel/join、journal、snapshot | 業務審查規則、終端繪製 |
 | `internal/workflows` | Registry、角色 spec、schema、Go 流程、結果驗收 | Process 與 RPC 細節 |

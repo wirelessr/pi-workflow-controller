@@ -17,13 +17,15 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"pi-workflow-controller/internal/github"
 	"pi-workflow-controller/internal/gitrepo"
 	"pi-workflow-controller/internal/runtime"
 )
 
 // Checkout is a pinned PR acquisition, not a view of a caller's local repository.
 // Missing contains unavailable source/content keys, including external gitlink
-// content. Missing content is never represented by an empty successful snapshot.
+// content and, for a review pinned to an ancestor of the PR head, the newer
+// commits. Missing content is never represented by an empty successful snapshot.
 type Checkout struct {
 	URL, Repository                                             string
 	Number                                                      int
@@ -31,10 +33,17 @@ type Checkout struct {
 	Snapshots                                                   map[string]string
 	Missing                                                     []string
 
+	// prHead is the PR head metadata reported when the review is pinned to
+	// its ancestor HeadSHA, otherwise empty.
+	prHead         string
 	repo           *gitrepo.Repo
 	snapshotHashes map[string][32]byte
 	gitOutput      func(context.Context, string, []string) ([]byte, error)
 }
+
+// unreviewedHead is the Missing key for the commits between an expected head
+// and the newer PR head it is an ancestor of.
+const unreviewedHead = "unreviewed-head-commits"
 
 var (
 	prPath     = regexp.MustCompile(`^/([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)/?$`)
@@ -67,7 +76,7 @@ type acquisitionSource struct {
 }
 
 func Acquire(ctx context.Context, root, prURL string) (*Checkout, error) {
-	return acquire(ctx, root, prURL, acquisitionSource{
+	return acquire(ctx, root, prURL, "", acquisitionSource{
 		remote: func(repository string) string { return "https://github.com/" + repository + ".git" },
 	})
 }
@@ -86,7 +95,7 @@ type prRevision struct {
 	} `json:"repo"`
 }
 
-func acquire(ctx context.Context, root, prURL string, source acquisitionSource) (result *Checkout, err error) {
+func acquire(ctx context.Context, root, prURL, expectedHead string, source acquisitionSource) (result *Checkout, err error) {
 	repository, number, err := ParsePRURL(prURL)
 	if err != nil {
 		return nil, err
@@ -139,6 +148,17 @@ func acquire(ctx context.Context, root, prURL string, source acquisitionSource) 
 	c.BaseSHA, c.HeadSHA = strings.ToLower(pr.Base.SHA), strings.ToLower(pr.Head.SHA)
 	if err = c.snapshot("metadata", "json", metadata); err != nil {
 		return nil, err
+	}
+	if expectedHead != "" && expectedHead != c.HeadSHA {
+		ancestor, status, e := github.Ancestor(ctx, root, repository, expectedHead, c.HeadSHA)
+		if e != nil {
+			return nil, fmt.Errorf("expected head: %w", e)
+		}
+		if !ancestor {
+			return nil, fmt.Errorf("expected head: got %s, which is not the PR head %s or one of its ancestors (compare status %s)", expectedHead, c.HeadSHA, status)
+		}
+		c.prHead, c.HeadSHA = c.HeadSHA, expectedHead
+		c.Missing = append(c.Missing, unreviewedHead)
 	}
 
 	if err = repo.Init(ctx, c.git); err != nil {

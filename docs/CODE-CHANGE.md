@@ -1,6 +1,6 @@
 # Code change workflow 規劃（草案）
 
-**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地；其餘單元依第 8 節的順序施工。`code-change` 只是暫用名稱。
+**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；其餘單元依第 8 節的順序施工。`code-change` 只是暫用名稱。
 
 Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，經實作、發 PR 前審閱、發 PR、PR 後深度審閱、自行 triage 修正、收斂 PR，到最後清理，交付一個已開出的 PR。這是第一個會寫本機 repository 並對外部系統產生副作用的 workflow；現有 workflows 都只讀或只寫自有 artifacts。
 
@@ -47,7 +47,7 @@ Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，�
 [Controller]  以 gh GET 核對 receipt，核對過的 head 作為後續 exact head
 [B deep review]  Controller 派 code-review 流程（Prepare、三 reviewer、Validate），針對該 head
                  輸出：validation report Ref
-[C triage+fix]   fresh：讀 report Ref，自行 triage（修或不修並留理由）、修正、comment 清理、push
+[C triage+fix]   fresh：讀 report Ref，自行 triage（對 report 的每個 confirmed finding 修或不修並留理由；其餘由 Agent 自行處理並交代）、修正、comment 清理、push；push 前整合 PR branch 上已有的 commit，不改寫或丟棄
                  輸出：處置報告 + push receipt；Controller 核對
 [D converge]     Controller 迴圈（輪數上限，初值 10；每輪在新 Child scope `round-NNN` 下）：
                  1. 等待：PR 的 checks 與 commit statuses 全部進入終態，再加有界的靜置窗口；整體等待有上限
@@ -56,6 +56,7 @@ Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，�
                  輸出：本輪報告（逐項狀態、是否宣稱已收斂、外部寫入 receipt）；Controller 核對
                  結束：Agent 宣稱已收斂且本輪沒有任何外部寫入 receipt，或輪數用盡，或某輪執行失敗
 [E final cleanup]  fresh：最後一次 comment 清理；輸出 push receipt；Controller 核對
+                 「comment 清理」指本次變更新增或修改的 source code 註解：只留非顯而易見的理由（why），移除複述程式碼在做什麼、指涉任務／review／PR、或敘述變更過程的註解。它是 Agent 的原則性工作，Controller 不判斷註解品質，只核對 push receipt
 [Controller]  最後一次快照（套用同一個有界等待），與各階段報告一併成為 final summary（見第 5 節）
 ```
 
@@ -129,7 +130,7 @@ Prompt 格式：
 | 本機 commit | A1、A3、C、D、E | commit SHA | 能，讀自有 worktree |
 | push branch（只限承載本工作的一個 branch；不推 tag、其他 branch，不改 default branch） | A3、C、D、E | 回報的 head | 部分：核對回報的 head 是 PR 當下 head 或其祖先；不核對「只推一個 branch、不推 tag 與 default branch」這些範圍限制，因為 default branch 與其他 ref 也會被其他人或自動化推送，無法機械歸因給 Agent |
 | 開 PR（只含建立時的 title、body、base、head；label、reviewer、assignee 與 comment 不在授權內；不開 draft） | A3 | URL、number、branch、head | 能，GET（身分、open、非 draft、base 為 input 記錄的 default branch、head repo 與 branch 一致、回報的 head 為 PR 當下 head 或其祖先）；label、reviewer、assignee、comment 同樣不核對（repo 自動化或 CODEOWNERS 也會加，無法歸因給 Agent） |
-| thread reply／resolve | C、D | thread ID 與動作 | 能，讀 thread 狀態與留言列表 |
+| thread reply／resolve | D（C 不授權；自己的 PR 不貼 comment，C 只處理 B 的 report；能核對 thread 的唯讀 adapter 到 C4 才有） | thread ID 與動作 | 能，讀 thread 狀態與留言列表 |
 | ticket 狀態轉移 | A3（沿 git 流程 skill） | ticket key 與目標狀態 | 不能，Controller 不新增 ticket 系統 client；記於 Agent 報告 |
 | CI rerun | D | run ID | 能讀 run 列表，但不判斷其意義 |
 | 品質掃描瀏覽器操作 | D | 無 | 只讀，不適用 |
@@ -194,7 +195,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 | 輸入 | `in.Prompt` 即 PR URL，由 `ParsePRURL` 解析 | 參數 `prURL`；`code-review` 入口傳入 `in.Prompt`，單元開頭依序檢查前綴、URL、TLS，巢狀呼叫者傳錯也在副作用前被拒 |
 | 目錄與資源名稱 | 固定 `r.Dir()/review`、`review-work`、skills 目錄 `review-skills`、cleanup 名稱 `review-checkout`；重複會 Mkdir 失敗或被拒為重名資源 | 以呼叫者提供的前綴命名，使其能與外層資源共存；前綴以保守字元集在任何副作用前檢查，不得逃出 run 目錄，也不得以 `-skills`、`-work` 結尾（避免推導名稱在兩次呼叫之間互撞） |
 | Scope 名稱 | Step key `prepare`、`validate`、Parallel `reviewers`、Decision `context-accepted`／`report-accepted` 在 `r.Root()`；`review` 在各 reviewer 的 branch scope。Decision、Child、Parallel、Retry 共用一組名稱；Step 與 Attach 共用另一組 | 單元放在呼叫者傳入的專用 scope 下（`code-review` 傳 `r.Root()`，scope path 不變），避免與外層兩組名稱衝突 |
-| 預期 head | acquire 每次自行取得當下 PR head，checkout、diff、Pin、ContextID 與每階段 `Verify` 都綁在這個值上 | 預期 head X 的參數與核對（相等或為 PR 當下 head Y 的祖先，新增一次唯讀 compare 查詢；X 不等於 Y 時 checkout、diff、Pin 與 ContextID 釘 X，metadata snapshot 保留 Y，兩者不同成為 review 的明列限制）屬 code-change 才需要的政策分支，在 C3 加入，R6 不預造；C3 會連帶修改單元簽名與 `code-review` 的一行呼叫 |
+| 預期 head | acquire 每次自行取得當下 PR head，checkout、diff、Pin、ContextID 與每階段 `Verify` 都綁在這個值上 | 已於 C3a 加入：`review.Run` 的 `expectedHead` 參數（空值即原行為，`code-review` 傳空值）；compare 經 `internal/github` 的 `Ancestor`；接線、拒絕條件與限制機制見 [WORKFLOW-REUSE](WORKFLOW-REUSE.md) R6 |
 | 限額 | Definition 內 Run policy：3 live、5 sessions、5 attempts、120 分鐘 | 組合後由外層 workflow 的 policy 承擔，須重新核算 |
 | 前置檢查 | `NODE_TLS_REJECT_UNAUTHORIZED` 檢查在 `execute` 開頭，任何副作用之前，錯誤字串寫死 `code-review blocked` | 抽成 `runtime.CheckNodeTLS`（中性檢查函式，不自動套用到每次 Pi 啟動），review 單元在原位置呼叫（`ParsePRURL` 之後、任何副作用之前）；code-change 在 A1 之前呼叫同一函式，不得等到 B 才檢查（那時 PR 已開出）。這樣 code-change 不 import review 的 helper。錯誤訊息改為不綁 workflow 名稱，屬明列的字串變更 |
 | 結果 | 回傳 `Outputs`、`Final`，並可同時回傳 branch error | 單元需把「report 與 branch error 並存」的語義明確交給呼叫者 |
@@ -228,8 +229,10 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 | C1b | A1、receipt 核對（含只經 `WorktreeGitDir()` 讀 worktree HEAD）、gap 出口、repair 派送、registry／CLI 註冊（含 `Definitions` 的 `piCWD` 接線，A1 的 `Role.CWD` 明設為同一個值，並於任何副作用前確認它是目錄） | C1a、R9 |
 | C2a | A2：Controller 建立釘選在 A1 head 的唯讀 snapshot（全新的自有 bare repository，以 alternates 借用 A1 repository 的 objects，再 detached checkout；不在 Agent 改過 config 的 repository 上 checkout，以免執行其 filter），兩位 fresh 審閱者平行（CollectAll）讀 snapshot，共用一份 findings schema；兩位都 strict close 之後移除 snapshot；終點仍是 `Final: implement`，不 push | C1b |
 | C2b | A3 沿用 A1 的 handle（Feedback 帶兩份 findings Refs、`RepairKeepsWork`）：更正、push、開 PR、ticket 轉移；PR receipt 核對與失敗時的外部物件快照；關閉 handle 後重讀 HEAD 並確認等於已 push 的 head，才在最終成功返回處設定 worktree 移除旗標；code-change 的 `Policy.Runtime.CleanupTimeout` 設為 2 分鐘（待 live 修正）。須明定：「上次已核對 head」只在核對通過時更新；A3 失敗時（外部寫入已發生）Controller 以唯讀快照交代已存在的 branch／PR | C2a |
-| C3 | 接 B，並加上 C 的 triage 與修正。含 B 的預期 head 參數與核對（第 7 節，連帶修改 `review.Run` 簽名與 `code-review` 的呼叫）；呼叫 `review.Run` 時外層不得有 live session，且須把單元回傳的 Outputs 以自己的名稱重映射再併入；Final 為 nil 時結束 Run | C2b、R6 |
-| C4 | D 的 Controller 迴圈、PR 狀態 adapter、每輪私有 skill、E、品質掃描 skipped 語義 | C3、R7、R8 |
+| C3a | compare 祖先判定抽到 `internal/github` 並遷移 code-change；`review.Run` 的預期 head 參數與核對（第 7 節），連帶修改 `code-review` 的呼叫 | C2b、R6 |
+| C3b | 接 B：以 `pull-request` 記錄的 URL 與 `reported_head`（來自 committed receipt，不用 GitHub 回報的 `head_sha`）呼叫 `review.Run`；外層不得有 live session；單元回傳的 Outputs 以自己的名稱重映射再併入；Final 為 nil 時結束 Run；B 的 `incomplete` 是執行失敗，`limited` 交給 C | C3a |
+| C3c | C：fresh Agent 讀 B 的 report 並 triage、修正、comment 清理、push；push receipt 以與 A3 相同的核對機械驗證；移除旗標移到整個流程的最終成功返回處 | C3b |
+| C4 | D 的 Controller 迴圈、PR 狀態 adapter、每輪私有 skill、E、品質掃描 skipped 語義 | C3c、R7、R8 |
 | C5 | 實際整合驗收（需一次性測試 repo 與憑證，留在 repo 外；ticket 轉移見第 11 節） | C4、M-model |
 
 共用單元（R6 至 R9）只交付政策無關的核心與原 consumer 的遷移；新 consumer 才需要的政策分支（可寫 worktree 的 fetch、GraphQL 查詢、寫入型 Step 的 receipt 核對）在第一個使用它的 C 單元落地並於該處驗收，不在共用單元預造。

@@ -29,6 +29,9 @@ type workflowScenario struct {
 	findings                                     string
 	prepareError, reviewerError, validationError string
 	stop                                         string
+
+	// unreviewed marks a review pinned to an ancestor of the PR head.
+	unreviewed bool
 }
 
 type workflowControl struct {
@@ -214,7 +217,7 @@ func newWorkflowFixtureWith(t *testing.T, scenario workflowScenario, source *acq
 		if opts.execute != nil {
 			return opts.execute(ctx, r, in, source.source)
 		}
-		result, err := run(ctx, r, r.Root(), "review", in.Prompt, source.source)
+		result, err := run(ctx, r, r.Root(), "review", in.Prompt, source.expectedHead, source.source)
 		if scenario.prepareError == "source" {
 			if _, readErr := engine.ReadContract(ctx, r, result.Outputs["prepare"]); readErr != nil {
 				return result, fmt.Errorf("rejected prepare lost committed authorization: %w", readErr)
@@ -500,7 +503,7 @@ func (f *workflowFixture) validate(event workflowControl) Validated {
 	}
 	p := workflowReadData[Prepared](f.t, event.request.Inputs[0])
 	v := Validated{Pin: event.task.Pin, Context: event.request.Inputs[0], Reviewers: event.task.Expected, Findings: []Finding{}, Dispositions: []Disposition{}, Requirements: f.assessments(p), Completeness: "complete", Conclusion: "no_confirmed_findings", Limitations: []string{}, ReportFile: "report"}
-	if f.scenario.missing || f.scenario.empty || f.scenario.unknown {
+	if f.scenario.missing || f.scenario.empty || f.scenario.unknown || f.scenario.unreviewed {
 		v.Completeness = "limited"
 		v.Conclusion = "undetermined"
 		v.Limitations = []string{"Source or requirement coverage remains uncertain"}
@@ -1170,7 +1173,7 @@ func nestedReview(o *outerOccupied) func(context.Context, *engine.Run, engine.In
 		if err != nil {
 			return engine.Result{}, err
 		}
-		result, err := run(ctx, r, scope, "deep-review", in.Prompt, source)
+		result, err := run(ctx, r, scope, "deep-review", in.Prompt, "", source)
 		o.afterUnit = r.Snapshot()
 		return result, err
 	}
@@ -1290,25 +1293,116 @@ func TestRunChargesOuterRunLimits(t *testing.T) {
 	}
 }
 
+// An expected head X that is an ancestor of the PR head Y pins every stage to
+// X, and Prepare receives the newer commits as a missing required source.
+func TestRunExpectedHeadAncestor(t *testing.T) {
+	source := newAcquisitionFixture(t)
+	x := source.head
+	y := source.advanceFork(t)
+	fixtureWrite(t, filepath.Join(source.dir, "compare.json"), []byte(`{"status":"ahead","merge_base_commit":{"sha":"`+x+`"}}`))
+	source.expectedHead = x
+	f := newWorkflowFixtureWith(t, workflowScenario{unreviewed: true}, source, workflowOptions{})
+	event := f.next("prompt")
+	if event.task.Pin.HeadSHA != x || !reflect.DeepEqual(event.task.Missing, []string{unreviewedHead}) {
+		t.Fatalf("prepare pin %+v missing %v; want head %s and %s", event.task.Pin, event.task.Missing, x, unreviewedHead)
+	}
+	want := Source{ID: unreviewedHead, Kind: "unavailable-content", Status: "missing", Note: "Controller did not review the commits after " + x + " up to the PR head " + y + "; preserve as an explicit review limitation"}
+	var required []Source
+	for _, s := range event.task.RequiredSources {
+		if s.ID == unreviewedHead {
+			required = append(required, s)
+		}
+	}
+	if !reflect.DeepEqual(required, []Source{want}) {
+		t.Fatalf("required source %+v; want %+v", required, want)
+	}
+	f.prepare(event)
+	for _, event := range f.reviewerBarrier() {
+		if event.task.Pin.HeadSHA != x {
+			t.Fatalf("%s pinned to %s; want %s", event.task.Stage, event.task.Pin.HeadSHA, x)
+		}
+		f.review(event)
+	}
+	event = f.next("prompt")
+	if event.task.Pin.HeadSHA != x {
+		t.Fatalf("validation pinned to %s; want %s", event.task.Pin.HeadSHA, x)
+	}
+	f.validate(event)
+	report := f.finish()
+	if report.Outcome != engine.Succeeded || report.ExitCode != 0 {
+		t.Fatalf("limited report: %s %v", report.Outcome, report.Failure)
+	}
+	if got := workflowReadData[Validated](t, report.Result.Outputs["report"]); got.Completeness != "limited" || got.Pin.HeadSHA != x {
+		t.Fatalf("report: %+v", got)
+	}
+}
+
+// An expected head that is not an ancestor of the PR head, or a failed
+// compare, fails acquisition with WorkflowFailed before any Git command,
+// session, attempt or work directory; the metadata snapshot stays.
+func TestRunExpectedHeadRejected(t *testing.T) {
+	x, y, other := externalGitHead, strings.Repeat("e", 40), strings.Repeat("f", 40)
+	for _, tc := range []struct {
+		name, compare, want string
+	}{
+		{"not-an-ancestor", `{"status":"diverged","merge_base_commit":{"sha":"` + other + `"}}`, "expected head: got " + x + ", which is not the PR head " + y + " or one of its ancestors (compare status diverged)"},
+		{"compare-failed", `{`, "expected head: compare GET: not a compare object"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := newExternalGitFixture(t)
+			source.metadata["head"].(map[string]any)["sha"] = y
+			source.saveMetadata(t)
+			fixtureWrite(t, filepath.Join(source.dir, "compare.json"), []byte(tc.compare))
+			source.expectedHead = x
+			f := newWorkflowFixtureWith(t, workflowScenario{}, source, workflowOptions{})
+			report := f.report()
+			failure := report.Snapshot.Failure
+			if report.Outcome != engine.Failed || report.ExitCode != 1 || report.Failure == nil || report.Failure.Error() != tc.want || failure == nil || failure.Code != engine.WorkflowFailed || failure.Origin != engine.OriginDefinition {
+				t.Fatalf("expected head rejection: outcome=%s failure=%v snapshot=%+v; want %q", report.Outcome, report.Failure, failure, tc.want)
+			}
+			if len(report.Snapshot.Sessions) != 0 || len(report.Snapshot.Attempts) != 0 || len(f.hellos) != 0 || report.Final != nil || len(report.Result.Outputs) != 0 || len(source.gitCalls(t)) != 0 {
+				t.Fatalf("rejection dispatched work or ran git: %+v", report.Snapshot)
+			}
+			if calls := source.apiCalls(t); calls != "metadata\ncompare/"+x+"..."+y+"\n" {
+				t.Fatalf("API calls: %q", calls)
+			}
+			root := filepath.Join(f.run.Dir(), "review")
+			for _, path := range []string{filepath.Join(root, "checkout"), filepath.Join(f.run.Dir(), "review-work")} {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("%s retained: %v", path, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(root, "snapshots", "metadata.json")); err != nil {
+				t.Fatalf("metadata history lost: %v", err)
+			}
+		})
+	}
+}
+
 // One run tries every rejection in turn; none may leave a run-directory entry,
 // session, attempt or external call behind.
 func TestRunRejectsBeforeSideEffects(t *testing.T) {
 	const prURL = "https://github.com/owner/repo/pull/17/"
+	head := strings.Repeat("a", 40)
 	// An empty want is the TLS preflight rejection.
 	cases := []struct {
-		name, prURL string
-		tlsDisabled bool
-		want        string
+		name, prURL, expectedHead string
+		tlsDisabled               bool
+		want                      string
 	}{
-		{"", prURL, false, `invalid review name ""`},
-		{"../x", prURL, false, `invalid review name "../x"`},
-		{strings.Repeat("a", 64), prURL, false, fmt.Sprintf("invalid review name %q", strings.Repeat("a", 64))},
-		{strings.Repeat("a", 63), prURL, true, ""},
-		{"Bad", "https://example.com/x", false, `invalid review name "Bad"`},
-		{"a-work", prURL, false, `invalid review name "a-work"`},
-		{"a-skills", prURL, false, `invalid review name "a-skills"`},
-		{"deep-review", "https://example.com/x", false, "invalid GitHub PR URL"},
-		{"deep-review", prURL, true, ""},
+		{"", prURL, "", false, `invalid review name ""`},
+		{"../x", prURL, "", false, `invalid review name "../x"`},
+		{strings.Repeat("a", 64), prURL, "", false, fmt.Sprintf("invalid review name %q", strings.Repeat("a", 64))},
+		{strings.Repeat("a", 63), prURL, "", true, ""},
+		{"Bad", "https://example.com/x", "x", false, `invalid review name "Bad"`},
+		{"a-work", prURL, "", false, `invalid review name "a-work"`},
+		{"a-skills", prURL, "", false, `invalid review name "a-skills"`},
+		{"deep-review", "https://example.com/x", "x", false, "invalid GitHub PR URL"},
+		{"deep-review", prURL, strings.ToUpper(head), true, fmt.Sprintf("invalid expected head %q", strings.ToUpper(head))},
+		{"deep-review", prURL, head + "\n", false, fmt.Sprintf("invalid expected head %q", head+"\n")},
+		{"deep-review", prURL, "HEAD", false, `invalid expected head "HEAD"`},
+		{"deep-review", prURL, head, true, ""},
+		{"deep-review", prURL, "", true, ""},
 	}
 	var failures []string
 	f := newWorkflowFixtureWith(t, workflowScenario{}, newExternalGitFixture(t), workflowOptions{name: "deep-review", scope: "root", execute: func(ctx context.Context, r *engine.Run, _ engine.Input, source acquisitionSource) (engine.Result, error) {
@@ -1322,10 +1416,10 @@ func TestRunRejectsBeforeSideEffects(t *testing.T) {
 				want = err.Error()
 			}
 			before := workflowDirNames(t, r.Dir())
-			_, err := run(ctx, r, r.Root(), tc.name, tc.prURL, source)
+			_, err := run(ctx, r, r.Root(), tc.name, tc.prURL, tc.expectedHead, source)
 			after := workflowDirNames(t, r.Dir())
 			if err == nil || err.Error() != want || !reflect.DeepEqual(before, after) {
-				failures = append(failures, fmt.Sprintf("name=%q url=%q: err=%v want %q, entries %v -> %v", tc.name, tc.prURL, err, want, before, after))
+				failures = append(failures, fmt.Sprintf("name=%q url=%q head=%q: err=%v want %q, entries %v -> %v", tc.name, tc.prURL, tc.expectedHead, err, want, before, after))
 			}
 		}
 		return engine.Result{}, nil

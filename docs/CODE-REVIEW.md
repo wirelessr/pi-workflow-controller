@@ -4,9 +4,11 @@
 
 ## 流程及權責
 
-1. Prepare：Controller 解析 URL、以 gh GET 保存 PR metadata，取得固定 base/head commit，建立 private bare repository 與 detached checkout，計算唯一 merge-base 及 `merge-base..head` diff，分頁保存 issue/inline/review comments。Prepare Pi 整理 linked Jira/design、來源快照及共同 context。
+1. Prepare：Controller 解析 URL、以 gh GET 保存 PR metadata，取得固定 base/head commit（巢狀呼叫者可傳入預期 head，見下），建立 private bare repository 與 detached checkout，計算唯一 merge-base 及 `merge-base..head` diff，分頁保存 issue/inline/review comments。Prepare Pi 整理 linked Jira/design、來源快照及共同 context。
 2. Parallel：Prepare Pi 確認退出後，依序建立 Code、Scale/Failure、Simplicity 三個獨立 sessions，再以既有 CollectAll 平行派工／join。三者全部必要。Code 逐一對照 requirements、constraints、design decisions，附 head code evidence。
 3. Validate：新的 Pi 接收同一 Prepare Ref、已接受的 reviewer Refs 與 Controller 產生的三角色結果名單，核實／去重／排除 findings，逐條重查需求，落地繁中 Markdown report。
+
+`code-review` 本身不傳預期 head；巢狀呼叫者傳入預期 head 時的核對、釘選與拒絕，以 `review.Run` 的 doc comment 為準，接線與差異見 [WORKFLOW-REUSE](WORKFLOW-REUSE.md) R6。
 
 每階段只有一次 Step，沒有內容修正循環、自動重審或替代模型。Pi 自身 provider retry 仍由原 runtime 管理。OCR、OCR timeout/fallback、第四產品 reviewer、多輪辯論均不包含；不能宣稱 local-correctness 或 OCR 覆蓋。開發品質審閱另行執行，不屬產品流程。
 
@@ -43,7 +45,7 @@ Schema 唯一來源是 `internal/workflows/review/schemas/`，embed 後由 Go re
 ## 執行結果與 PR 結論
 
 - `complete`：三角色成功，無來源／需求／reviewer／validation 的未釐清限制，所有基準都有判定。
-- `limited`：三角色都成功，但資料不足、來源缺失／衝突、需求未確認或其他明列限制。產出合法 limited report 可以是 workflow 執行成功，不能宣稱 PR 全面通過。
+- `limited`：三角色都成功，但資料不足、來源缺失／衝突、需求未確認或其他明列限制。審閱釘在 PR head 的祖先（上述預期 head）時，Controller 加上 missing 來源 `unreviewed-head-commits`，report 因此不能是 complete；note 與 report 是否寫出未審閱的 commit 範圍，靠 Prepare 照抄 required source，沒有 validator 核對。產出合法 limited report 可以是 workflow 執行成功，不能宣稱 PR 全面通過。
 - `incomplete`：必要 reviewer failed/missing。CollectAll 保留 siblings，run 仍活動時嘗試 Validation 產出不完整 report，最後仍傳回原始 branch failure，不能 exit 0。取消、run-fatal、run deadline 不再開 Validation。
 - PR `conclusion`：有 confirmed findings 為 `findings`；完整且無 confirmed findings 為 `no_confirmed_findings`；其餘為 `undetermined`。有缺陷的完整 report 本身不是 workflow failure。
 - Metadata/pinned code 取得失敗、schema/identity/semantic acceptance 失敗、partial startup 等是 execution failure，保留已取得的 history/Refs。未產出合法 Validation 時，不偽造 final report。
