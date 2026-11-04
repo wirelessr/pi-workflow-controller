@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pi-workflow-controller.local/schemas/code-change/external-objects.v1.json",
-  "description": "Controller record, after the run failed from the correction Step on, of what exists as read-only reads showed it once the implementer's session was closed: the session, the worktree and its branch on GitHub with that branch's pull requests, and the receipt the last correction contract reported with what GitHub shows for it. Nothing was judged; no pull request was closed, no branch deleted and nothing undone",
+  "description": "Controller record, after the run failed once a Step that writes to GitHub was dispatched, through its closing, of what exists as read-only reads showed it once that Step's session was closed: the session, the worktree and its branch on GitHub with that branch's pull requests, and the receipt of that Step's last contract with what GitHub shows for it. Which Step it was is step. Nothing was judged; no pull request was closed, no branch deleted and nothing undone",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "failure",
+    "step",
     "session",
     "worktree",
     "remote_branch",
@@ -82,6 +83,13 @@
       "type": "string",
       "minLength": 1
     },
+    "step": {
+      "description": "The Step that writes to GitHub after whose dispatch the run failed. publish: the correction Step that opened the pull request; its contract reports the branch, head and pull request. fix: the fix Step after the deep review; its contract reports only the head, and the branch and pull request are the pull request record's",
+      "enum": [
+        "publish",
+        "fix"
+      ]
+    },
     "session": {
       "type": "object",
       "additionalProperties": false,
@@ -90,7 +98,7 @@
       ],
       "properties": {
         "exit_confirmed": {
-          "description": "Whether the implementer's session was confirmed closed before the reads; when false the Agent may have written after them",
+          "description": "Whether the session of step was confirmed closed before the reads; when false the Agent may have written after them",
           "type": "boolean"
         },
         "detail": {
@@ -156,7 +164,7 @@
       }
     },
     "reported": {
-      "description": "The receipt of the last correction contract that passed the schema, accepted or rejected, which is the publish output, and what one read each shows for its branch and pull request number in the target repository on GitHub. A branch pushed under another name than the worktree branch is covered only here",
+      "description": "The receipt of the last contract of step that passed the schema, accepted or rejected, which is the output named after step, with its branch and pull request as step says where they come from, and what one read each shows for that branch and pull request number in the target repository on GitHub. A branch pushed under another name than the worktree branch is covered only here",
       "type": "object",
       "additionalProperties": false,
       "required": [

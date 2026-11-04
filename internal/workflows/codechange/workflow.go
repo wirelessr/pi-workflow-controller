@@ -22,7 +22,7 @@ func Definition(piCWD string) engine.Definition {
 	// remove the deep review's checkout and a successful run's worktree; a
 	// removal under way is not interrupted. The value awaits live data.
 	p.Runtime.CleanupTimeout = 2 * time.Minute
-	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree, have two reviewers check them, correct the work, push one branch and open a pull request, then deep-review the pull request at the verified head with the code-review flow; this version stops after the deep review of the opened pull request, with no triage, fixes, convergence or final cleanup", Version: "1", Policy: p,
+	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree, have two reviewers check them, correct the work, push one branch and open a pull request, deep-review the pull request at the verified head with the code-review flow, then have a fresh fixer triage the deep review's findings, fix them and push to the same branch; this version stops after triage and fix of the deep-review report, with no convergence or final cleanup", Version: "1", Policy: p,
 		Execute: func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
 			return execute(ctx, r, in, piCWD, gitSource{remote: githubRemote})
 		}}
@@ -56,9 +56,12 @@ func execute(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, 
 	if result, err = deepReview(ctx, r, result); err != nil {
 		return result, err
 	}
-	// Only here may the run's cleanup remove the worktree: the implementer's
-	// session was confirmed closed with the HEAD still the head verified on
-	// the pull request, and the deep review confirmed its sessions closed.
+	if result, err = fix(ctx, r, p, piCWD, result); err != nil {
+		return result, err
+	}
+	// Only here may the run's cleanup remove the worktree: every session was
+	// confirmed closed, the fixer's last with the HEAD still the head
+	// verified on the pull request.
 	p.worktree.remove.Store(true)
 	return result, nil
 }

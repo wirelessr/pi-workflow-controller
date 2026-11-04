@@ -592,7 +592,7 @@ func TestDefinitionPolicy(t *testing.T) {
 		t.Fatalf("definition: %s %s %+v", def.Name, def.Version, def.Policy)
 	}
 	// The description says where this version stops.
-	if !strings.Contains(def.Description, "this version stops after the deep review of the opened pull request") {
+	if !strings.Contains(def.Description, "this version stops after triage and fix of the deep-review report") {
 		t.Fatalf("description: %s", def.Description)
 	}
 	if _, err := engine.NewRegistry([]engine.Definition{def}); err != nil {

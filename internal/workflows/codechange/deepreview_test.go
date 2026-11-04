@@ -49,17 +49,49 @@ func acceptDeepReview(t *testing.T, c agentCall) string {
 		data, files := prepareData(t, c)
 		writeCandidateFiles(t, c, data, files)
 	case review.ReviewerSchema:
-		requirements := []any{}
-		if c.review.Stage == "code" {
-			requirements = []any{deepAssessment}
-		}
-		writeCandidateFiles(t, c, map[string]any{"pin": c.review.Pin, "role": c.review.Stage, "context": c.request.Inputs[0], "coverage": []string{"The pinned changed files"},
-			"limitations": []string{}, "findings": []any{}, "requirements": requirements}, nil)
+		writeCandidateFiles(t, c, reviewerData(c, nil), nil)
 	default:
-		data, report := validationData(t, c)
+		data, report := validationData(t, c, nil)
 		writeCandidateFiles(t, c, data, map[string][]byte{"report": report})
 	}
 	return ""
+}
+
+// findDeepReview is acceptDeepReview with the code reviewer finding ids at
+// the pinned head's tracked.txt and Validate confirming each of them.
+func findDeepReview(ids ...string) func(t *testing.T, c agentCall) string {
+	return func(t *testing.T, c agentCall) string {
+		t.Helper()
+		var found []any
+		at := map[string]any{"path": "tracked.txt", "line": 1, "end_line": 1, "detail": "Read at the pinned head"}
+		for _, id := range ids {
+			found = append(found, map[string]any{"id": id, "severity": "medium", "title": "A finding", "location": at, "evidence": []any{at}, "impact": "Why it matters"})
+		}
+		switch {
+		case c.request.Output.SchemaID == review.ReviewerSchema && c.review.Stage == "code":
+			writeCandidateFiles(t, c, reviewerData(c, found), nil)
+		case c.request.Output.SchemaID == review.ValidationSchema:
+			data, report := validationData(t, c, found)
+			writeCandidateFiles(t, c, data, map[string][]byte{"report": report})
+		default:
+			return acceptDeepReview(t, c)
+		}
+		return ""
+	}
+}
+
+// reviewerData is a deep reviewer's contract with findings; the code
+// reviewer also assesses the requirement.
+func reviewerData(c agentCall, findings []any) map[string]any {
+	requirements := []any{}
+	if c.review.Stage == "code" {
+		requirements = []any{deepAssessment}
+	}
+	if findings == nil {
+		findings = []any{}
+	}
+	return map[string]any{"pin": c.review.Pin, "role": c.review.Stage, "context": c.request.Inputs[0], "coverage": []string{"The pinned changed files"},
+		"limitations": []string{}, "findings": findings, "requirements": requirements}
 }
 
 func prepareData(t *testing.T, c agentCall) (map[string]any, map[string][]byte) {
@@ -85,7 +117,9 @@ func prepareData(t *testing.T, c agentCall) (map[string]any, map[string][]byte) 
 	return map[string]any{"pin": c.review.Pin, "sources": c.review.RequiredSources, "requirements": []any{deepRequirement}, "open_questions": []string{}, "context_file": "context"}, files
 }
 
-func validationData(t *testing.T, c agentCall) (map[string]any, []byte) {
+// validationData is the Validate contract and report confirming each of
+// found, the reviewers' findings.
+func validationData(t *testing.T, c agentCall, found []any) (map[string]any, []byte) {
 	t.Helper()
 	var prepared struct {
 		Data json.RawMessage `json:"data"`
@@ -122,7 +156,17 @@ func validationData(t *testing.T, c agentCall) (map[string]any, []byte) {
 	if completeness != "complete" {
 		conclusion, limitations = "undetermined", []string{"Part of the pull request was not reviewed"}
 	}
-	data := map[string]any{"pin": c.review.Pin, "context": c.request.Inputs[0], "reviewers": c.review.Expected, "findings": []any{}, "dispositions": []any{},
+	dispositions := []any{}
+	for _, f := range found {
+		id := f.(map[string]any)["id"]
+		dispositions = append(dispositions, map[string]any{"finding_id": id, "action": "confirmed", "target_id": id, "reason": "Confirmed at the pinned head"})
+	}
+	if len(found) == 0 {
+		found = []any{}
+	} else {
+		conclusion = "findings"
+	}
+	data := map[string]any{"pin": c.review.Pin, "context": c.request.Inputs[0], "reviewers": c.review.Expected, "findings": found, "dispositions": dispositions,
 		"requirements": []any{deepAssessment}, "completeness": completeness, "conclusion": conclusion, "limitations": limitations, "report_file": "report"}
 	body, err := json.Marshal(map[string]any{"prepared": prepared.Data, "validation": data})
 	if err != nil {
@@ -186,7 +230,8 @@ var deepReviewOutputs = []string{"deep-review-code", "deep-review-prepare", "dee
 // After the pull request is verified and every session this workflow opened
 // is closed, the code-review flow runs in its own scope root/deep-review, on
 // the recorded URL at the committed reported head. Its outputs join this
-// workflow's with the deep-review- prefix, and its report is the Final.
+// workflow's with the deep-review- prefix for the fix Step that follows
+// (TestFixSucceeds).
 func TestDeepReviewSucceeds(t *testing.T) {
 	f := newFixture(t)
 	var implemented string
@@ -196,8 +241,14 @@ func TestDeepReviewSucceeds(t *testing.T) {
 		t.Fatalf("outcome %s exit %d failure %v", report.Outcome, report.ExitCode, report.Failure)
 	}
 	outputs := report.Result.Outputs
-	if keys := slices.Sorted(maps.Keys(outputs)); !slices.Equal(keys, slices.Sorted(slices.Values(append([]string{"implement", "input", "publish", "pull-request", "review-basic", "review-consistency"}, deepReviewOutputs...)))) {
-		t.Fatalf("outputs %v", keys)
+	var added []string
+	for key := range outputs {
+		if strings.HasPrefix(key, "deep-review") {
+			added = append(added, key)
+		}
+	}
+	if slices.Sort(added); !slices.Equal(added, deepReviewOutputs) {
+		t.Fatalf("outputs %v", slices.Sorted(maps.Keys(outputs)))
 	}
 	// Each review output under its new name is that stage's accepted contract.
 	calls := a.deepReviewCalls()
@@ -214,25 +265,27 @@ func TestDeepReviewSucceeds(t *testing.T) {
 			t.Fatalf("%s attempt scope %s output %+v, want %s %+v", c.review.Stage, attempt.Scope, attempt.Output, key, outputs[key])
 		}
 	}
-	if report.Result.Final == nil || *report.Result.Final != (engine.FinalSelection{Output: "deep-review-report", FileID: "report"}) || report.Final == nil || report.Final.Ref != outputs["deep-review-report"] {
-		t.Fatalf("final selection %+v delivery %+v", report.Result.Final, report.Final)
-	}
 	record := output[pullRequestRecord](t, a, "pull-request")
 	if got := output[reportData](t, a, "deep-review-report"); got.Pin.HeadSHA != implemented || record.ReportedHead != implemented {
 		t.Fatalf("report %+v record %+v, want pinned at %s", got, record, implemented)
 	}
-	// No session this workflow opened, the implementer's or a pre-PR
-	// reviewer's, was still open when the deep review accepted its context.
+	// No session this workflow opened before it, the implementer's or a
+	// pre-PR reviewer's, was still open when the deep review accepted its
+	// context.
 	closed, _, decided := a.journalIndex(t)
 	accepted, ok := decided["context-accepted"]
 	for _, c := range a.calls {
-		if at := closed[a.attempt(c).HandleID]; !deepReviewCall(c) && (!ok || len(at) == 0 || at[0] > accepted) {
+		if at := closed[a.attempt(c).HandleID]; !deepReviewCall(c) && c.request.Output.SchemaID != FixSchema && (!ok || len(at) == 0 || at[0] > accepted) {
 			t.Fatalf("%s session closed at %v, deep review context accepted at %d", c.request.Output.SchemaID, at, accepted)
 		}
 	}
-	// The deep review adds no Decision of this workflow's own.
+	// The deep review adds no Decision of this workflow's own: until its
+	// report is accepted, root has only the three before it.
 	var root []decision
 	for _, d := range a.decisions(t) {
+		if d.Scope != "root" && d.Name == "report-accepted" {
+			break
+		}
 		if d.Scope == "root" {
 			root = append(root, d)
 		}
@@ -248,7 +301,8 @@ func TestDeepReviewSucceeds(t *testing.T) {
 // A pull request head newer than the reported head, pushed by someone else
 // before or after the receipt check, does not move the deep review: it is
 // pinned to the reported head after one compare, the newer commits are a
-// missing source and the report is limited, which is still a success.
+// missing source and the report is limited, which the fix Step takes as it
+// is.
 func TestDeepReviewPinnedToReportedHead(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -276,8 +330,8 @@ func TestDeepReviewPinnedToReportedHead(t *testing.T) {
 			}
 			a := f.run(t, as)
 			report := a.report
-			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "deep-review-report" {
-				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
+			if report.Outcome != engine.Succeeded {
+				t.Fatalf("outcome %s failure %v", report.Outcome, report.Failure)
 			}
 			record := output[pullRequestRecord](t, a, "pull-request")
 			recorded := map[bool]string{false: newer, true: implemented}[tc.afterCheck]
@@ -292,7 +346,7 @@ func TestDeepReviewPinnedToReportedHead(t *testing.T) {
 			if calls := f.ghCalls(); !slices.ContainsFunc(calls, func(c string) bool { return strings.HasSuffix(c, " repos/owner/repo/compare/"+implemented+"..."+newer) }) {
 				t.Fatalf("gh calls %q, want the deep review's compare", calls)
 			}
-			a.requireSessionsClosed(t, 8)
+			a.requireExitsConfirmed(t)
 		})
 	}
 }
@@ -420,11 +474,11 @@ func TestDeepReviewCancelled(t *testing.T) {
 	}
 }
 
-// One session or attempt less than the whole run needs (TestPrePRReviewSucceeds
-// runs at exactly three live sessions, eight sessions and eleven attempts)
-// stops the run with a run-scope LimitExceeded and no Final at the deep
-// review's validation session or Step, after its other four stages were
-// dispatched. The pull request and worktree stay.
+// One session or attempt less than the run needs through the deep review,
+// eight sessions and eleven attempts, stops the run with a run-scope
+// LimitExceeded and no Final at the deep review's validation session or
+// Step, after its other four stages were dispatched. The pull request and
+// worktree stay.
 func TestDeepReviewLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name               string

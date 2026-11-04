@@ -155,8 +155,8 @@ func output[T any](t *testing.T, a a1Run, key string) T {
 // The correction Step runs on the implementer's session with both review
 // contracts as Feedback; its receipt is checked once against the worktree and
 // GitHub, the pull request is recorded and the session strictly closed.
-// Only the workflow's successful return, after the deep review
-// (TestDeepReviewSucceeds), sets the removal, so the worktree is still there
+// Only the workflow's successful return, after the fix Step
+// (TestFixSucceeds), sets the removal, so the worktree is still there
 // when it returns and the run's cleanup removes it.
 func TestPublishSucceeds(t *testing.T) {
 	for _, correction := range []string{"committed", "no_change"} {
@@ -208,9 +208,10 @@ func TestPublishSucceeds(t *testing.T) {
 			// Equal heads need no compare read, neither for the receipt nor
 			// for the deep review's reads that follow it; every read is a GET.
 			const get = "api --method GET --hostname github.com -H Accept: application/vnd.github+json "
-			if calls := f.ghCalls(); !slices.Equal(calls, []string{get + "repos/owner/repo", get + "repos/owner/repo/pulls/1", get + "repos/owner/repo/pulls/1",
+			reads := []string{get + "repos/owner/repo", get + "repos/owner/repo/pulls/1", get + "repos/owner/repo/pulls/1",
 				get + "repos/owner/repo/issues/1/comments?per_page=100 --paginate --slurp", get + "repos/owner/repo/pulls/1/comments?per_page=100 --paginate --slurp",
-				get + "repos/owner/repo/pulls/1/reviews?per_page=100 --paginate --slurp"}) {
+				get + "repos/owner/repo/pulls/1/reviews?per_page=100 --paginate --slurp"}
+			if calls := f.ghCalls(); len(calls) < len(reads) || !slices.Equal(calls[:len(reads)], reads) {
 				t.Fatalf("gh calls %q", calls)
 			}
 			want := pullRequestRecord{URL: pullURL(1), Number: 1, Branch: workBranch, HeadSHA: pushed, ReportedHead: pushed, CompareStatus: "identical"}
@@ -272,9 +273,10 @@ func TestPublishPullRequestAhead(t *testing.T) {
 	// it; every read is a GET.
 	const get = "api --method GET --hostname github.com -H Accept: application/vnd.github+json "
 	compare := get + "repos/owner/repo/compare/" + pushed + "..." + newer
-	if calls := f.ghCalls(); !slices.Equal(calls, []string{get + "repos/owner/repo", get + "repos/owner/repo/pulls/1", compare, get + "repos/owner/repo/pulls/1", compare,
+	reads := []string{get + "repos/owner/repo", get + "repos/owner/repo/pulls/1", compare, get + "repos/owner/repo/pulls/1", compare,
 		get + "repos/owner/repo/issues/1/comments?per_page=100 --paginate --slurp", get + "repos/owner/repo/pulls/1/comments?per_page=100 --paginate --slurp",
-		get + "repos/owner/repo/pulls/1/reviews?per_page=100 --paginate --slurp"}) {
+		get + "repos/owner/repo/pulls/1/reviews?per_page=100 --paginate --slurp"}
+	if calls := f.ghCalls(); len(calls) < len(reads) || !slices.Equal(calls[:len(reads)], reads) {
 		t.Fatalf("gh calls %q", calls)
 	}
 }
@@ -430,7 +432,7 @@ func TestPublishReceiptRejected(t *testing.T) {
 			// The worktree branch and the reported one are the same here.
 			branch, tip := workBranch, f.originTip(workBranch)
 			pr := pullObservation{Number: 1, HTMLURL: pullURL(1), State: "open", Draft: new(bool), HeadRef: workBranch, HeadSHA: tip}
-			wantRecord := externalObjectsRecord{Failure: report.Failure.Error(), Session: sessionObserved{ExitConfirmed: true}, Worktree: worktreeObserved{Status: "read", Head: s.head, Branch: &branch},
+			wantRecord := externalObjectsRecord{Failure: report.Failure.Error(), Step: "publish", Session: sessionObserved{ExitConfirmed: true}, Worktree: worktreeObserved{Status: "read", Head: s.head, Branch: &branch},
 				RemoteBranch: branchObserved{Status: "present", SHA: tip}, PullRequests: pullsObserved{Status: "listed", Items: []pullObservation{pr}},
 				Reported: &reportedObserved{Branch: workBranch, Head: s.implemented, PullRequest: reportedPull{URL: pullURL(1), Number: 1},
 					RemoteBranch: branchObserved{Status: "present", SHA: tip}, ObservedPull: pullObserved{Status: "read", Item: &pr}}}
@@ -449,11 +451,14 @@ type receiptState struct {
 	implemented, head string
 }
 
-// patchPull publishes without a change while GitHub shows the pull request
-// with patch applied.
+// patchPull publishes, or fixes, without a change while GitHub shows the
+// pull request with patch applied.
 func patchPull(patch string) func(t *testing.T, f *fixture, c agentCall, s receiptState) map[string]any {
 	return func(t *testing.T, f *fixture, c agentCall, s receiptState) map[string]any {
 		f.write(filepath.Join(f.dir, "pr-patch.json"), patch)
+		if c.request.Output.SchemaID == FixSchema {
+			return f.fixWork(t, c, "no_change")
+		}
 		return f.publishWork(t, c, "no_change")
 	}
 }
@@ -496,8 +501,8 @@ func TestPublishRepair(t *testing.T) {
 				},
 			})
 			report := a.report
-			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "deep-review-report" {
-				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
+			if report.Outcome != engine.Succeeded {
+				t.Fatalf("outcome %s failure %v", report.Outcome, report.Failure)
 			}
 			calls := a.publishCalls()
 			if len(calls) != 2 {
@@ -515,15 +520,16 @@ func TestPublishRepair(t *testing.T) {
 				t.Fatal("repair task or inputs changed")
 			}
 			a.requireRepairKeepsWork(t, calls...)
-			// One push, one pull request, one receipt read before the deep
-			// review's four.
+			// One push, one pull request, and one receipt read after the repo
+			// GET, before the deep review reads the pull request.
 			if f.pulls(t) != 1 || f.originTip(workBranch) != implemented {
 				t.Fatalf("pull requests %d, branch %s", f.pulls(t), f.originTip(workBranch))
 			}
-			if calls := f.ghCalls(); len(calls) != 6 {
+			const get = "api --method GET --hostname github.com -H Accept: application/vnd.github+json "
+			if calls := f.ghCalls(); len(calls) < 4 || !slices.Equal(calls[:4], []string{get + "repos/owner/repo", get + "repos/owner/repo/pulls/1", get + "repos/owner/repo/pulls/1",
+				get + "repos/owner/repo/issues/1/comments?per_page=100 --paginate --slurp"}) {
 				t.Fatalf("gh calls %q", calls)
 			}
-			a.requireAttempts(t, 10, "input", "pull-request")
 		})
 	}
 }
@@ -665,7 +671,7 @@ func TestPublishFailureRecordsExternalObjects(t *testing.T) {
 			}
 			record := output[externalObjectsRecord](t, a, "external-objects")
 			want := tc.want(f, implemented)
-			want.Failure, want.Session = report.Failure.Error(), sessionObserved{ExitConfirmed: true}
+			want.Failure, want.Step, want.Session = report.Failure.Error(), "publish", sessionObserved{ExitConfirmed: true}
 			// The reported contract is the last publish attempt's.
 			calls := a.publishCalls()
 			if ref, ok := report.Result.Outputs["publish"]; ok != (want.Reported != nil) || ok && ref != *a.attempt(calls[len(calls)-1]).Output {

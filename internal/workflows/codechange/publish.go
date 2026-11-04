@@ -42,6 +42,22 @@ type reportedPull struct {
 	Number int    `json:"number"`
 }
 
+// receipt is what the Controller checks of a push Step's accepted contract:
+// the reported change and head, and the branch and pull request they must be
+// on. builtOnLast also requires a committed head to have the verified head
+// as an ancestor, for a Step that must not rewrite the history already
+// pushed and reviewed.
+type receipt struct {
+	change, head, branch string
+	pull                 reportedPull
+	builtOnLast          bool
+}
+
+// receipt is the correction Step's receipt, all of it reported by the Agent.
+func (v published) receipt() receipt {
+	return receipt{change: v.Correction, head: v.Head, branch: v.Branch, pull: v.PullRequest}
+}
+
 // pullRequestRecord is the verified pull request's identity as GitHub showed
 // it and the heads downstream needs; head_sha may be newer than the reported
 // head.
@@ -77,16 +93,17 @@ func publish(ctx context.Context, r *engine.Run, p prepared, hand handoff, revie
 		func(v published) error { return checkDispositions(v, findingKeys) })
 	// The last contract that passed the schema, even a rejected one, is the
 	// receipt the external objects record shows.
-	var reported *published
+	var reported *receipt
 	if out.Output != (contract.Ref{}) {
 		outputs["publish"] = out.Output
-		reported = &v
+		rc := v.receipt()
+		reported = &rc
 	}
 	if err == nil {
 		err = p.publishTail(ctx, r, hand, out, v, outputs)
 	}
 	if err != nil {
-		return p.externalObjects(ctx, r, hand, outputs, reported, err)
+		return p.externalObjects(ctx, r, hand, "publish", outputs, reported, err)
 	}
 	return engine.Result{Outputs: outputs}, nil
 }
@@ -96,7 +113,7 @@ func publish(ctx context.Context, r *engine.Run, p prepared, hand handoff, revie
 // session and requires the worktree HEAD read after that close to be the
 // pushed head.
 func (p prepared) publishTail(ctx context.Context, r *engine.Run, hand handoff, out engine.StepResult, v published, outputs map[string]contract.Ref) error {
-	record, err := p.verifyPullRequest(ctx, r, hand.head, v)
+	record, err := p.verifyPullRequest(ctx, r, hand.head, v.receipt())
 	if err != nil {
 		return err
 	}
@@ -108,7 +125,14 @@ func (p prepared) publishTail(ctx context.Context, r *engine.Run, hand handoff, 
 	if err := r.Root().Decision(ctx, "pull-request-verified", "The reported head is the worktree HEAD and the pull request GitHub shows is open, not a draft, from the reported branch to the default branch, at that head or a descendant", []contract.Ref{out.Output, ref}); err != nil {
 		return err
 	}
-	if err := closeStrictly(ctx, r, hand.session, out.Execution.SessionID, implementRole, "implementer"); err != nil {
+	return p.closeAtHead(ctx, r, hand.session, out.Execution.SessionID, implementRole, "implementer", v.Head)
+}
+
+// closeAtHead strictly closes h, the session of who, and requires the
+// worktree HEAD read after that close to be head, the pushed head the
+// receipt check verified.
+func (p prepared) closeAtHead(ctx context.Context, r *engine.Run, h *engine.SessionHandle, sessionID, phase, who, head string) error {
+	if err := closeStrictly(ctx, r, h, sessionID, phase, who); err != nil {
 		return err
 	}
 	// With the session confirmed closed, its process no longer moves the
@@ -118,8 +142,8 @@ func (p prepared) publishTail(ctx context.Context, r *engine.Run, hand handoff, 
 	if err != nil {
 		return err
 	}
-	if current != v.Head {
-		return fmt.Errorf("%w: the worktree HEAD is %s after the implementer session closed; want the pushed head %s", errReceipt, current, v.Head)
+	if current != head {
+		return fmt.Errorf("%w: the worktree HEAD is %s after the %s session closed; want the pushed head %s", errReceipt, current, who, head)
 	}
 	return nil
 }
@@ -140,74 +164,93 @@ func reviewFindings(ctx context.Context, r *engine.Run, reviews []contract.Ref) 
 	return keys, nil
 }
 
-// checkDispositions is the acceptance a repair can fix: exactly one
-// disposition for each finding of both review contracts, keyed by review role
-// and ID, and none for anything else. What a disposition says is not judged.
+// checkDispositions is the correction Step's coverage check, keyed by
+// review role and ID.
 func checkDispositions(v published, findingKeys []disposition) error {
-	want := map[disposition]bool{}
-	for _, k := range findingKeys {
-		want[k] = true
+	return checkCoverage(v.Dispositions, findingKeys, func(d disposition) string { return fmt.Sprintf("review %q id %q", d.Review, d.ID) },
+		"is not a finding of that review; want only findings of the review contracts in request.feedback.refs")
+}
+
+// checkCoverage is the acceptance a repair can fix: exactly one of got for
+// each key of want and none for anything else. name is a key as a
+// diagnostic shows it and unknown says why a key outside want is rejected.
+// What a disposition says is not judged.
+func checkCoverage[K comparable](got, want []K, name func(K) string, unknown string) error {
+	wanted := map[K]bool{}
+	for _, k := range want {
+		wanted[k] = true
 	}
 	var errs []error
-	seen := map[disposition]int{}
-	for i, d := range v.Dispositions {
+	seen := map[K]int{}
+	for i, d := range got {
 		switch j, ok := seen[d]; {
-		case !want[d]:
-			errs = append(errs, fmt.Errorf("dispositions[%d]: got review %q id %q, which is not a finding of that review; want only findings of the review contracts in request.feedback.refs", i, d.Review, d.ID))
+		case !wanted[d]:
+			errs = append(errs, fmt.Errorf("dispositions[%d]: got %s, which %s", i, name(d), unknown))
 		case ok:
-			errs = append(errs, fmt.Errorf("dispositions[%d]: got review %q id %q, which dispositions[%d] already covers; want exactly one disposition per finding", i, d.Review, d.ID, j))
+			errs = append(errs, fmt.Errorf("dispositions[%d]: got %s, which dispositions[%d] already covers; want exactly one disposition per finding", i, name(d), j))
 		default:
 			seen[d] = i
 		}
 	}
-	for _, k := range findingKeys {
+	for _, k := range want {
 		if _, ok := seen[k]; !ok {
-			errs = append(errs, fmt.Errorf("dispositions: got none for review %q id %q; want exactly one disposition per finding", k.Review, k.ID))
+			errs = append(errs, fmt.Errorf("dispositions: got none for %s; want exactly one disposition per finding", name(k)))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// verifyPullRequest checks the accepted receipt v once, local reads first:
+// verifyPullRequest checks the accepted receipt rc once, local reads first:
 // head is the worktree HEAD, read through the registration; a committed
-// correction made head a commit that is neither last, the verified head, nor
-// one of its ancestors, and no change left it at last, which the pull request
+// change made head a commit that is neither last, the verified head, nor
+// one of its ancestors, and with builtOnLast has last as an ancestor; no
+// change left it at last, which the pull request
 // check below still requires to be the pull request's head or one of its
 // ancestors. Then GitHub reads:
-// the pull request exists in the target repository under the reported URL
+// the pull request exists in the target repository under the receipt's URL
 // and number; it is open, not merged and not a draft; its base is the
-// default branch the input recorded; its head is the reported branch of the
+// default branch the input recorded; its head is the receipt's branch of the
 // target repository; and head is the pull request's head or one of its
 // ancestors. A mismatch wraps errReceipt and a failed or unreadable GitHub
 // read errUnverifiable; neither is repaired or retried.
-func (p prepared) verifyPullRequest(ctx context.Context, r *engine.Run, last string, v published) (pullRequestRecord, error) {
+func (p prepared) verifyPullRequest(ctx context.Context, r *engine.Run, last string, rc receipt) (pullRequestRecord, error) {
 	w := p.worktree
 	current, err := w.head(ctx)
 	if err != nil {
 		return pullRequestRecord{}, err
 	}
-	if v.Head != current {
-		return pullRequestRecord{}, fmt.Errorf("%w: head: got %s; want the worktree HEAD %s", errReceipt, v.Head, current)
+	if rc.head != current {
+		return pullRequestRecord{}, fmt.Errorf("%w: head: got %s; want the worktree HEAD %s", errReceipt, rc.head, current)
 	}
-	// The schema admits only committed and no_change.
-	if v.Correction == "committed" {
-		fresh, err := w.isNew(ctx, last, v.Head)
+	// The schemas admit only committed and no_change.
+	if rc.change == "committed" {
+		fresh, err := w.isNew(ctx, last, rc.head)
 		if err != nil {
 			return pullRequestRecord{}, err
 		}
 		if !fresh {
-			return pullRequestRecord{}, fmt.Errorf("%w: head: got %s with correction committed, which is the verified head %s or one of its ancestors; want a new commit", errReceipt, v.Head, last)
+			return pullRequestRecord{}, fmt.Errorf("%w: head: got %s with correction committed, which is the verified head %s or one of its ancestors; want a new commit", errReceipt, rc.head, last)
 		}
-	} else if v.Head != last {
-		return pullRequestRecord{}, fmt.Errorf("%w: head: got %s with correction no_change; want the verified head %s", errReceipt, v.Head, last)
+		if rc.builtOnLast {
+			// The same count reversed: commits of last that head lacks.
+			rewritten, err := w.isNew(ctx, rc.head, last)
+			if err != nil {
+				return pullRequestRecord{}, err
+			}
+			if rewritten {
+				return pullRequestRecord{}, fmt.Errorf("%w: head: got %s with correction committed, which does not have the verified head %s as an ancestor; want a commit built on it", errReceipt, rc.head, last)
+			}
+		}
+	} else if rc.head != last {
+		return pullRequestRecord{}, fmt.Errorf("%w: head: got %s with correction no_change; want the verified head %s", errReceipt, rc.head, last)
 	}
-	pr, err := getPullRequest(ctx, r.Dir(), p.repository, v.PullRequest.Number)
+	pr, err := getPullRequest(ctx, r.Dir(), p.repository, rc.pull.Number)
 	if err != nil {
 		return pullRequestRecord{}, fmt.Errorf("%w: %w", errUnverifiable, err)
 	}
 	var mismatches []string
-	if pr.HTMLURL != v.PullRequest.URL || pr.Number != v.PullRequest.Number {
-		mismatches = append(mismatches, fmt.Sprintf("pull_request: got %s number %d; GitHub shows %s number %d", v.PullRequest.URL, v.PullRequest.Number, pr.HTMLURL, pr.Number))
+	if pr.HTMLURL != rc.pull.URL || pr.Number != rc.pull.Number {
+		mismatches = append(mismatches, fmt.Sprintf("pull_request: got %s number %d; GitHub shows %s number %d", rc.pull.URL, rc.pull.Number, pr.HTMLURL, pr.Number))
 	}
 	if !strings.EqualFold(pr.Base.repository(), p.repository) {
 		mismatches = append(mismatches, fmt.Sprintf("pull_request: the base repository is %q; want %s", pr.Base.repository(), p.repository))
@@ -218,27 +261,28 @@ func (p prepared) verifyPullRequest(ctx context.Context, r *engine.Run, last str
 	if pr.Base.Ref != p.defaultBranch {
 		mismatches = append(mismatches, fmt.Sprintf("pull_request: base %q; want the default branch %q", pr.Base.Ref, p.defaultBranch))
 	}
-	if !strings.EqualFold(pr.Head.repository(), p.repository) || pr.Head.Ref != v.Branch {
-		mismatches = append(mismatches, fmt.Sprintf("branch: got %q; the pull request head is %q in %q, want %q in %s", v.Branch, pr.Head.Ref, pr.Head.repository(), v.Branch, p.repository))
+	if !strings.EqualFold(pr.Head.repository(), p.repository) || pr.Head.Ref != rc.branch {
+		mismatches = append(mismatches, fmt.Sprintf("branch: got %q; the pull request head is %q in %q, want %q in %s", rc.branch, pr.Head.Ref, pr.Head.repository(), rc.branch, p.repository))
 	}
 	if len(mismatches) > 0 {
 		return pullRequestRecord{}, fmt.Errorf("%w: %s", errReceipt, strings.Join(mismatches, "; "))
 	}
-	ancestor, status, err := github.Ancestor(ctx, r.Dir(), p.repository, v.Head, pr.Head.SHA)
+	ancestor, status, err := github.Ancestor(ctx, r.Dir(), p.repository, rc.head, pr.Head.SHA)
 	if err != nil {
 		return pullRequestRecord{}, fmt.Errorf("%w: %w", errUnverifiable, err)
 	}
 	if !ancestor {
-		return pullRequestRecord{}, fmt.Errorf("%w: head: got %s, which is not the pull request head %s or one of its ancestors (compare status %s)", errReceipt, v.Head, pr.Head.SHA, status)
+		return pullRequestRecord{}, fmt.Errorf("%w: head: got %s, which is not the pull request head %s or one of its ancestors (compare status %s)", errReceipt, rc.head, pr.Head.SHA, status)
 	}
-	return pullRequestRecord{URL: pr.HTMLURL, Number: pr.Number, Branch: pr.Head.Ref, HeadSHA: pr.Head.SHA, ReportedHead: v.Head, CompareStatus: status}, nil
+	return pullRequestRecord{URL: pr.HTMLURL, Number: pr.Number, Branch: pr.Head.Ref, HeadSHA: pr.Head.SHA, ReportedHead: rc.head, CompareStatus: status}, nil
 }
 
-// externalObjectsRecord is what exists after a failure from the correction
-// Step on, as the Controller observed it with reads only. It judges and
-// undoes nothing.
+// externalObjectsRecord is what exists after a failure from the dispatch of
+// a Step that writes to GitHub through its closing, as the Controller
+// observed it with reads only. It judges and undoes nothing.
 type externalObjectsRecord struct {
 	Failure      string            `json:"failure"`
+	Step         string            `json:"step"`
 	Session      sessionObserved   `json:"session"`
 	Worktree     worktreeObserved  `json:"worktree"`
 	RemoteBranch branchObserved    `json:"remote_branch"`
@@ -246,7 +290,7 @@ type externalObjectsRecord struct {
 	Reported     *reportedObserved `json:"reported,omitempty"`
 }
 
-// reportedObserved is the receipt of the last correction contract that
+// reportedObserved is the receipt of the failed Step's last contract that
 // passed the schema and what GitHub shows for its branch and pull request.
 // A branch pushed under another name than the worktree's is seen only here.
 type reportedObserved struct {
@@ -300,20 +344,21 @@ func observation(pr pullRequest) pullObservation {
 	return pullObservation{Number: pr.Number, HTMLURL: pr.HTMLURL, State: pr.State, Draft: pr.Draft, HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA}
 }
 
-// externalObjects records, after cause failed the run from the correction
-// Step on, what exists: whether the implementer's session exit is confirmed,
-// the worktree HEAD and branch read through the registration, that branch
-// and its pull requests on GitHub, and reported, the last contract that
-// passed the schema if any, with its branch and pull request on GitHub. The
-// record is the Final and cause is returned unchanged; a failed read is
-// recorded as unknown and does not change cause. While the run is
-// cancelled, past its deadline or stopped by a fatal error it can do none of
-// this and returns cause alone.
-func (p prepared) externalObjects(ctx context.Context, r *engine.Run, hand handoff, outputs map[string]contract.Ref, reported *published, cause error) (engine.Result, error) {
+// externalObjects records, after cause failed the run from the dispatch of
+// step, a Step that writes to GitHub, through its closing, what exists: whether the exit of that Step's
+// session, hand's, is confirmed, the worktree HEAD and branch read through
+// the registration, that branch and its pull requests on GitHub, and
+// reported, the receipt of the Step's last contract that passed the schema
+// if any, with its branch and pull request on GitHub. The record is the
+// Final and cause is returned unchanged; a failed read is recorded as
+// unknown and does not change cause. While the run is cancelled, past its
+// deadline or stopped by a fatal error it can do none of this and returns
+// cause alone.
+func (p prepared) externalObjects(ctx context.Context, r *engine.Run, hand handoff, step string, outputs map[string]contract.Ref, reported *receipt, cause error) (engine.Result, error) {
 	if ctx.Err() != nil {
 		return engine.Result{Outputs: outputs}, cause
 	}
-	record := externalObjectsRecord{Failure: cause.Error()}
+	record := externalObjectsRecord{Failure: cause.Error(), Step: step}
 	// The session is closed first, so the Agent no longer writes while the
 	// Controller looks.
 	closed, err := r.CloseSessionReport(ctx, hand.session)
@@ -349,8 +394,8 @@ func (p prepared) externalObjects(ctx context.Context, r *engine.Run, hand hando
 		}
 	}
 	if reported != nil {
-		record.Reported = &reportedObserved{Branch: reported.Branch, Head: reported.Head, PullRequest: reported.PullRequest, RemoteBranch: p.observeBranch(ctx, r, reported.Branch)}
-		if pr, err := getPullRequest(ctx, r.Dir(), p.repository, reported.PullRequest.Number); err != nil {
+		record.Reported = &reportedObserved{Branch: reported.branch, Head: reported.head, PullRequest: reported.pull, RemoteBranch: p.observeBranch(ctx, r, reported.branch)}
+		if pr, err := getPullRequest(ctx, r.Dir(), p.repository, reported.pull.Number); err != nil {
 			record.Reported.ObservedPull = pullObserved{Status: "unknown", Detail: err.Error()}
 		} else {
 			item := observation(pr)

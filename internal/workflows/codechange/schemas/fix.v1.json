@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/code-change/fix.v1.json",
+  "description": "The fixer's triage of the deep review report and its fixes: a disposition for every finding of the report, notes on the rest, the change and the pushed head",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "dispositions",
+    "notes",
+    "correction",
+    "head"
+  ],
+  "properties": {
+    "dispositions": {
+      "description": "Exactly one item for each finding in the findings of the deep review report in request.inputs, identified by its id; empty when it has no findings",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "action",
+          "reason"
+        ],
+        "properties": {
+          "id": {
+            "description": "The finding's id in the report",
+            "type": "string",
+            "minLength": 1
+          },
+          "action": {
+            "description": "fixed: changed in a commit of this Step. not_fixed: left as it is",
+            "enum": [
+              "fixed",
+              "not_fixed"
+            ]
+          },
+          "reason": {
+            "description": "Why the finding was fixed this way or left as it is",
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "notes": {
+      "description": "What was done with the report's other items and why, and what remains unconfirmed; empty when there is nothing to note",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "correction": {
+      "description": "Where this Step left the worktree HEAD. committed: at a new commit after the pull request record's reported_head. no_change: still at that reported_head",
+      "enum": [
+        "committed",
+        "no_change"
+      ]
+    },
+    "head": {
+      "description": "The worktree HEAD at the end of this Step, which, when committed, is the commit pushed to the pull request record's branch",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  }
+}

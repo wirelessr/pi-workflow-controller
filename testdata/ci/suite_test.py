@@ -3,6 +3,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -43,6 +44,29 @@ class SuiteTest(unittest.TestCase):
         for suffix in ('', '/child'):
             with self.subTest(overlap_suffix=suffix), self.assertRaises(ValueError):
                 suite.owner(groups + [copy.deepcopy(base)], base['package'], base['tops'][0] + suffix)
+
+    def test_partition_families(self):
+        package, base = next(iter(suite.FAMILIES)), 'base-internal-workflows-codechange'
+        expected = {'TestFixSucceeds': base + '-fix', 'TestFixLater': base + '-fix',
+                    'TestPublishSucceeds': base + '-publish', 'TestPrePRReviewSucceeds': base + '-review',
+                    'TestPrePRReviewerFailure': base + '-review', 'TestDeepReviewLimits': base + '-review',
+                    'TestImplementReady': base, 'TestCheckReview': base, 'TestFi': base,
+                    'TestBrandNewFamily': base, 'TestReviewFix': base}
+        tops = {package: sorted(expected), 'other/pkg': ['TestFixOther']}
+        groups = suite.partition(tops)
+        self.assertEqual(groups, suite.partition({p: list(reversed(n)) for p, n in reversed(tops.items())}))
+        self.assertEqual(len({g['id'] for g in groups}), len(groups))
+        self.assertEqual(suite.owner(groups, 'other/pkg', 'TestFixOther'), 'base-other-pkg')
+        for name, identity in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual([g['id'] for g in groups if name in g['tops']], [identity])
+                self.assertEqual([g['id'] for g in groups if g['package'] == package and
+                                  re.fullmatch(g['run'], name)], [identity])
+                for leaf in (name, name + '/child'):
+                    self.assertEqual(suite.owner(groups, package, leaf), identity)
+        for family, prefixes in suite.FAMILIES[package]:
+            with self.subTest(empty_family=family), self.assertRaises(ValueError):
+                suite.partition({package: [n for n in expected if not n.startswith(prefixes)]})
 
     def log(self, names, package='p', count=1):
         events = [{'Action': 'start', 'Package': package}]

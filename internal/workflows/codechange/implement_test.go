@@ -115,6 +115,8 @@ type agents struct {
 	publish func(t *testing.T, c agentCall) string
 	// deepReview answers every deep review stage; nil is acceptDeepReview.
 	deepReview func(t *testing.T, c agentCall) string
+	// fix answers the fix Step; nil fixes nothing.
+	fix func(t *testing.T, c agentCall) string
 	// release reports whether the deferred prompts are settled after c was
 	// answered; nil settles them after any answer that is not "defer".
 	release func(t *testing.T, r *engine.Run, c agentCall) bool
@@ -128,8 +130,9 @@ type agents struct {
 	close func(ctx context.Context, role string, s runtime.Session) (runtime.CleanupReport, error)
 }
 
-// run executes the workflow with only its GitHub git remote replaced, over
-// the real engine, Store, runtime and Pi RPC, with as acting as the Agent.
+// run executes the workflow with only its GitHub git remote and the OS file
+// sync replaced, over the real engine, Store, runtime and Pi RPC, with as
+// acting as the Agent.
 func (f *fixture) run(t *testing.T, as agents) a1Run {
 	t.Helper()
 	bridge := filepath.Join(f.dir, "bridge")
@@ -186,9 +189,12 @@ func (f *fixture) run(t *testing.T, as agents) a1Run {
 	}
 	rt := &recordingRuntime{Runtime: pi, close: as.close}
 	registry := schemaRegistry(t)
-	// The fixture deadline cancels the run through the cleanup above.
+	// The fixture deadline cancels the run through the cleanup above. File
+	// syncs succeed without reaching the disk: these tests check no
+	// durability, which the engine and Store tests cover with the real sync.
 	r, err = engine.New(context.Background(), def, engine.Input{Prompt: prompt, LaunchCWD: f.launch},
-		engine.Options{BaseDir: filepath.Join(f.dir, "base"), Schemas: registry, Runtime: rt, PiVersion: "0.84.3", PiDefaultCWD: defaultCWD})
+		engine.Options{BaseDir: filepath.Join(f.dir, "base"), Schemas: registry, Runtime: rt, PiVersion: "0.84.3", PiDefaultCWD: defaultCWD,
+			SyncFile: func(*os.File) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,6 +248,11 @@ func (f *fixture) run(t *testing.T, as agents) a1Run {
 					agent = as.publish
 					if agent == nil {
 						agent = f.acceptPublish
+					}
+				case c.request.Output.SchemaID == FixSchema:
+					agent = as.fix
+					if agent == nil {
+						agent = f.acceptFix
 					}
 				default:
 					agent = as.review
@@ -528,8 +539,10 @@ func TestImplementReady(t *testing.T) {
 		}
 	}
 	// The implement receipt's HEAD and history, the HEAD after the review,
-	// the correction receipt's HEAD and history and the HEAD after its close.
-	if !reflect.DeepEqual(reads, []string{"rev-parse", "rev-list", "rev-parse", "rev-parse", "rev-list", "rev-parse"}) || !reflect.DeepEqual(snapshot, []string{"init", "worktree"}) {
+	// the correction receipt's HEAD and history, the HEAD after its close,
+	// and for the fix Step, which commits nothing, the HEAD before it, its
+	// receipt's HEAD and the HEAD after its close.
+	if !reflect.DeepEqual(reads, []string{"rev-parse", "rev-list", "rev-parse", "rev-parse", "rev-list", "rev-parse", "rev-parse", "rev-parse", "rev-parse"}) || !reflect.DeepEqual(snapshot, []string{"init", "worktree"}) {
 		t.Fatalf("registration reads %v, snapshot git %v", reads, snapshot)
 	}
 }
@@ -718,12 +731,18 @@ func TestImplementRepair(t *testing.T) {
 				return ""
 			}})
 			report := a.report
-			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "deep-review-report" || report.Result.Outputs["implement"] != *a.attempt(a.calls[1]).Output {
-				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
+			if report.Outcome != engine.Succeeded || report.Result.Outputs["implement"] != *a.attempt(a.calls[1]).Output {
+				t.Fatalf("outcome %s failure %v", report.Outcome, report.Failure)
 			}
-			// Two implementer attempts, one per reviewer, the correction and
-			// the deep review's five.
-			a.requireAttempts(t, 10, "input", "pull-request")
+			implementer := 0
+			for _, c := range a.calls {
+				if c.request.Output.SchemaID == ImplementSchema {
+					implementer++
+				}
+			}
+			if implementer != 2 {
+				t.Fatalf("implementer attempts %d, want 2", implementer)
+			}
 			if got := f.gitIn(f.origin, "rev-list", "--count", f.head+".."+workBranch); got != "1" {
 				t.Fatalf("commits on base: %s, want the single commit of the first attempt", got)
 			}

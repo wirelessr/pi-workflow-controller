@@ -100,11 +100,9 @@ func otherReviewer(role string) string {
 
 // Both reviewers run in parallel, each in a fresh session in PWC_PI_CWD,
 // reading a Controller-made snapshot of the verified head with their own git,
-// within exactly the limits the whole run needs: three live sessions, since
-// the implementer's stays open for the correction, and the eight sessions and
-// eleven attempts the deep review brings the run to (TestDeepReviewLimits runs
-// one less of each). The workflow closes both strictly and removes the
-// snapshot before its Decision.
+// within three live sessions, since the implementer's stays open for the
+// correction (TestPrePRReviewLimits runs one less). The workflow closes both
+// strictly and removes the snapshot before its Decision.
 func TestPrePRReviewSucceeds(t *testing.T) {
 	f := newFixture(t)
 	var head string
@@ -133,7 +131,7 @@ func TestPrePRReviewSucceeds(t *testing.T) {
 			return ""
 		},
 		policy: func(p *engine.RunPolicy) {
-			p.MaxLiveSessions, p.MaxTotalSessions, p.MaxTotalAttempts = 3, 8, 11
+			p.MaxLiveSessions = 3
 		},
 		returned: func(r *engine.Run) { _, snapshotAtReturn = os.Lstat(filepath.Join(r.Dir(), snapshotDir, "checkout")) },
 	})
@@ -265,7 +263,7 @@ func TestPrePRReviewSnapshotPinned(t *testing.T) {
 				if report.Outcome != engine.Succeeded {
 					t.Fatalf("outcome %s: %v", report.Outcome, report.Failure)
 				}
-				a.requireSessionsClosed(t, 8)
+				a.requireExitsConfirmed(t)
 				return
 			}
 			a.requireSessionsClosed(t, 3)
@@ -671,10 +669,9 @@ func TestPrePRReviewRepair(t *testing.T) {
 				},
 			})
 			report := a.report
-			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "deep-review-report" {
-				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
+			if report.Outcome != engine.Succeeded {
+				t.Fatalf("outcome %s failure %v", report.Outcome, report.Failure)
 			}
-			a.requireAttempts(t, 10, "input", "pull-request")
 			basic := a.reviewCalls()["basic"]
 			if len(basic) != 2 {
 				t.Fatalf("basic dispatches %d", len(basic))

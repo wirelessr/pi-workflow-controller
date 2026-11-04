@@ -27,11 +27,16 @@ const PublishSchema = "code-change.publish.v1"
 // PullRequestSchema is the Controller record of the verified pull request.
 const PullRequestSchema = "code-change.pull-request.v1"
 
+// FixSchema is the fix Step's dispositions of the deep review report's
+// findings and its push receipt.
+const FixSchema = "code-change.fix.v1"
+
 // ExternalObjectsSchema is the Controller record of what exists after a
-// failure from the correction Step on.
+// failure from the dispatch of a Step that writes to GitHub through its
+// closing.
 const ExternalObjectsSchema = "code-change.external-objects.v1"
 
-var schemaNames = []string{"input", "implement", "review", "publish", "pull-request", "external-objects"}
+var schemaNames = []string{"input", "implement", "review", "publish", "pull-request", "fix", "external-objects"}
 
 func Resources() []contract.Resource {
 	var out []contract.Resource

@@ -12,6 +12,12 @@ import time
 
 ENGINE = "pi-workflow-controller/internal/engine"
 QUEUE = "TestEnginePersistenceObservationQueueSaturation"
+# Top-level name-prefix families split out of a package's base group to fit the job timeout;
+# every unmatched name, including new ones, stays in the base group.
+FAMILIES = {
+    "pi-workflow-controller/internal/workflows/codechange": [
+        ("fix", ("TestFix",)), ("publish", ("TestPublish",)), ("review", ("TestPrePR", "TestDeepReview"))],
+}
 # Only opt-in integration identities are configured here, never a case registry.
 OPTINS = {
     ENGINE: {
@@ -79,7 +85,13 @@ def partition(tops):
             selected.remove(QUEUE)
             add("queue-small", package, [QUEUE], "^" + QUEUE + "$/" + complement("default1024"), QUEUE)
             add("queue-stress", package, [QUEUE], "^" + QUEUE + "$/^default1024$", QUEUE)
-        add("base-" + package.removeprefix("pi-workflow-controller/").replace("/", "-"), package, selected)
+        base = "base-" + package.removeprefix("pi-workflow-controller/").replace("/", "-")
+        for family, prefixes in FAMILIES.get(package, []):
+            members = {n for n in selected if n.startswith(prefixes)}
+            require(members, "empty test family: " + family)
+            selected -= members
+            add(base + "-" + family, package, members)
+        add(base, package, selected)
     require(len({g['id'] for g in groups}) == len(groups), "group ID collision")
     return groups
 

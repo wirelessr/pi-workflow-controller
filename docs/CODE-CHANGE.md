@@ -1,6 +1,6 @@
 # Code change workflow 規劃（草案）
 
-**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；其餘單元依第 8 節的順序施工。`code-change` 只是暫用名稱。
+**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，目前到 C 為止；其餘單元依第 8 節的順序施工。`code-change` 只是暫用名稱。
 
 Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，經實作、發 PR 前審閱、發 PR、PR 後深度審閱、自行 triage 修正、收斂 PR，到最後清理，交付一個已開出的 PR。這是第一個會寫本機 repository 並對外部系統產生副作用的 workflow；現有 workflows 都只讀或只寫自有 artifacts。
 
@@ -47,7 +47,7 @@ Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，�
 [Controller]  以 gh GET 核對 receipt，核對過的 head 作為後續 exact head
 [B deep review]  Controller 派 code-review 流程（Prepare、三 reviewer、Validate），針對該 head
                  輸出：validation report Ref
-[C triage+fix]   fresh：讀 report Ref，自行 triage（對 report 的每個 confirmed finding 修或不修並留理由；其餘由 Agent 自行處理並交代）、修正、comment 清理、push；push 前整合 PR branch 上已有的 commit，不改寫或丟棄
+[C triage+fix]   fresh：讀 report Ref，自行 triage（對 report 的每個 confirmed finding 修或不修並留理由；其餘由 Agent 自行處理並交代）、修正、comment 清理、push；push 前整合 PR branch 上已有的 commit，包括本工作已 push 且已審的 commit，一律只往上加，不改寫或丟棄（Controller 只機械核對 reported_head 仍是新 head 的祖先；他人 commit 是否被丟棄不核對）
                  輸出：處置報告 + push receipt；Controller 核對
 [D converge]     Controller 迴圈（輪數上限，初值 10；每輪在新 Child scope `round-NNN` 下）：
                  1. 等待：PR 的 checks 與 commit statuses 全部進入終態，再加有界的靜置窗口；整體等待有上限
@@ -159,7 +159,7 @@ Prompt 格式：
 | intake / readiness | A1 | A2、A3 | readiness（ready 或 gaps）、ticket key（ready 時，任意非空字串）、輸入 Ref、gap 清單、實作計畫、實作報告、驗證項目與狀態、local head。`ready` 只表示已本機 commit，不表示檢查通過；未完成的驗證以 `failed`／`not_checked` 回報，Controller 不判斷其意義。ready 時 local head 不是 base 或其祖先；gaps 時 worktree HEAD 必須仍等於 base，否則為具名 receipt 錯誤 |
 | pre-PR findings（兩種角色） | A2 | A3 | 與 B 的 reviewer findings 分開，不套用 PR Pin。兩個角色共用一個 schema；Go 只核對 role、implement 回抄與 finding ID 不重複（可 repair）；空 findings 不是通過；A3 以「角色加 ID」對應處置，因為 ID 只在同一份 contract 內唯一 |
 | pre-PR 更正與 PR receipt | A3 | Controller、B、C、D、E | 對 A2 兩份 findings 每個 ID 的處置（Go 只核對每個 ID 恰有一筆處置，不看內容）、correction（committed：head 不是 A1 head 或其祖先；no_change：head 等於 A1 head）、URL、number、branch、head SHA、ticket 轉移的回報（Controller 不核對）。Controller 核對後以 Attach 保存觀察到的 PR 身分與 head（`pull-request`）；失敗而外部寫入已發生時，Attach `external-objects`（現有 branch／PR，唯讀快照）並選為 Final，同時回傳原始錯誤 |
-| triage-fix report | C | D | 對每條 finding 的處置與理由；push receipt 與其 head，Controller 核對 |
+| triage-fix report | C | D | 對 B report 的每個 confirmed finding 的處置與理由（Go 只核對 ID 覆蓋，不看內容）、correction（committed：head 是記錄的 reported_head 之後的新 commit，且 reported_head 是 head 的祖先，即不改寫已審的 head；no_change：不 push，head 等於 reported_head）、head、notes（其餘項目的處理與未確認事項）；Controller 以 A3 相同的機械核對 push receipt，PR 身分與 branch 取自 `pull-request` 記錄而非 Agent 回報。C 派送前的失敗以 `pull-request` 記錄為 Final，派送後的失敗以 `external-objects`（`step`: `fix`）為 Final |
 | PR 狀態快照 | Controller（Attach） | D 每輪、Final | head SHA、checks／statuses 與未解 threads 的識別、狀態、連結、等待是否逾時；不含內容全文，不含判斷 |
 | converge round report | D 每輪 | 下一輪、E | 逐項狀態、是否宣稱已收斂、未收斂原因；各外部寫入的 receipt 與 head，可核對者由 Controller 核對 |
 | cleanup report | E | Final | push receipt、最終 head，Controller 核對 |
@@ -263,6 +263,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
   - **範圍：** D 之前的階段沒有准入；deadline 若在 D 之前觸發，終態為 TimedOut，不進 E 也不產生 final summary。
 - **A3 一次更正。** A2 找到問題後只做一次修正，沒有再審閱，已確認由 B 把關。
 - **多樣性下降。** 見第 7 節。
+- **C 的信任鏈與殘餘風險。** PR 內文與 comments 經 B 的 report 流向一個有 push 權限的 Agent，防線只有 Step requirements；Controller 不限制 commit 觸及的路徑或內容，不偵測 CI 設定變更、機密寫入、其他 ref 或 default branch 的 push；C 不保存 GitHub 觀察記錄（`fix` 只有 Agent 回報的 head，C4 的 D 以自己的快照取得 GitHub 狀態）；B 與 C 之間 PR 被關閉或 merge 時，C 仍會派送並可能 push，之後才在 receipt 被發現；C 剛 push 後 PR 的 `head.sha` 若延遲會被誤判為 receipt 不符；run deadline 在 C 的 push 之後到達時沒有 external-objects 記錄。
 - **本機 receipt 的範圍。** 它防的是錯誤與謊報，不防擁有同樣使用者權限的 Agent 偽造（registration 目錄、shallow、grafts 皆可被改寫）；「新 commit」只表示 HEAD 不是 base 或其祖先，不證明是 Agent 所建，也不證明是 base 的後代。
 - **未經 live 驗證的 Agent 行為。** repair 派送的新開頭句、A1 常數與 schema 的遵循度、`--no-lazy-fetch` 對 lazy fetch 的實際效果。
 - **只模擬或單元測試無法證明的事：** 模型能否遵循 schema、私有 skill 的單輪版能否在無人狀態下完成、品質掃描 skip 的實際行為、bot 靜置窗口、Agent 在 CWD 之外操作 worktree 時，各工具（git、build、test、專案內的相對路徑設定）的實際行為。皆列為 live 缺口。
