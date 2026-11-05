@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"pi-workflow-controller/internal/contract"
@@ -49,7 +50,22 @@ type convergeReport struct {
 	Items     []struct {
 		ID string `json:"id"`
 	} `json:"items"`
+	ThreadActions []threadAction `json:"thread_actions"`
+	CIReruns      []ciRerun      `json:"ci_reruns"`
 	pushed
+}
+
+// threadAction is the receipt of a reply to or the resolution of a review
+// thread: GraphQL node IDs, the comment's for a reply.
+type threadAction struct {
+	ThreadID  string `json:"thread_id"`
+	Action    string `json:"action"`
+	CommentID string `json:"comment_id"`
+}
+
+// ciRerun is the receipt of a rerun of a GitHub Actions workflow run.
+type ciRerun struct {
+	RunID int64 `json:"run_id"`
 }
 
 // admitted reports whether the run deadline, the run's creation plus its
@@ -66,11 +82,13 @@ func admitted(s engine.Snapshot, now time.Time, reserve time.Duration) bool {
 // snapshot; ends the rounds with errPullRequestNotOpen when the snapshot
 // shows the pull request closed or merged; expands the private skill afresh
 // from memory for the round; runs the converge Step with runPush in a fresh
-// session with CWD piCWD, its last verified head the previous report's; and
-// reads the pull request once more.
+// session with CWD piCWD, its last verified head the previous report's, its
+// thread and rerun receipts checked with verifyWrites after the push
+// receipt; and reads the pull request once more.
 //
-// The rounds converge when a round claimed convergence, pushed nothing and
-// that read shows its snapshot's head: the final snapshot follows and the
+// The rounds converge when a round claimed convergence, pushed nothing,
+// reported no thread action and no rerun, and that read shows its
+// snapshot's head: the final snapshot follows and the
 // round's report is the Final with a nil error. Rounds that run out end
 // with the final snapshot and errNotConverged. Any other failure returns
 // the original error and no further round runs. From a round's dispatch
@@ -100,7 +118,7 @@ func (p prepared) converge(ctx context.Context, r *engine.Run, piCWD string, pri
 	for n := 1; ; n++ {
 		if n > rp.rounds {
 			return p.unconverged(ctx, r, outputs, report, snapshot, "rounds-exhausted",
-				fmt.Sprintf("No round claimed convergence without a push on an unchanged head within the round cap of %d", rp.rounds),
+				fmt.Sprintf("No round claimed convergence without a push, a thread reply or resolution or a rerun, on an unchanged head, within the round cap of %d", rp.rounds),
 				fmt.Errorf("%w within the round cap of %d", errNotConverged, rp.rounds), sp)
 		}
 		if !admitted(r.Snapshot(), rp.now(), rp.reserve) {
@@ -132,7 +150,8 @@ func (p prepared) converge(ctx context.Context, r *engine.Run, piCWD string, pri
 		v, result, err := runPush(ctx, r, p, pr, last, pushStep{scope: s, key: "converge", output: name + "-converge", prefix: name + "-", step: "converge", at: name,
 			role: engine.RoleSpec{Name: convergeRole, Model: convergeModel, CWD: piCWD}, who: "converger", decision: "converge-verified", prompt: string(prompt),
 			inputs: []contract.Ref{p.input, outputs["implement"], outputs["pull-request"], snap, outputs[report]}, schema: ConvergeSchema, timeout: convergeTimeout},
-			outputs, stopped(), func(v convergeReport) error { return checkRound(v, snap) })
+			outputs, stopped(), func(v convergeReport) error { return checkRound(v, snap) },
+			func(ctx context.Context, v convergeReport) error { return p.verifyWrites(ctx, r.Dir(), pr, v) })
 		if err != nil {
 			return result, err
 		}
@@ -141,8 +160,8 @@ func (p prepared) converge(ctx context.Context, r *engine.Run, piCWD string, pri
 		if err != nil {
 			return stopped(), fmt.Errorf("after %s: %w", name, err)
 		}
-		if v.Converged && v.Correction == "no_change" && after == state.PullRequest.HeadSHA {
-			if err := r.Root().Decision(ctx, "converged", fmt.Sprintf("Round %d claimed convergence without a push, and the pull request head read after its session closed, %s, is its snapshot's head", n, after), []contract.Ref{outputs[report], snap}); err != nil {
+		if v.Converged && v.Correction == "no_change" && len(v.ThreadActions) == 0 && len(v.CIReruns) == 0 && after == state.PullRequest.HeadSHA {
+			if err := r.Root().Decision(ctx, "converged", fmt.Sprintf("Round %d claimed convergence without a push, a thread reply or resolution or a rerun, and the pull request head read after its session closed, %s, is its snapshot's head", n, after), []contract.Ref{outputs[report], snap}); err != nil {
 				return stopped(), err
 			}
 			return p.finalState(ctx, r, stopped(), sp)
@@ -203,4 +222,169 @@ func checkRound(v convergeReport, snapshot contract.Ref) error {
 		seen[item.ID] = i
 	}
 	return errors.Join(errs...)
+}
+
+// reviewThreadQuery is a Controller constant and a query operation, which
+// is what keeps the thread receipt read read-only.
+const reviewThreadQuery = `query($id: ID!) {
+  node(id: $id) {
+    __typename
+    ... on PullRequestReviewThread {
+      isResolved
+      pullRequest { number repository { nameWithOwner } }
+      comments(last: 100) { totalCount nodes { id } }
+    }
+  }
+}`
+
+// verifyWrites checks once, with read-only reads, the thread actions and
+// reruns that v, a round's accepted contract, reports, in contract order.
+// Each thread, read once however many actions name it, must be a review
+// thread of the record's pull request in the target repository; a reply's
+// comment must be among its last 100 comments and a resolved thread must
+// show as resolved. Each run must be a GitHub Actions run whose head is the
+// record's branch of the target repository, past its first attempt. A
+// mismatch wraps errReceipt; a failed or unreadable read, or a reply that is
+// not among the last 100 comments of a thread with more, errUnverifiable;
+// neither is repaired or retried. A confirmed receipt shows that the state
+// exists, not that this round made it: who wrote a reply, resolved a thread
+// or started an attempt, when, and what any of them is worth, is not checked.
+func (p prepared) verifyWrites(ctx context.Context, dir string, pr pullRequestRecord, v convergeReport) error {
+	threads := map[string]reviewThread{}
+	for i, a := range v.ThreadActions {
+		t, ok := threads[a.ThreadID]
+		if !ok {
+			var err error
+			if t, err = readThread(ctx, dir, a.ThreadID); err != nil {
+				return fmt.Errorf("%w: thread_actions[%d]: %w", errUnverifiable, i, err)
+			}
+			threads[a.ThreadID] = t
+		}
+		if err := t.confirms(i, a, p.repository, pr.Number); err != nil {
+			return err
+		}
+	}
+	for i, rerun := range v.CIReruns {
+		if err := p.confirmRerun(ctx, dir, i, rerun.RunID, pr.Branch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reviewThread is a node as reviewThreadQuery reads it; the other fields
+// are set only for a review thread. Pointers tell a missing field from its
+// zero value.
+type reviewThread struct {
+	Typename    string `json:"__typename"`
+	IsResolved  *bool  `json:"isResolved"`
+	PullRequest *struct {
+		Number     *int `json:"number"`
+		Repository *struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		} `json:"repository"`
+	} `json:"pullRequest"`
+	Comments *struct {
+		TotalCount *int `json:"totalCount"`
+		Nodes      []struct {
+			ID string `json:"id"`
+		} `json:"nodes"`
+	} `json:"comments"`
+}
+
+// readThread reads node id with reviewThreadQuery. A node GitHub does not
+// resolve without an error is read as a node of no type.
+func readThread(ctx context.Context, dir, id string) (reviewThread, error) {
+	raw, err := runtime.GitHubGraphQL(ctx, dir, reviewThreadQuery, map[string]string{"id": id}, nil)
+	if err != nil {
+		return reviewThread{}, fmt.Errorf("review thread query: %w", err)
+	}
+	var pages []struct {
+		Errors []json.RawMessage `json:"errors"`
+		Data   *struct {
+			Node *reviewThread `json:"node"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &pages) != nil || len(pages) != 1 {
+		return reviewThread{}, errors.New("review thread query: not a single page object")
+	}
+	if len(pages[0].Errors) > 0 || pages[0].Data == nil {
+		return reviewThread{}, errors.New("review thread query: the page has errors or no data")
+	}
+	if pages[0].Data.Node == nil {
+		return reviewThread{}, nil
+	}
+	t := *pages[0].Data.Node
+	if t.Typename == "PullRequestReviewThread" && (t.IsResolved == nil || t.PullRequest == nil || t.PullRequest.Number == nil || t.PullRequest.Repository == nil ||
+		t.Comments == nil || t.Comments.TotalCount == nil || t.Comments.Nodes == nil) {
+		return reviewThread{}, errors.New("review thread query: a thread without isResolved, pull request number and repository, or comments with totalCount and nodes")
+	}
+	return t, nil
+}
+
+// confirms checks thread_actions[i], a, against t, the node its thread ID
+// names, for pull request number of repository.
+func (t reviewThread) confirms(i int, a threadAction, repository string, number int) error {
+	if t.Typename != "PullRequestReviewThread" {
+		kind := "no node"
+		if t.Typename != "" {
+			kind = "a " + t.Typename
+		}
+		return fmt.Errorf("%w: thread_actions[%d].thread_id: got %q, which GitHub resolves to %s; want a review thread of pull request %d", errReceipt, i, a.ThreadID, kind, number)
+	}
+	if !strings.EqualFold(t.PullRequest.Repository.NameWithOwner, repository) || *t.PullRequest.Number != number {
+		return fmt.Errorf("%w: thread_actions[%d].thread_id: got %q, a review thread of pull request %d in %q; want one of pull request %d in %s", errReceipt, i, a.ThreadID, *t.PullRequest.Number, t.PullRequest.Repository.NameWithOwner, number, repository)
+	}
+	if a.Action == "resolve" {
+		if !*t.IsResolved {
+			return fmt.Errorf("%w: thread_actions[%d]: got resolve, but GitHub shows thread %q not resolved", errReceipt, i, a.ThreadID)
+		}
+		return nil
+	}
+	// The schema admits only reply and resolve.
+	for _, c := range t.Comments.Nodes {
+		if c.ID == a.CommentID {
+			return nil
+		}
+	}
+	if *t.Comments.TotalCount > len(t.Comments.Nodes) {
+		return fmt.Errorf("%w: thread_actions[%d].comment_id: got %q, which is not among the last 100 of the %d comments of thread %q, the only ones the Controller reads", errUnverifiable, i, a.CommentID, *t.Comments.TotalCount, a.ThreadID)
+	}
+	return fmt.Errorf("%w: thread_actions[%d].comment_id: got %q, which is not a comment of thread %q", errReceipt, i, a.CommentID, a.ThreadID)
+}
+
+// confirmRerun checks ci_reruns[i], run id, against its GitHub Actions run,
+// read at that ID in p.repository: its head repository is p.repository, its
+// head branch is branch, and its run attempt is at least 2. The request path
+// already scopes the run to p.repository; the head repository tells the
+// record's branch from a fork's branch of the same name.
+func (p prepared) confirmRerun(ctx context.Context, dir string, i int, id int64, branch string) error {
+	raw, err := runtime.GitHubGET(ctx, dir, fmt.Sprintf("repos/%s/actions/runs/%d", p.repository, id), false)
+	if err != nil {
+		return fmt.Errorf("%w: ci_reruns[%d]: workflow run GET: %w", errUnverifiable, i, err)
+	}
+	var run struct {
+		HeadBranch     *string `json:"head_branch"`
+		RunAttempt     *int    `json:"run_attempt"`
+		HeadRepository *struct {
+			FullName string `json:"full_name"`
+		} `json:"head_repository"`
+	}
+	if json.Unmarshal(raw, &run) != nil || run.HeadBranch == nil || run.RunAttempt == nil || run.HeadRepository == nil {
+		return fmt.Errorf("%w: ci_reruns[%d]: workflow run GET: not a run with head_branch, run_attempt and head_repository", errUnverifiable, i)
+	}
+	var mismatches []string
+	if !strings.EqualFold(run.HeadRepository.FullName, p.repository) {
+		mismatches = append(mismatches, fmt.Sprintf("head_repository %q; want %s", run.HeadRepository.FullName, p.repository))
+	}
+	if *run.HeadBranch != branch {
+		mismatches = append(mismatches, fmt.Sprintf("head_branch %q; want the record's branch %q", *run.HeadBranch, branch))
+	}
+	if *run.RunAttempt < 2 {
+		mismatches = append(mismatches, fmt.Sprintf("run_attempt %d; want a rerun, attempt 2 or later", *run.RunAttempt))
+	}
+	if len(mismatches) > 0 {
+		return fmt.Errorf("%w: ci_reruns[%d].run_id: got %d: %s", errReceipt, i, id, strings.Join(mismatches, "; "))
+	}
+	return nil
 }

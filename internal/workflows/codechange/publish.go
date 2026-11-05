@@ -15,10 +15,10 @@ import (
 
 const publishTimeout = 45 * time.Minute
 
-// errUnverifiable is a pull request receipt the Controller could not check
-// because a GitHub read failed or returned something it cannot read. Like a
-// mismatch it is an execution failure, never repaired or retried.
-var errUnverifiable = errors.New("code-change cannot verify the pull request receipt")
+// errUnverifiable is a receipt the Controller could not check because a
+// GitHub read failed or returned something it cannot read. Like a mismatch
+// it is an execution failure, never repaired or retried.
+var errUnverifiable = errors.New("code-change cannot verify a receipt")
 
 // published is the part of the correction Step's contract the Controller
 // checks.

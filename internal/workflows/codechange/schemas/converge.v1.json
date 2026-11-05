@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pi-workflow-controller.local/schemas/code-change/converge.v1.json",
-  "description": "A converger's report of one round on the pull request: what it checked and found, whether it claims convergence, and the change and the head it pushed",
+  "description": "A converger's report of one round on the pull request: what it checked and found, whether it claims convergence, the change and the head it pushed, and the thread replies, resolutions and reruns it made",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -9,7 +9,9 @@
     "converged",
     "items",
     "correction",
-    "head"
+    "head",
+    "thread_actions",
+    "ci_reruns"
   ],
   "properties": {
     "snapshot": {
@@ -60,6 +62,20 @@
       "description": "The worktree HEAD at the end of this round, which, when committed, is the commit pushed to the pull request record's branch",
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
+    },
+    "thread_actions": {
+      "description": "Every reply to and resolution of a review thread of the pull request that this round made, one entry each; empty when there was none",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/threadAction"
+      }
+    },
+    "ci_reruns": {
+      "description": "Every GitHub Actions workflow run that this round reran, one entry each; empty when there was none",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ciRerun"
+      }
     }
   },
   "if": {
@@ -151,6 +167,69 @@
           }
         }
       ]
+    },
+    "threadAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "thread_id",
+        "action"
+      ],
+      "properties": {
+        "thread_id": {
+          "description": "The review thread's GraphQL node ID",
+          "$ref": "#/$defs/nodeID"
+        },
+        "action": {
+          "description": "reply: a comment added to the thread. resolve: the thread marked resolved",
+          "enum": [
+            "reply",
+            "resolve"
+          ]
+        },
+        "comment_id": {
+          "description": "The GraphQL node ID of the reply's comment; required for reply and only for it",
+          "$ref": "#/$defs/nodeID"
+        }
+      },
+      "if": {
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "const": "reply"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "comment_id"
+        ]
+      },
+      "else": {
+        "properties": {
+          "comment_id": false
+        }
+      }
+    },
+    "ciRerun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id"
+      ],
+      "properties": {
+        "run_id": {
+          "description": "The ID of the GitHub Actions workflow run, not of one of its check runs or jobs",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "nodeID": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_=+/-]+$"
     },
     "ref": {
       "type": "object",

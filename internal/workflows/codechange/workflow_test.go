@@ -28,8 +28,9 @@ import (
 // real subprocess that accepts only a REST GET of the target repository, its
 // pull requests, a compare, its branch refs, a branch's pull request list or,
 // paginated, a pull request's comments, which are always none, a commit's
-// check runs or combined status, and the review threads GraphQL query of
-// pull request 1. Pull requests
+// check runs or combined status, a GitHub Actions run, and the review
+// threads GraphQL query of pull request 1 and the review thread query of a
+// node. Pull requests
 // are the records the fake Agent wrote under prs/, with the base and head SHAs
 // read from the local origin at query time like GitHub; compare and refs come
 // from the real git on that origin. Per kind of read, gh-fail-<kind>
@@ -49,7 +50,10 @@ import (
 // every later one.
 // gh-fail-threads fails the review threads query, from the query it
 // numbers on when it holds a number. gh-block-threads blocks it like
-// gh-block.
+// gh-block. The review thread query of a node ID answers the node in
+// thread-<ID>.json, the ID path-escaped, and fails like GitHub's error for
+// a node it cannot resolve without it; gh-body-thread replaces its body. A
+// GitHub Actions run GET answers run-<ID>.json and fails without it.
 func TestGHHelper(t *testing.T) {
 	dir := os.Getenv("PWC_CC_GH")
 	if dir == "" {
@@ -67,8 +71,27 @@ func TestGHHelper(t *testing.T) {
 	if len(logged) > 5 && logged[5] == "query="+reviewThreadsQuery {
 		logged[5] = "query=<review threads>"
 	}
+	if len(logged) > 5 && logged[5] == "query="+reviewThreadQuery {
+		logged[5] = "query=<review thread>"
+	}
 	_, _ = fmt.Fprintln(calls, strings.Join(logged, " "))
 	_ = calls.Close()
+	if len(args) == 10 && args[1] == "graphql" && args[5] == "query="+reviewThreadQuery {
+		id, ok := strings.CutPrefix(args[7], "id=")
+		if !ok || !slices.Equal(args, []string{"api", "graphql", "--hostname", "github.com", "-f", "query=" + reviewThreadQuery, "-f", "id=" + id, "--paginate", "--slurp"}) {
+			os.Exit(2)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, "gh-body-thread"))
+		if err != nil {
+			node, err := os.ReadFile(filepath.Join(dir, "thread-"+url.PathEscape(id)+".json"))
+			if err != nil {
+				os.Exit(1)
+			}
+			raw = []byte(`[{"data":{"node":` + string(node) + `}}]`)
+		}
+		_, _ = os.Stdout.Write(raw)
+		os.Exit(0)
+	}
 	if len(args) > 1 && args[1] == "graphql" {
 		want := []string{"api", "graphql", "--hostname", "github.com", "-f", "query=" + reviewThreadsQuery, "-f", "name=repo", "-f", "owner=owner", "-F", "number=1", "--paginate", "--slurp"}
 		if !slices.Equal(args, want) {
@@ -85,7 +108,7 @@ func TestGHHelper(t *testing.T) {
 			if err != nil {
 				os.Exit(2)
 			}
-			if strings.Count(string(calls), "api graphql ") >= from {
+			if strings.Count(string(calls), "query=<review threads>") >= from {
 				os.Exit(1)
 			}
 		}
@@ -128,6 +151,13 @@ func TestGHHelper(t *testing.T) {
 	switch kind {
 	case "comments":
 		out = []any{[]any{}}
+	case "run":
+		raw, err := os.ReadFile(filepath.Join(dir, "run-"+arg+".json"))
+		if err != nil {
+			os.Exit(1)
+		}
+		_, _ = os.Stdout.Write(raw)
+		os.Exit(0)
 	case "checks", "statuses":
 		k := stateReads(dir, kind)
 		if kind == "checks" {
@@ -332,6 +362,8 @@ func ghKind(endpoint string) (string, string) {
 		return "checks", strings.TrimSuffix(strings.TrimPrefix(rest, "/commits/"), "/check-runs?per_page=100")
 	case strings.HasPrefix(rest, "/commits/") && strings.HasSuffix(rest, "/status?per_page=100"):
 		return "statuses", strings.TrimSuffix(strings.TrimPrefix(rest, "/commits/"), "/status?per_page=100")
+	case strings.HasPrefix(rest, "/actions/runs/"):
+		return "run", strings.TrimPrefix(rest, "/actions/runs/")
 	case strings.HasPrefix(rest, "/compare/"):
 		return "compare", strings.TrimPrefix(rest, "/compare/")
 	case strings.HasPrefix(rest, "/git/matching-refs/heads/"):

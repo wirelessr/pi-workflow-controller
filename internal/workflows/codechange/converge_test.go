@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -36,7 +38,8 @@ func qualityScan(status string) map[string]any {
 }
 
 func convergeData(t *testing.T, c agentCall, converged bool, correction, head string) map[string]any {
-	data := map[string]any{"snapshot": roundSnapshot(t, c), "converged": converged, "items": []any{qualityScan("passed")}, "correction": correction, "head": head}
+	data := map[string]any{"snapshot": roundSnapshot(t, c), "converged": converged, "items": []any{qualityScan("passed")}, "correction": correction, "head": head,
+		"thread_actions": []any{}, "ci_reruns": []any{}}
 	if !converged {
 		data["unconverged"] = []string{"A check still fails"}
 	}
@@ -573,6 +576,236 @@ func TestConvergeReadAfterRoundFails(t *testing.T) {
 	a.requireExitsConfirmed(t)
 }
 
+// threadNodeJSON is a review thread of pull request number in repository as the
+// review thread query shows it: of its total comments, comments are the
+// last ones.
+func threadNodeJSON(number int, repository string, resolved bool, total int, comments ...string) map[string]any {
+	nodes := []any{}
+	for _, c := range comments {
+		nodes = append(nodes, map[string]any{"id": c})
+	}
+	return map[string]any{"__typename": "PullRequestReviewThread", "isResolved": resolved,
+		"pullRequest": map[string]any{"number": number, "repository": map[string]any{"nameWithOwner": repository}},
+		"comments":    map[string]any{"totalCount": total, "nodes": nodes}}
+}
+
+// runJSON is a GitHub Actions run from branch of headRepository as its GET
+// shows it.
+func runJSON(headRepository, branch string, attempt int) map[string]any {
+	return map[string]any{"head_repository": map[string]any{"full_name": headRepository}, "head_branch": branch, "run_attempt": attempt,
+		"head_sha": strings.Repeat("a", 40), "status": "completed", "conclusion": "failure"}
+}
+
+// setThread and setRun set a review thread and an Actions run as GitHub
+// shows them.
+func (f *fixture) setThread(t *testing.T, id string, v any) {
+	f.writeJSON(t, "thread-"+url.PathEscape(id)+".json", v)
+}
+
+func (f *fixture) setRun(t *testing.T, id int64, v any) {
+	f.writeJSON(t, fmt.Sprintf("run-%d.json", id), v)
+}
+
+// receiptReads is how many review thread queries and Actions run GETs the
+// gh calls hold.
+func (f *fixture) receiptReads() [2]int {
+	var n [2]int
+	for _, line := range f.ghCalls() {
+		if strings.Contains(line, "query=<review thread> ") {
+			n[0]++
+		}
+		if strings.Contains(line, "repos/owner/repo/actions/runs/") {
+			n[1]++
+		}
+	}
+	return n
+}
+
+// The thread actions and reruns of a round's accepted contract are checked
+// once with read-only reads, in contract order, each thread read once
+// however many actions name it: a thread must be a review thread of the
+// record's pull request in the target repository, a reply's comment among
+// its last 100 comments and a resolved thread resolved; a run must be a
+// GitHub Actions run from the record's branch of the target repository past
+// its first attempt. A mismatch is errReceipt; a failed or unreadable read,
+// and a reply that is not among the last 100 comments of a thread with more,
+// errUnverifiable. The first failure ends the check.
+func TestConvergeWritesChecked(t *testing.T) {
+	reply := func(thread, comment string) threadAction {
+		return threadAction{ThreadID: thread, Action: "reply", CommentID: comment}
+	}
+	resolve := func(thread string) threadAction { return threadAction{ThreadID: thread, Action: "resolve"} }
+	thread := func(resolved bool, comments ...string) map[string]any {
+		return threadNodeJSON(1, "owner/repo", resolved, len(comments), comments...)
+	}
+	var last100 []string
+	for i := range 100 {
+		last100 = append(last100, fmt.Sprintf("PRRC_%d", i))
+	}
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, f *fixture)
+		threads []threadAction
+		reruns  []int64
+		// sentinel is nil when the receipts are confirmed.
+		sentinel error
+		want     string
+		// reads, when set, is the thread queries and run GETs made.
+		reads *[2]int
+	}{
+		{"confirmed", func(t *testing.T, f *fixture) {
+			f.setThread(t, "PRRT_a", threadNodeJSON(1, "Owner/Repo", true, 150, append(last100[1:], "PRRC_reply")...))
+			f.setThread(t, "PRRT_b+/=", thread(true, "PRRC_b"))
+			f.setRun(t, 41, runJSON("owner/repo", workBranch, 3))
+			f.setRun(t, 42, runJSON("Owner/Repo", workBranch, 2))
+		}, []threadAction{reply("PRRT_a", "PRRC_reply"), resolve("PRRT_b+/="), resolve("PRRT_a")}, []int64{41, 42}, nil, "", &[2]int{2, 2}},
+		{"thread-unknown", func(t *testing.T, f *fixture) { f.setRun(t, 42, runJSON("owner/repo", workBranch, 2)) },
+			[]threadAction{resolve("PRRT_a")}, []int64{42}, errUnverifiable, "thread_actions[0]: review thread query: acquisition ", &[2]int{1, 0}},
+		{"thread-no-node", func(t *testing.T, f *fixture) {
+			f.write(filepath.Join(f.dir, "gh-body-thread"), `[{"data":{"node":null}}]`)
+		},
+			[]threadAction{resolve("PRRT_a")}, nil, errReceipt, `thread_actions[0].thread_id: got "PRRT_a", which GitHub resolves to no node; want a review thread of pull request 1`, nil},
+		{"not-a-thread", func(t *testing.T, f *fixture) {
+			f.setThread(t, "PRRC_a", map[string]any{"__typename": "PullRequestReviewComment"})
+		},
+			[]threadAction{resolve("PRRC_a")}, nil, errReceipt, `got "PRRC_a", which GitHub resolves to a PullRequestReviewComment; want a review thread of pull request 1`, nil},
+		{"thread-of-another-pull-request", func(t *testing.T, f *fixture) { f.setThread(t, "PRRT_a", threadNodeJSON(2, "owner/repo", true, 0)) },
+			[]threadAction{resolve("PRRT_a")}, nil, errReceipt, `got "PRRT_a", a review thread of pull request 2 in "owner/repo"; want one of pull request 1 in owner/repo`, nil},
+		{"thread-of-another-repository", func(t *testing.T, f *fixture) { f.setThread(t, "PRRT_a", threadNodeJSON(1, "other/repo", true, 0)) },
+			[]threadAction{resolve("PRRT_a")}, nil, errReceipt, `a review thread of pull request 1 in "other/repo"; want one of pull request 1 in owner/repo`, nil},
+		{"reply-not-in-thread", func(t *testing.T, f *fixture) { f.setThread(t, "PRRT_a", thread(false, "PRRC_1")) },
+			[]threadAction{reply("PRRT_a", "PRRC_9")}, nil, errReceipt, `thread_actions[0].comment_id: got "PRRC_9", which is not a comment of thread "PRRT_a"`, nil},
+		{"reply-before-the-last-100", func(t *testing.T, f *fixture) {
+			f.setThread(t, "PRRT_a", threadNodeJSON(1, "owner/repo", false, 150, last100...))
+		},
+			[]threadAction{reply("PRRT_a", "PRRC_9x")}, nil, errUnverifiable, `got "PRRC_9x", which is not among the last 100 of the 150 comments of thread "PRRT_a", the only ones the Controller reads`, nil},
+		{"resolve-not-applied", func(t *testing.T, f *fixture) { f.setThread(t, "PRRT_a", thread(false, "PRRC_1")) },
+			[]threadAction{reply("PRRT_a", "PRRC_1"), resolve("PRRT_a")}, nil, errReceipt, `thread_actions[1]: got resolve, but GitHub shows thread "PRRT_a" not resolved`, nil},
+		{"thread-query-errors", func(t *testing.T, f *fixture) {
+			f.write(filepath.Join(f.dir, "gh-body-thread"), `[{"data":{"node":null},"errors":[{"type":"NOT_FOUND"}]}]`)
+		}, []threadAction{resolve("PRRT_a")}, nil, errUnverifiable, "thread_actions[0]: review thread query: the page has errors or no data", nil},
+		{"thread-pages", func(t *testing.T, f *fixture) {
+			page, _ := json.Marshal(map[string]any{"data": map[string]any{"node": thread(true)}})
+			f.write(filepath.Join(f.dir, "gh-body-thread"), "["+string(page)+","+string(page)+"]")
+		}, []threadAction{resolve("PRRT_a")}, nil, errUnverifiable, "thread_actions[0]: review thread query: not a single page object", nil},
+		{"thread-unreadable", func(t *testing.T, f *fixture) {
+			v := thread(true)
+			delete(v, "comments")
+			f.setThread(t, "PRRT_a", v)
+		}, []threadAction{resolve("PRRT_a")}, nil, errUnverifiable, "thread_actions[0]: review thread query: a thread without isResolved", nil},
+		{"rerun-not-found", func(*testing.T, *fixture) {}, nil, []int64{42}, errUnverifiable, "ci_reruns[0]: workflow run GET: acquisition ", nil},
+		{"rerun-without-head-repository", func(t *testing.T, f *fixture) {
+			v := runJSON("owner/repo", workBranch, 2)
+			v["head_repository"] = nil
+			f.setRun(t, 42, v)
+		}, nil, []int64{42}, errUnverifiable, "ci_reruns[0]: workflow run GET: not a run with head_branch, run_attempt and head_repository", nil},
+		{"rerun-from-another-head-repository", func(t *testing.T, f *fixture) { f.setRun(t, 42, runJSON("fork/repo", workBranch, 2)) }, nil, []int64{42}, errReceipt,
+			`ci_reruns[0].run_id: got 42: head_repository "fork/repo"; want owner/repo`, nil},
+		{"rerun-on-another-branch", func(t *testing.T, f *fixture) { f.setRun(t, 42, runJSON("owner/repo", "main", 2)) }, nil, []int64{42}, errReceipt,
+			`ci_reruns[0].run_id: got 42: head_branch "main"; want the record's branch "ABC-1-change"`, nil},
+		{"second-rerun-first-attempt", func(t *testing.T, f *fixture) {
+			f.setRun(t, 41, runJSON("owner/repo", workBranch, 2))
+			f.setRun(t, 42, runJSON("owner/repo", workBranch, 1))
+		}, nil, []int64{41, 42}, errReceipt, "ci_reruns[1].run_id: got 42: run_attempt 1; want a rerun, attempt 2 or later", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			tc.setup(t, f)
+			v := convergeReport{ThreadActions: tc.threads}
+			for _, id := range tc.reruns {
+				v.CIReruns = append(v.CIReruns, ciRerun{RunID: id})
+			}
+			err := prepared{repository: "owner/repo"}.verifyWrites(context.Background(), f.dir, pullRequestRecord{Number: 1, Branch: workBranch}, v)
+			if tc.sentinel == nil {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if !errors.Is(err, tc.sentinel) || (tc.sentinel == errReceipt) == errors.Is(err, errUnverifiable) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %v, want %v with %q", err, tc.sentinel, tc.want)
+			}
+			if got := f.receiptReads(); tc.reads != nil && got != *tc.reads {
+				t.Fatalf("thread queries and run GETs %v, want %v", got, *tc.reads)
+			}
+		})
+	}
+}
+
+// A round that claims convergence without a push but reports a thread reply
+// and resolution, or a rerun, does not end the rounds: round 1 reports the
+// reply and resolution of one thread, read once, round 2 a rerun, and round
+// 3, which writes nothing, ends them.
+func TestConvergeWrites(t *testing.T) {
+	f := newFixture(t)
+	a := f.run(t, f.seam(agents{converge: func(t *testing.T, c agentCall) string {
+		data := f.convergeWork(t, c, true, "no_change")
+		switch c.task.Round {
+		case 1:
+			f.setThread(t, "PRRT_1", threadNodeJSON(1, "owner/repo", true, 2, "PRRC_1", "PRRC_2"))
+			data["thread_actions"] = []any{map[string]any{"thread_id": "PRRT_1", "action": "reply", "comment_id": "PRRC_2"}, map[string]any{"thread_id": "PRRT_1", "action": "resolve"}}
+		case 2:
+			f.setRun(t, 42, runJSON("owner/repo", workBranch, 2))
+			data["ci_reruns"] = []any{map[string]any{"run_id": 42}}
+		}
+		writeCandidate(t, c, data)
+		return ""
+	}}))
+	report := a.report
+	outputs := report.Result.Outputs
+	if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "round-003-converge" || len(a.convergeCalls()) != 3 {
+		t.Fatalf("outcome %s failure %v final %+v converge dispatches %d", report.Outcome, report.Failure, report.Final, len(a.convergeCalls()))
+	}
+	first, second := output[convergeReport](t, a, "round-001-converge"), output[convergeReport](t, a, "round-002-converge")
+	if !reflect.DeepEqual(first.ThreadActions, []threadAction{{ThreadID: "PRRT_1", Action: "reply", CommentID: "PRRC_2"}, {ThreadID: "PRRT_1", Action: "resolve"}}) ||
+		len(first.CIReruns) != 0 || len(second.ThreadActions) != 0 || !reflect.DeepEqual(second.CIReruns, []ciRerun{{RunID: 42}}) {
+		t.Fatalf("round 1 %+v %+v round 2 %+v %+v", first.ThreadActions, first.CIReruns, second.ThreadActions, second.CIReruns)
+	}
+	var want []decision
+	for n := 1; n <= 3; n++ {
+		want = append(want, decision{Scope: "root/" + roundName(n), Name: "converge-verified", Refs: []contract.Ref{outputs[roundName(n)+"-converge"]}})
+	}
+	want = append(want, decision{Scope: "root", Name: "converged", Refs: []contract.Ref{outputs["round-003-converge"], outputs["round-003-snapshot"]}})
+	if got := a.decisions(t); !reflect.DeepEqual(got[len(got)-4:], want) {
+		t.Fatalf("decisions %+v", got)
+	}
+	if got := f.receiptReads(); got != [2]int{1, 1} {
+		t.Fatalf("thread queries and run GETs %v", got)
+	}
+	a.requireExitsConfirmed(t)
+}
+
+// A thread or rerun receipt that GitHub does not confirm ends the rounds
+// like a push receipt mismatch, also in a round that pushed: no repair, no
+// converge-verified, the round's external objects record as the Final with
+// the original error, and no further round or final snapshot.
+func TestConvergeWritesRejected(t *testing.T) {
+	f := newFixture(t)
+	f.setThread(t, "PRRT_1", threadNodeJSON(1, "owner/repo", false, 1, "PRRC_1"))
+	a := f.run(t, f.seam(agents{converge: func(t *testing.T, c agentCall) string {
+		data := f.convergeWork(t, c, true, "committed")
+		data["thread_actions"] = []any{map[string]any{"thread_id": "PRRT_1", "action": "reply", "comment_id": "PRRC_9"}}
+		writeCandidate(t, c, data)
+		return ""
+	}}))
+	report := a.report
+	outputs := report.Result.Outputs
+	requireFailure(t, report, `code-change receipt mismatch: thread_actions[0].comment_id: got "PRRC_9", which is not a comment of thread "PRRT_1"`)
+	if !errors.Is(report.Failure, errReceipt) || report.Final == nil || report.Final.Output != "round-001-external-objects" || len(a.convergeCalls()) != 1 {
+		t.Fatalf("failure %v final %+v converge dispatches %d", report.Failure, report.Final, len(a.convergeCalls()))
+	}
+	if record := output[externalObjectsRecord](t, a, "round-001-external-objects"); record.Step != "converge" || record.Failure != report.Failure.Error() || !record.Session.ExitConfirmed {
+		t.Fatalf("external objects %+v", record)
+	}
+	if got := a.decisions(t); got[len(got)-1].Name != "fix-verified" {
+		t.Fatalf("last decision %+v", got[len(got)-1])
+	}
+	for _, key := range []string{"round-002-snapshot", "final-snapshot"} {
+		if _, ok := outputs[key]; ok {
+			t.Fatalf("outputs %+v", outputs)
+		}
+	}
+	a.requireExitsConfirmed(t)
+}
+
 // The Controller never judges the items: a claim with the quality scan
 // failed converges like one with it passed, and the Final report keeps the
 // item as the converger wrote it.
@@ -602,8 +835,9 @@ func TestConvergeQualityScanNotJudged(t *testing.T) {
 // with the diagnostic as Feedback. The schema holds the item rules: a
 // skipped item only for an id it lists, always with a reason, not_checked
 // with a reason, exactly one quality scan, and the unconverged items exactly
-// when convergence is not claimed; the round's check holds the snapshot Ref
-// echo and unique item ids. Two bad contracts precede each round's good one.
+// when convergence is not claimed; and a comment ID for a reply. The round's
+// check holds the snapshot Ref echo and unique item ids. Two bad contracts
+// precede each round's good one.
 func TestConvergeContractRepair(t *testing.T) {
 	lint := func(status string) map[string]any { return map[string]any{"id": "lint", "status": status} }
 	variants := []struct {
@@ -627,6 +861,10 @@ func TestConvergeContractRepair(t *testing.T) {
 			ref.AttemptID = "other"
 			d["snapshot"] = ref
 		}, "snapshot: got "},
+		{"reply-without-comment", func(d map[string]any) {
+			d["thread_actions"] = []any{map[string]any{"thread_id": "PRRT_1", "action": "reply"}}
+		},
+			"at '/thread_actions/0': missing property 'comment_id'"},
 	}
 	// wrote is the number, in the run's calls, of the attempt that wrote
 	// each variant; the next call is its repair.
@@ -648,7 +886,8 @@ func TestConvergeContractRepair(t *testing.T) {
 		return ""
 	}}))
 	report := a.report
-	if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "round-005-converge" {
+	last := (len(variants) + 1) / 2
+	if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != roundName(last)+"-converge" {
 		t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 	}
 	for i, v := range variants {
@@ -657,14 +896,14 @@ func TestConvergeContractRepair(t *testing.T) {
 			t.Errorf("%s: repair feedback %+v, want %q", v.name, fb, v.diagnostic)
 		}
 	}
-	for n := 1; n <= 5; n++ {
+	for n := 1; n <= last; n++ {
 		var round []agentCall
 		for _, c := range a.convergeCalls() {
 			if c.task.Round == n {
 				round = append(round, c)
 			}
 		}
-		if len(round) != map[bool]int{false: 3, true: 2}[n == 5] {
+		if len(round) != map[bool]int{false: 3, true: 2}[n == last && len(variants)%2 == 1] {
 			t.Fatalf("round %d dispatches %d", n, len(round))
 		}
 		a.requireRepairKeepsWork(t, round...)

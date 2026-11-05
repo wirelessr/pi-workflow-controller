@@ -1,6 +1,6 @@
 # Code change workflow 規劃（草案）
 
-**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，C4a（PR 狀態唯讀 adapter、機械等待與最後快照）已落地，C4b（D 收斂迴圈、私有 skill 與每輪 Step，只授權 push）已落地，目前到收斂輪與最後快照為止；其餘單元依第 8 節的順序施工。`code-change` 只是暫用名稱。
+**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，C4a（PR 狀態唯讀 adapter、機械等待與最後快照）已落地，C4b（D 收斂迴圈、私有 skill 與每輪 Step）與 C4c（thread reply／resolve 與 Actions rerun 的授權及唯讀核對）已落地，目前到收斂輪與最後快照為止；其餘單元依第 8 節的順序施工。`code-change` 只是暫用名稱。
 
 Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，經實作、發 PR 前審閱、發 PR、PR 後深度審閱、自行 triage 修正、收斂 PR，到最後清理，交付一個已開出的 PR。這是第一個會寫本機 repository 並對外部系統產生副作用的 workflow；現有 workflows 都只讀或只寫自有 artifacts。
 
@@ -72,7 +72,7 @@ Controller 可以：依機械定義的狀態條件等待（只看是否進入終
 - **身分核對屬第四條，不屬「不拒收」。** Controller 核對 Agent 回報的 push head 須同時滿足：等於自有 worktree 的 HEAD；確實是新 commit（不是上次已核對 head 的祖先或相同者）；為 PR 當下 head 或其祖先（以 compare 判定，容許 bot 在其間推 commit）。任一不符是具名的執行失敗，不重試，PR 保留，診斷指出欄位、收到的值與期望。這是跨來源的 Go validator，不是 prompt 規則。核對在 repair 迴圈接受最終 contract 之後執行一次，不放進 repair 的 `Validate`：只有 schema 與內容驗收會 repair，身分與 receipt 不符不會。「上次已核對的 head」只在核對通過後更新，所以 attempt 因其他欄位被打回、repair 後回報同一個 head，不會被誤判為非新 commit。沒有新 commit 的 Step（例如 C 決定都不修、E 無事可清）以明示的 `no_change` 回報，Controller 核對回報的 head 與上次已核對者相同，且仍為 PR 當下 head 或其祖先（容許 bot 推 commit）。A3 被拒 attempt 的 PR receipt 不核對，只核對最終 contract；失敗時的外部物件記錄只在 context 仍有效時做（取消、run deadline、fatal、run-scope 額度用盡時做不到，是承認的缺口）。
 - **終止是機械條件。** 迴圈只在三者同時成立時終止：Agent 宣稱已收斂；本輪沒有任何外部寫入 receipt（push、CI rerun、thread reply／resolve）；Controller 在本輪結束後以 GET 取得的 PR head 等於本輪開始時快照的 head。Agent 不等待，看不到自己寫入所觸發的結果，所以有寫入的那一輪不採信為終止，下一輪的快照涵蓋該寫入；未回報的 push 由 head 比對攔下。這是依 receipt 與 head 這些機械事實做的轉移，不看快照內容的意義。輪數用盡前沒有符合條件的收斂宣稱，即未收斂。
 - **「已收斂」的宣稱不涵蓋 skipped 或 not_checked 的項目**，Final 逐項列出；是否值得為它們停下，由 Agent 判斷。D 宣稱收斂之後 E 又 push 時，Final 表述為「收斂宣稱對應 head X，最終 head Y 未經收斂輪」。
-- **殘餘風險：** 終止輪中 Agent 未回報的 reply、resolve 或 CI rerun，head 比對攔不到，承認為未被機械核對的範圍；CI rerun 的 run 列表只用於呈現，不判斷其意義。
+- **殘餘風險：** 終止輪中 Agent 未回報的 reply、resolve 或 CI rerun，head 比對攔不到，承認為未被機械核對的範圍；CI rerun 的 receipt 只核對 run 的身分與 attempt（head repo、branch、attempt），不判斷其意義。
 - **並列顯示：** Final 同時呈現 Agent 的宣稱與最後一份快照，不一致時顯示而不拒收。快照中未解 thread 的用途是下一輪的輸入與 Final 的呈現，Controller 自己沒有用到它。
 - **快照只放識別與狀態，不放 log 或留言全文；** Agent 用既有 gh skill 自取。快照在 push 後即過期，Agent 仍須自行查最新狀態。
 - **每輪都派 Agent，** 即使快照看似無事：「無事」是否等於收斂是詮釋，品質掃描項也不在快照內。
@@ -130,9 +130,9 @@ Prompt 格式：
 | 本機 commit | A1、A3、C、D、E | commit SHA | 能，讀自有 worktree |
 | push branch（只限承載本工作的一個 branch；不推 tag、其他 branch，不改 default branch） | A3、C、D、E | 回報的 head | 部分：核對回報的 head 是 PR 當下 head 或其祖先；不核對「只推一個 branch、不推 tag 與 default branch」這些範圍限制，因為 default branch 與其他 ref 也會被其他人或自動化推送，無法機械歸因給 Agent |
 | 開 PR（只含建立時的 title、body、base、head；label、reviewer、assignee 與 comment 不在授權內；不開 draft） | A3 | URL、number、branch、head | 能，GET（身分、open、非 draft、base 為 input 記錄的 default branch、head repo 與 branch 一致、回報的 head 為 PR 當下 head 或其祖先）；label、reviewer、assignee、comment 同樣不核對（repo 自動化或 CODEOWNERS 也會加，無法歸因給 Agent） |
-| thread reply／resolve | D（C4c 起，C4b 不授權；C 不授權；自己的 PR 不貼 comment，C 只處理 B 的 report；能核對 thread 的唯讀 adapter 到 C4 才有） | thread ID 與動作 | 能，讀 thread 狀態與留言列表 |
+| thread reply／resolve | D（C4c 起；C 不授權；自己的 PR 不貼 comment，C 只處理 B 的 report；只限該 PR 的 review threads，不含一般 comment） | thread ID 與動作（reply 另含 comment ID） | 部分：每個 thread 一次 node 查詢，核對屬於該 PR、resolve 的 thread 已 resolved、reply 的 comment 在該 thread 最後 100 則之中（超過 100 則而找不到時為無法核對）；作者、內容、時間是否在本輪、未回報的寫入皆無法歸因給 Agent，舊的 receipt 同樣通過 |
 | ticket 狀態轉移 | A3（沿 git 流程 skill） | ticket key 與目標狀態 | 不能，Controller 不新增 ticket 系統 client；記於 Agent 報告 |
-| CI rerun | D | run ID | 能讀 run 列表，但不判斷其意義 |
+| CI rerun（只限承載本工作的 branch 上的 GitHub Actions run；其他 CI 不授權） | D（C4c 起） | workflow run ID | 部分：單一 run 的 GET，核對 head repo、`head_branch`、`run_attempt >= 2`；被 rerun 的 attempt 先前是否失敗、觸發者、重跑哪些 jobs、是否為 PR 當下 head 的 run 皆不核對，結果不判斷 |
 | 品質掃描瀏覽器操作 | D | 無 | 只讀，不適用 |
 
 這些是 Agent 操作規則，不是 sandbox。Controller 不宣稱阻擋每一次 shell 或 HTTP 副作用。
@@ -267,7 +267,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 - **A3 一次更正。** A2 找到問題後只做一次修正，沒有再審閱，已確認由 B 把關。
 - **多樣性下降。** 見第 7 節。
 - **C 的信任鏈與殘餘風險。** PR 內文與 comments 經 B 的 report 流向一個有 push 權限的 Agent，防線只有 Step requirements；Controller 不限制 commit 觸及的路徑或內容，不偵測 CI 設定變更、機密寫入、其他 ref 或 default branch 的 push；C 不保存 GitHub 觀察記錄（`fix` 只有 Agent 回報的 head，C4 的 D 以自己的快照取得 GitHub 狀態）；B 與 C 之間 PR 被關閉或 merge 時，C 仍會派送並可能 push，之後才在 receipt 被發現；C 剛 push 後 PR 的 `head.sha` 若延遲會被誤判為 receipt 不符；run deadline 在 C 的 push 之後到達時沒有 external-objects 記錄。
-- **D 的信任鏈與殘餘風險。** 每輪一個有 push 權限的 fresh Agent 自行讀取 PR 的 review comments 與 check／status 輸出（公開 repo 上任何人都能留言或設定 check 名稱與連結），快照中第三方的 name、app、連結、thread 位置也進 Inputs，最多 10 輪，防線只有 baseline 與 round requirements；私有 skill 的來源由 Controller 讀取後每輪新展開，Agent 可以改寫當輪展開的內容，但不能影響之後的輪；`skills` 的 digest 是讀取時的內容，不代表當輪 Agent 讀到的位元組。未授權的寫入（reply、resolve、rerun）Controller 看不到（C4b 沒有對應 adapter 的核對），Agent 若違規做了，只能靠 requirements 要求列為未收斂項；輪內 push 之後跨過 run deadline 時沒有記錄；輪的上界另含輪後讀取與 receipt 核對的 GET，尾段預留須在 C4d 重算。draft 不算「不再 open」，PR 轉為 draft 時由 receipt 核對在 push 之後發現。
+- **D 的信任鏈與殘餘風險。** 每輪一個有 push 權限的 fresh Agent 自行讀取 PR 的 review comments 與 check／status 輸出（公開 repo 上任何人都能留言或設定 check 名稱與連結），快照中第三方的 name、app、連結、thread 位置也進 Inputs，最多 10 輪，防線只有 baseline 與 round requirements；私有 skill 的來源由 Controller 讀取後每輪新展開，Agent 可以改寫當輪展開的內容，但不能影響之後的輪；`skills` 的 digest 是讀取時的內容，不代表當輪 Agent 讀到的位元組。授權範圍外的寫入（不是 thread 回覆的 comment、其他 CI 的 rerun 等）Controller 看不到，只靠 requirements；已授權的 reply、resolve、rerun 只核對 Agent 回報的 receipt，未回報者看不到，receipt 只證明該狀態存在、不證明為本輪所寫，Agent 重報舊 receipt 可延續迴圈到輪數上限；失敗時各 receipt 只在該輪 contract（`round-NNN-converge`，列於 Outputs），`external-objects` 不重述；reply 是以使用者帳號的公開發言，防線只有 requirements 的內容邊界；rerun 數量不設上限且消耗 CI 配額；receipt 讀取次數隨回報數線性增加，尾段預留在 C4d 一併重算；輪內 push 之後跨過 run deadline 時沒有記錄；輪的上界另含輪後讀取與 receipt 核對的 GET，尾段預留須在 C4d 重算。draft 不算「不再 open」，PR 轉為 draft 時由 receipt 核對在 push 之後發現。
 - **本機 receipt 的範圍。** 它防的是錯誤與謊報，不防擁有同樣使用者權限的 Agent 偽造（registration 目錄、shallow、grafts 皆可被改寫）；「新 commit」只表示 HEAD 不是 base 或其祖先，不證明是 Agent 所建，也不證明是 base 的後代。
 - **未經 live 驗證的 Agent 行為。** repair 派送的新開頭句、A1 常數與 schema 的遵循度、`--no-lazy-fetch` 對 lazy fetch 的實際效果。
 - **只模擬或單元測試無法證明的事：** 模型能否遵循 schema、私有 skill 的單輪版能否在無人狀態下完成、品質掃描 skip 的實際行為、bot 靜置窗口、Agent 在 CWD 之外操作 worktree 時，各工具（git、build、test、專案內的相對路徑設定）的實際行為。皆列為 live 缺口。

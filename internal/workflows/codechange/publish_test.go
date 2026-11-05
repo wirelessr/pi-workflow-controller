@@ -318,23 +318,23 @@ func TestPublishReceiptRejected(t *testing.T) {
 			data := f.publishWork(t, c, "no_change")
 			data["pull_request"] = map[string]any{"url": pullURL(2), "number": 2}
 			return data
-		}, func(*fixture, state) string { return "cannot verify the pull request receipt: pull request GET: " }, true},
+		}, func(*fixture, state) string { return "cannot verify a receipt: pull request GET: " }, true},
 		{"pull-request-not-an-object", func(t *testing.T, f *fixture, c agentCall, s state) map[string]any {
 			f.write(filepath.Join(f.dir, "gh-body-pull"), "[]")
 			return f.publishWork(t, c, "no_change")
 		}, func(*fixture, state) string {
-			return "cannot verify the pull request receipt: pull request GET: not a pull request object"
+			return "cannot verify a receipt: pull request GET: not a pull request object"
 		}, true},
 		{"pull-request-without-draft", patchPull(`{"draft":null}`), func(*fixture, state) string {
-			return "cannot verify the pull request receipt: pull request GET: no draft or merged field"
+			return "cannot verify a receipt: pull request GET: no draft or merged field"
 		}, true},
 		{"pull-request-without-merged", patchPull(`{"merged":null}`), func(*fixture, state) string {
-			return "cannot verify the pull request receipt: pull request GET: no draft or merged field"
+			return "cannot verify a receipt: pull request GET: no draft or merged field"
 		}, true},
 		// The head SHA goes into the compare path and the record only once
 		// it is a full commit SHA.
 		{"pull-request-head-not-a-sha", patchPull(`{"head":{"sha":"main"}}`), func(*fixture, state) string {
-			return `cannot verify the pull request receipt: pull request GET: head.sha "main" is not a full commit SHA`
+			return `cannot verify a receipt: pull request GET: head.sha "main" is not a full commit SHA`
 		}, true},
 		{"url-mismatch", func(t *testing.T, f *fixture, c agentCall, s state) map[string]any {
 			data := f.publishWork(t, c, "no_change")
@@ -385,14 +385,14 @@ func TestPublishReceiptRejected(t *testing.T) {
 		{"head-not-pushed", func(t *testing.T, f *fixture, c agentCall, s state) map[string]any {
 			f.publishWork(t, c, "no_change")
 			return publishData(dispositionsFor(t, c), "committed", workBranch, f.commit(t, c.task.Worktree, "fixed\n"), 1)
-		}, func(*fixture, state) string { return "cannot verify the pull request receipt: compare GET: " }, true},
+		}, func(*fixture, state) string { return "cannot verify a receipt: compare GET: " }, true},
 		{"compare-malformed", func(t *testing.T, f *fixture, c agentCall, s state) map[string]any {
 			data := f.publishWork(t, c, "no_change")
 			f.setOriginBranch(workBranch, s.implemented)
 			f.write(filepath.Join(f.dir, "gh-body-compare"), `{"status":"unknown"}`)
 			return data
 		}, func(*fixture, state) string {
-			return `cannot verify the pull request receipt: compare GET: status "unknown" is not ahead, behind, diverged or identical`
+			return `cannot verify a receipt: compare GET: status "unknown" is not ahead, behind, diverged or identical`
 		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

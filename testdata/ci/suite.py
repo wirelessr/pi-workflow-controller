@@ -18,7 +18,7 @@ QUEUE = "TestEnginePersistenceObservationQueueSaturation"
 FAMILIES = {
     "pi-workflow-controller/internal/workflows/codechange": [
         ("fix", ("TestFix",)), ("publish", ("TestPublish",)), ("review", ("TestPrePR", "TestDeepReview")),
-        ("state", ("TestState",)), ("converge-termination", ("TestConvergeTermination",)), ("converge", ("TestConverge",))],
+        ("state", ("TestState",)), ("converge-termination", ("TestConvergeTermination", "TestConvergeWrites")), ("converge", ("TestConverge",))],
 }
 # Only opt-in integration identities are configured here, never a case registry.
 OPTINS = {

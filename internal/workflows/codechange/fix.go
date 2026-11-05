@@ -61,7 +61,7 @@ func fix(ctx context.Context, r *engine.Run, p prepared, piCWD string, reviewed 
 		outputs, failed, func(v fixed) error {
 			return checkCoverage(v.Dispositions, found.Findings, func(f findingID) string { return fmt.Sprintf("id %q", f.ID) },
 				"is not a finding of the deep review report in request.inputs; want only its findings")
-		})
+		}, nil)
 	if err != nil {
 		return result, err
 	}
@@ -104,14 +104,15 @@ type pushContract interface {
 // once the worktree HEAD read through the registration is still last, the
 // last verified head. It checks the accepted contract's receipt once with the
 // correction Step's checks, the pull request and its branch taken from the
-// record and a committed head required to be built on last; records
+// record and a committed head required to be built on last, then, when
+// writes is set, the contract's other external writes with it; records
 // ps.decision in ps.scope; strictly closes the session; and succeeds only
 // when the worktree HEAD read after that close is still the pushed head,
 // returning the accepted contract. A failure before the dispatch returns
 // before; every failure from the dispatch on, while the run can still act,
 // records the external objects that exist as the Final. Both return the
 // original error.
-func runPush[T pushContract](ctx context.Context, r *engine.Run, p prepared, pr pullRequestRecord, last string, ps pushStep, outputs map[string]contract.Ref, before engine.Result, check func(T) error) (T, engine.Result, error) {
+func runPush[T pushContract](ctx context.Context, r *engine.Run, p prepared, pr pullRequestRecord, last string, ps pushStep, outputs map[string]contract.Ref, before engine.Result, check func(T) error, writes func(context.Context, T) error) (T, engine.Result, error) {
 	var none T
 	// Agents ran after the last read, and only their requirements kept them
 	// from the worktree.
@@ -142,7 +143,11 @@ func runPush[T pushContract](ctx context.Context, r *engine.Run, p prepared, pr 
 	}
 	hand := handoff{session: h, sessionID: identity.SessionID, head: last}
 	if err == nil {
-		err = p.pushTail(ctx, r, ps, hand, out, rc)
+		var other func(context.Context) error
+		if writes != nil {
+			other = func(ctx context.Context) error { return writes(ctx, v) }
+		}
+		err = p.pushTail(ctx, r, ps, hand, out, rc, other)
 	}
 	if err != nil {
 		result, err := p.externalObjects(ctx, r, ps.scope, ps.prefix, hand, ps.step, outputs, reported, err)
@@ -152,12 +157,17 @@ func runPush[T pushContract](ctx context.Context, r *engine.Run, p prepared, pr 
 }
 
 // pushTail checks rc, the accepted contract's receipt of ps, against the
-// worktree and GitHub, records ps.decision in ps.scope, strictly closes the
-// session and requires the worktree HEAD read after that close to be the
-// pushed head.
-func (p prepared) pushTail(ctx context.Context, r *engine.Run, ps pushStep, hand handoff, out engine.StepResult, rc receipt) error {
+// worktree and GitHub, then writes, when set, records ps.decision in
+// ps.scope, strictly closes the session and requires the worktree HEAD read
+// after that close to be the pushed head.
+func (p prepared) pushTail(ctx context.Context, r *engine.Run, ps pushStep, hand handoff, out engine.StepResult, rc receipt, writes func(context.Context) error) error {
 	if _, err := p.verifyPullRequest(ctx, r, hand.head, rc); err != nil {
 		return err
+	}
+	if writes != nil {
+		if err := writes(ctx); err != nil {
+			return err
+		}
 	}
 	if err := ps.scope.Decision(ctx, ps.decision, "The reported head is the worktree HEAD, built on the verified head when committed, and the pull request of the pull request record, as GitHub shows it, is still open, not a draft, from the record's branch to the default branch, at that head or a descendant", []contract.Ref{out.Output}); err != nil {
 		return err

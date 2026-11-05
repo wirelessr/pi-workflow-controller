@@ -53,6 +53,7 @@ class SuiteTest(unittest.TestCase):
                     'TestStateWaitSettle': base + '-state', 'TestStateFinalReadFailureKeepsWorktree': base + '-state',
                     'TestConvergeTermination': base + '-converge-termination', 'TestConvergeLimits': base + '-converge',
                     'TestConvergeTerminationLater': base + '-converge-termination',
+                    'TestConvergeWritesChecked': base + '-converge-termination',
                     'TestImplementReady': base, 'TestCheckReview': base, 'TestFi': base,
                     'TestBrandNewFamily': base, 'TestReviewFix': base}
         tops = {package: sorted(expected), 'other/pkg': ['TestFixOther']}
