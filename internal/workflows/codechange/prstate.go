@@ -142,33 +142,43 @@ func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 // finalState waits for the state of the pull request of the committed
 // pull-request record, then reads it once and attaches it as final-snapshot,
-// keeping result's Final. A wait that reached its cap is recorded, not an
-// error. A failed read wraps errStateRead, adds a summary of the wait so a
-// long failed wait is not lost, and attaches nothing; the run's
-// cancellation, deadline or fatal error is returned as its cause.
+// keeping result's Final.
 func (p prepared) finalState(ctx context.Context, r *engine.Run, result engine.Result, sp statePolicy) (engine.Result, error) {
 	pr, err := engine.Decode[pullRequestRecord](ctx, r, result.Outputs["pull-request"])
 	if err != nil {
 		return result, err
 	}
-	wait, err := p.awaitState(ctx, r.Dir(), pr.Number, sp)
-	if err != nil {
-		return result, err
-	}
-	record, err := p.readState(ctx, r.Dir(), pr.Number, sp)
-	if errors.Is(err, errStateRead) {
-		return result, fmt.Errorf("%w; %s", err, wait.summary())
-	}
-	if err != nil {
-		return result, err
-	}
-	record.Wait = wait
-	ref, err := r.Root().Attach(ctx, engine.AttachSpec{Key: "final-snapshot", Output: contract.Spec{SchemaID: PRStateSchema}, Data: record})
+	ref, _, err := p.recordState(ctx, r, r.Root(), "final-snapshot", pr.Number, sp)
 	if err != nil {
 		return result, err
 	}
 	result.Outputs["final-snapshot"] = ref
 	return result, nil
+}
+
+// recordState waits for the state of pull request number, then reads it
+// once and attaches it in s under key. A wait that reached its cap is
+// recorded, not an error. A failed read wraps errStateRead, adds a summary
+// of the wait so a long failed wait is not lost, and attaches nothing; the
+// run's cancellation, deadline or fatal error is returned as its cause.
+func (p prepared) recordState(ctx context.Context, r *engine.Run, s *engine.Scope, key string, number int, sp statePolicy) (contract.Ref, prStateRecord, error) {
+	wait, err := p.awaitState(ctx, r.Dir(), number, sp)
+	if err != nil {
+		return contract.Ref{}, prStateRecord{}, err
+	}
+	record, err := p.readState(ctx, r.Dir(), number, sp)
+	if errors.Is(err, errStateRead) {
+		return contract.Ref{}, prStateRecord{}, fmt.Errorf("%w; %s", err, wait.summary())
+	}
+	if err != nil {
+		return contract.Ref{}, prStateRecord{}, err
+	}
+	record.Wait = wait
+	ref, err := s.Attach(ctx, engine.AttachSpec{Key: key, Output: contract.Spec{SchemaID: PRStateSchema}, Data: record})
+	if err != nil {
+		return contract.Ref{}, prStateRecord{}, err
+	}
+	return ref, record, nil
 }
 
 // awaitState polls the pull request's head, check runs and commit statuses

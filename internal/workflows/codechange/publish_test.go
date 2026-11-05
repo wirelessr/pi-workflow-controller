@@ -197,7 +197,7 @@ func TestPublishSucceeds(t *testing.T) {
 			if publishAttempt.Scope != "root" || publishAttempt.Key != "publish" || publishAttempt.HandleID != implementAttempt.HandleID || *publishAttempt.Output != outputs["publish"] {
 				t.Fatalf("publish attempt scope %s key %s handle %s (implementer %s)", publishAttempt.Scope, publishAttempt.Key, publishAttempt.HandleID, implementAttempt.HandleID)
 			}
-			if c.task != (task{Role: "implementer", Requirements: baselineRequirements + "\n\n" + publishRequirements, Worktree: a.worktree()}) {
+			if !reflect.DeepEqual(c.task, task{Role: "implementer", Requirements: baselineRequirements + "\n\n" + publishRequirements, Worktree: a.worktree()}) {
 				t.Fatalf("publish task %+v", c.task)
 			}
 			reviews := []contract.Ref{outputs["review-basic"], outputs["review-consistency"]}
@@ -427,7 +427,7 @@ func TestPublishReceiptRejected(t *testing.T) {
 				t.Fatalf("decisions %+v", got)
 			}
 			a.requireSessionsClosed(t, 3)
-			a.requireAttempts(t, 4, "input", "external-objects")
+			a.requireAttempts(t, 4, "input", "skills", "external-objects")
 			requireKept(t, a.run)
 			// The worktree branch and the reported one are the same here.
 			branch, tip := workBranch, f.originTip(workBranch)
@@ -516,7 +516,7 @@ func TestPublishRepair(t *testing.T) {
 			if fb := calls[1].request.Feedback; fb == nil || !strings.Contains(fb.Message, tc.diagnostic) || !reflect.DeepEqual(fb.Refs, reviews) {
 				t.Fatalf("repair feedback %+v, want %q and the review Refs", fb, tc.diagnostic)
 			}
-			if calls[1].task != calls[0].task || !reflect.DeepEqual(calls[1].request.Inputs, calls[0].request.Inputs) {
+			if !reflect.DeepEqual(calls[1].task, calls[0].task) || !reflect.DeepEqual(calls[1].request.Inputs, calls[0].request.Inputs) {
 				t.Fatal("repair task or inputs changed")
 			}
 			a.requireRepairKeepsWork(t, calls...)
@@ -733,7 +733,7 @@ func TestPublishCancelled(t *testing.T) {
 	if report.Outcome != engine.CancelledState || report.ExitCode != 130 || report.Final != nil {
 		t.Fatalf("outcome %s exit %d final %+v", report.Outcome, report.ExitCode, report.Final)
 	}
-	if _, ok := report.Result.Outputs["external-objects"]; ok || len(report.Result.Outputs) != 4 {
+	if _, ok := report.Result.Outputs["external-objects"]; ok || len(report.Result.Outputs) != 5 {
 		t.Fatalf("outputs %+v", report.Result.Outputs)
 	}
 	// The cancellation alone, with no failed attempt to read or record.
@@ -853,7 +853,7 @@ func TestPublishLimits(t *testing.T) {
 		name     string
 		attempts int
 		pushed   bool
-	}{{"before-the-correction", 4, false}, {"before-the-record", 5, true}} {
+	}{{"before-the-correction", 5, false}, {"before-the-record", 6, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
 			var implemented string

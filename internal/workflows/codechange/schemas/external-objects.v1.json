@@ -84,10 +84,11 @@
       "minLength": 1
     },
     "step": {
-      "description": "The Step that writes to GitHub after whose dispatch the run failed. publish: the correction Step that opened the pull request; its contract reports the branch, head and pull request. fix: the fix Step after the deep review; its contract reports only the head, and the branch and pull request are the pull request record's",
+      "description": "The Step that writes to GitHub after whose dispatch the run failed. publish: the correction Step that opened the pull request; its contract reports the branch, head and pull request. fix: the fix Step after the deep review; its contract reports only the head, and the branch and pull request are the pull request record's. converge: the converge Step of the convergence round that the round-NNN- prefix of this record's output name names; it reports like fix",
       "enum": [
         "publish",
-        "fix"
+        "fix",
+        "converge"
       ]
     },
     "session": {
@@ -164,7 +165,7 @@
       }
     },
     "reported": {
-      "description": "The receipt of the last contract of step that passed the schema, accepted or rejected, which is the output named after step, with its branch and pull request as step says where they come from, and what one read each shows for that branch and pull request number in the target repository on GitHub. A branch pushed under another name than the worktree branch is covered only here",
+      "description": "The receipt of the last contract of step that passed the schema, accepted or rejected, which is the output named after step, for converge with the round-NNN- prefix of this record's output name, with its branch and pull request as step says where they come from, and what one read each shows for that branch and pull request number in the target repository on GitHub. A branch pushed under another name than the worktree branch is covered only here",
       "type": "object",
       "additionalProperties": false,
       "required": [

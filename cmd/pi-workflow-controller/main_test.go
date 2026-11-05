@@ -132,21 +132,37 @@ func TestCLIMainSubprocess(t *testing.T) {
 	main()
 }
 
-// main hands PWC_PI_CWD to the registered workflows, not only to the engine:
-// code-change rejects the relative value before any side effect.
-func TestCLIMainPassesPiCWDToWorkflows(t *testing.T) {
+// main hands PWC_PI_CWD and PWC_CODE_CHANGE_SKILLS_DIR to the registered
+// workflows, not only PWC_PI_CWD to the engine: code-change rejects each
+// relative value once the checks before it pass, before any side effect.
+func TestCLIMainPassesEnvToWorkflows(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	home := t.TempDir()
-	cmd := exec.Command(executable, "-test.run=^TestCLIMainSubprocess$")
-	cmd.Dir = t.TempDir()
-	cmd.Env = append(os.Environ(), "PWC_CLI_MAIN=1", "PWC_PI_CWD=relative-pi-cwd", "HOME="+home)
-	out, err := cmd.CombinedOutput()
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(string(out), `"relative-pi-cwd"`) {
-		t.Fatalf("main: %v\n%s", err, out)
+	for _, tc := range []struct {
+		name, want string
+		env        func(t *testing.T) []string
+	}{
+		{"pi-cwd", `"relative-pi-cwd"`, func(*testing.T) []string { return []string{"PWC_PI_CWD=relative-pi-cwd"} }},
+		{"skills-dir", `"relative-skills"`, func(t *testing.T) []string {
+			return []string{"PWC_PI_CWD=" + t.TempDir(), "NODE_TLS_REJECT_UNAUTHORIZED=1", "PWC_CODE_CHANGE_SKILLS_DIR=relative-skills"}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, launch := t.TempDir(), t.TempDir()
+			if err := os.WriteFile(filepath.Join(launch, "design.md"), []byte("# Design\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(executable, "-test.run=^TestCLIMainSubprocess$")
+			cmd.Dir = launch
+			cmd.Env = append(append(os.Environ(), "PWC_CLI_MAIN=1", "HOME="+home), tc.env(t)...)
+			out, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(string(out), tc.want) {
+				t.Fatalf("main: %v\n%s", err, out)
+			}
+		})
 	}
 }
 

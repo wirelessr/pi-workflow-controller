@@ -12,12 +12,13 @@ import time
 
 ENGINE = "pi-workflow-controller/internal/engine"
 QUEUE = "TestEnginePersistenceObservationQueueSaturation"
-# Top-level name-prefix families split out of a package's base group to fit the job timeout;
-# every unmatched name, including new ones, stays in the base group.
+# Top-level name-prefix families split out of a package's base group to fit the job timeout,
+# in order: a name joins the first family it matches; every unmatched name, including new
+# ones, stays in the base group.
 FAMILIES = {
     "pi-workflow-controller/internal/workflows/codechange": [
         ("fix", ("TestFix",)), ("publish", ("TestPublish",)), ("review", ("TestPrePR", "TestDeepReview")),
-        ("state", ("TestState",))],
+        ("state", ("TestState",)), ("converge-termination", ("TestConvergeTermination",)), ("converge", ("TestConverge",))],
 }
 # Only opt-in integration identities are configured here, never a case registry.
 OPTINS = {

@@ -40,7 +40,14 @@ const ExternalObjectsSchema = "code-change.external-objects.v1"
 // mechanical wait.
 const PRStateSchema = "code-change.pr-state.v1"
 
-var schemaNames = []string{"input", "implement", "review", "publish", "pull-request", "fix", "external-objects", "pr-state"}
+// SkillsSchema is the Controller record of the private skill subtree
+// expanded for the run.
+const SkillsSchema = "code-change.skills.v1"
+
+// ConvergeSchema is a converger's report of one round and its push receipt.
+const ConvergeSchema = "code-change.converge.v1"
+
+var schemaNames = []string{"input", "implement", "review", "publish", "pull-request", "fix", "external-objects", "pr-state", "skills", "converge"}
 
 func Resources() []contract.Resource {
 	var out []contract.Resource

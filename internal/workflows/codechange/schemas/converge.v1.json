@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/code-change/converge.v1.json",
+  "description": "A converger's report of one round on the pull request: what it checked and found, whether it claims convergence, and the change and the head it pushed",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "snapshot",
+    "converged",
+    "items",
+    "correction",
+    "head"
+  ],
+  "properties": {
+    "snapshot": {
+      "$ref": "#/$defs/ref",
+      "description": "The pull request state snapshot Ref this request gave, copied byte-exact from request.inputs"
+    },
+    "converged": {
+      "description": "Whether this round claims the pull request has converged. The claim does not cover the items reported as skipped or not_checked",
+      "type": "boolean"
+    },
+    "unconverged": {
+      "description": "What remains before the pull request converges, one item each; required exactly when converged is false",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "items": {
+      "description": "Every check of this round with its status, ids unique. Exactly one item has the id quality-scan",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/item"
+      },
+      "contains": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "const": "quality-scan"
+          }
+        }
+      },
+      "minContains": 1,
+      "maxContains": 1
+    },
+    "correction": {
+      "description": "Where this round left the worktree HEAD. committed: at a new commit after the previous report's head, pushed to the pull request record's branch. no_change: still at that head, with nothing pushed",
+      "enum": [
+        "committed",
+        "no_change"
+      ]
+    },
+    "head": {
+      "description": "The worktree HEAD at the end of this round, which, when committed, is the commit pushed to the pull request record's branch",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  },
+  "if": {
+    "properties": {
+      "converged": {
+        "const": false
+      }
+    }
+  },
+  "then": {
+    "required": [
+      "unconverged"
+    ]
+  },
+  "else": {
+    "properties": {
+      "unconverged": false
+    }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "description": "The check's id; quality-scan is the quality scan",
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "description": "passed or failed when the check ran. skipped: a check whose id this schema lists for it was not run because its precondition is missing, which the reason states. not_checked: the check could not run for another reason, which the reason states. Neither skipped nor not_checked is a pass",
+          "enum": [
+            "passed",
+            "failed",
+            "skipped",
+            "not_checked"
+          ]
+        },
+        "reason": {
+          "description": "What was checked and found; for skipped, the missing precondition; for not_checked, why it could not run",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "skipped",
+                  "not_checked"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "skipped"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "id": {
+                "enum": [
+                  "quality-scan"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "attempt_id",
+        "path",
+        "schema_id",
+        "sha256",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "schema_id": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

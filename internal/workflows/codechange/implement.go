@@ -67,7 +67,7 @@ func implement(ctx context.Context, r *engine.Run, p prepared, piCWD string) (en
 	}
 	ref := out.Output
 	// A receipt failure still reports the committed contracts, without a Final.
-	outputs := map[string]contract.Ref{"input": p.input, "implement": ref}
+	outputs := map[string]contract.Ref{"input": p.input, "skills": p.skills.record, "implement": ref}
 	head, err := p.worktree.head(ctx)
 	if err != nil {
 		return engine.Result{Outputs: outputs}, handoff{}, err

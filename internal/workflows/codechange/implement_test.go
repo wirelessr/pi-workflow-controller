@@ -117,6 +117,16 @@ type agents struct {
 	deepReview func(t *testing.T, c agentCall) string
 	// fix answers the fix Step; nil fixes nothing.
 	fix func(t *testing.T, c agentCall) string
+	// converge answers every round's converge Step; nil claims convergence
+	// without a change.
+	converge func(t *testing.T, c agentCall) string
+	// rounds, when set, is the round policy of the run r; the production
+	// policy otherwise.
+	rounds func(r *engine.Run) roundPolicy
+	// deadline replaces the fixture's 60 seconds.
+	deadline time.Duration
+	// body, when set, runs instead of execute, with the round policy.
+	body func(ctx context.Context, r *engine.Run, in engine.Input, rounds roundPolicy) (engine.Result, error)
 	// release reports whether the deferred prompts are settled after c was
 	// answered; nil settles them after any answer that is not "defer".
 	release func(t *testing.T, r *engine.Run, c agentCall) bool
@@ -142,7 +152,11 @@ func (f *fixture) run(t *testing.T, as agents) a1Run {
 			t.Fatal(err)
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	deadline := 60 * time.Second
+	if as.deadline != 0 {
+		deadline = as.deadline
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	host, err := protocol.NewHost(ctx, 16)
 	if err != nil {
@@ -164,7 +178,17 @@ func (f *fixture) run(t *testing.T, as agents) a1Run {
 				return engine.Result{}, err
 			}
 		}
-		result, err := execute(ctx, r, in, f.piCWD, f.fileSource(), testState)
+		rounds := convergeRounds
+		if as.rounds != nil {
+			rounds = as.rounds(r)
+		}
+		var result engine.Result
+		var err error
+		if as.body != nil {
+			result, err = as.body(ctx, r, in, rounds)
+		} else {
+			result, err = execute(ctx, r, in, f.piCWD, f.skills, f.fileSource(), testState, rounds)
+		}
 		if as.returned != nil {
 			as.returned(r)
 		}
@@ -254,6 +278,11 @@ func (f *fixture) run(t *testing.T, as agents) a1Run {
 					if agent == nil {
 						agent = f.acceptFix
 					}
+				case c.request.Output.SchemaID == ConvergeSchema:
+					agent = as.converge
+					if agent == nil {
+						agent = f.acceptConverge
+					}
 				default:
 					agent = as.review
 					if agent == nil {
@@ -339,12 +368,12 @@ func (a a1Run) requireExitsConfirmed(t *testing.T) {
 }
 
 // requireAttempts checks the run's accounting: steps Agent attempts and the
-// Controller Attaches with the keys attaches, only the input when none is
-// given.
+// Controller Attaches with the keys attaches, only the input and the skills
+// when none is given.
 func (a a1Run) requireAttempts(t *testing.T, steps int, attaches ...string) {
 	t.Helper()
 	if attaches == nil {
-		attaches = []string{"input"}
+		attaches = []string{"input", "skills"}
 	}
 	var controller []string
 	for _, attempt := range a.report.Snapshot.Attempts {
@@ -357,6 +386,18 @@ func (a a1Run) requireAttempts(t *testing.T, steps int, attaches ...string) {
 	if len(a.report.Snapshot.Attempts) != steps+len(attaches) || !slices.Equal(controller, attaches) || len(a.calls) != steps || len(a.runtime.dispatches) != steps {
 		t.Fatalf("attempts %d (Controller %v) calls %d dispatches %d, want %d Agent attempts and the Attaches %v", len(a.report.Snapshot.Attempts), controller, len(a.calls), len(a.runtime.dispatches), steps, attaches)
 	}
+}
+
+// skillsRef is the skills record the run attached in root.
+func (a a1Run) skillsRef(t *testing.T) contract.Ref {
+	t.Helper()
+	for _, at := range a.report.Snapshot.Attempts {
+		if at.Scope == "root" && at.Key == "skills" && at.Output != nil {
+			return *at.Output
+		}
+	}
+	t.Fatal("no skills record")
+	return contract.Ref{}
 }
 
 func (a a1Run) worktree() string {
@@ -540,9 +581,10 @@ func TestImplementReady(t *testing.T) {
 	}
 	// The implement receipt's HEAD and history, the HEAD after the review,
 	// the correction receipt's HEAD and history, the HEAD after its close,
-	// and for the fix Step, which commits nothing, the HEAD before it, its
-	// receipt's HEAD and the HEAD after its close.
-	if !reflect.DeepEqual(reads, []string{"rev-parse", "rev-list", "rev-parse", "rev-parse", "rev-list", "rev-parse", "rev-parse", "rev-parse", "rev-parse"}) || !reflect.DeepEqual(snapshot, []string{"init", "worktree"}) {
+	// and for the fix Step and the one convergence round, neither of which
+	// commits, the HEAD before each, its receipt's HEAD and the HEAD after
+	// its close.
+	if !reflect.DeepEqual(reads, []string{"rev-parse", "rev-list", "rev-parse", "rev-parse", "rev-list", "rev-parse", "rev-parse", "rev-parse", "rev-parse", "rev-parse", "rev-parse", "rev-parse"}) || !reflect.DeepEqual(snapshot, []string{"init", "worktree"}) {
 		t.Fatalf("registration reads %v, snapshot git %v", reads, snapshot)
 	}
 }
@@ -649,7 +691,7 @@ func TestImplementReceiptRejected(t *testing.T) {
 				t.Fatalf("final delivered: %+v", report.Final)
 			}
 			implement := report.Snapshot.Attempts[call.request.Identity.AttemptID].Output
-			if implement == nil || !reflect.DeepEqual(report.Result.Outputs, map[string]contract.Ref{"input": call.request.Inputs[0], "implement": *implement}) {
+			if implement == nil || !reflect.DeepEqual(report.Result.Outputs, map[string]contract.Ref{"input": call.request.Inputs[0], "skills": a.skillsRef(t), "implement": *implement}) {
 				t.Fatalf("outputs %+v, want the input and the accepted implement contract", report.Result.Outputs)
 			}
 			if got := a.decisions(t); len(got) != 0 {

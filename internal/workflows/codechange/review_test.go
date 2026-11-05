@@ -142,7 +142,7 @@ func TestPrePRReviewSucceeds(t *testing.T) {
 	a.requireExitsConfirmed(t)
 	calls := a.reviewCalls()
 	implementAttempt := a.attempt(a.calls[0])
-	want := map[string]contract.Ref{"input": a.calls[0].request.Inputs[0], "implement": *implementAttempt.Output}
+	want := map[string]contract.Ref{"input": a.calls[0].request.Inputs[0], "skills": a.skillsRef(t), "implement": *implementAttempt.Output}
 	reviewHandles := map[string]bool{}
 	for _, rv := range reviewers {
 		if len(calls[rv.name]) != 1 {
@@ -159,7 +159,7 @@ func TestPrePRReviewSucceeds(t *testing.T) {
 			t.Fatalf("%s role %+v", rv.name, role)
 		}
 		// The task names the checkout, base and head, and no worktree.
-		if c.task != (task{Role: rv.name, Requirements: baselineRequirements + "\n\n" + reviewRequirements + "\n" + rv.focus, Checkout: filepath.Join(a.run.Dir(), snapshotDir, "checkout"), Base: f.head, Head: head}) {
+		if !reflect.DeepEqual(c.task, task{Role: rv.name, Requirements: baselineRequirements + "\n\n" + reviewRequirements + "\n" + rv.focus, Checkout: filepath.Join(a.run.Dir(), snapshotDir, "checkout"), Base: f.head, Head: head}) {
 			t.Fatalf("%s task %+v", rv.name, c.task)
 		}
 		if !reflect.DeepEqual(c.request.Inputs, []contract.Ref{want["input"], want["implement"]}) || c.request.Feedback != nil || c.request.Output.SchemaID != ReviewSchema {
@@ -272,7 +272,7 @@ func TestPrePRReviewSnapshotPinned(t *testing.T) {
 				t.Fatalf("worktree HEAD did not move past %s", head)
 			}
 			requireFailure(t, report, "code-change worktree HEAD moved during pre-PR review: the worktree HEAD is "+moved+"; want the verified head "+head)
-			if !errors.Is(report.Failure, errHeadMoved) || report.Final != nil || len(report.Result.Outputs) != 4 {
+			if !errors.Is(report.Failure, errHeadMoved) || report.Final != nil || len(report.Result.Outputs) != 5 {
 				t.Fatalf("failure %v final %+v outputs %+v", report.Failure, report.Final, report.Result.Outputs)
 			}
 			a.requireDecision(t, "implementation-recorded")
@@ -393,7 +393,7 @@ func TestPrePRReviewSnapshotFailure(t *testing.T) {
 			}})
 			report := a.report
 			requireFailure(t, report, tc.want(report))
-			if report.Final != nil || len(report.Result.Outputs) != 2 || report.Result.Outputs["implement"] != *a.attempt(a.calls[0]).Output {
+			if report.Final != nil || len(report.Result.Outputs) != 3 || report.Result.Outputs["implement"] != *a.attempt(a.calls[0]).Output {
 				t.Fatalf("final %+v outputs %+v", report.Final, report.Result.Outputs)
 			}
 			a.requireSessionsClosed(t, 1)
@@ -472,7 +472,7 @@ func TestPrePRReviewerFailure(t *testing.T) {
 				t.Fatalf("outcome %s exit %d final %+v failure %+v, want code %s", report.Outcome, report.ExitCode, report.Final, report.Snapshot.Failure, tc.code)
 			}
 			calls := a.reviewCalls()
-			want := map[string]contract.Ref{"input": a.calls[0].request.Inputs[0], "implement": *a.attempt(a.calls[0]).Output}
+			want := map[string]contract.Ref{"input": a.calls[0].request.Inputs[0], "skills": a.skillsRef(t), "implement": *a.attempt(a.calls[0]).Output}
 			attempts := 1
 			for _, rv := range reviewers {
 				n := 1
@@ -555,7 +555,7 @@ func TestPrePRReviewerCloseUnconfirmed(t *testing.T) {
 			if failure.Code != engine.CleanupFailed || failure.Phase != "code-change-review-basic" || failure.HandleID != basic.HandleID || failure.Message != tc.message {
 				t.Fatalf("failure %+v, want a cleanup failure of handle %s", failure, basic.HandleID)
 			}
-			if report.Result.Outputs["review-basic"] != *basic.Output || len(report.Result.Outputs) != 4 {
+			if report.Result.Outputs["review-basic"] != *basic.Output || len(report.Result.Outputs) != 5 {
 				t.Fatalf("outputs %+v, want the accepted findings", report.Result.Outputs)
 			}
 			a.requireDecision(t, "implementation-recorded")
@@ -596,7 +596,7 @@ func TestPrePRReviewCancelled(t *testing.T) {
 	if report.Outcome != engine.CancelledState || report.ExitCode != 130 || report.Final != nil {
 		t.Fatalf("outcome %s exit %d final %+v", report.Outcome, report.ExitCode, report.Final)
 	}
-	want := map[string]contract.Ref{"input": a.calls[0].request.Inputs[0], "implement": *a.attempt(a.calls[0]).Output, "review-" + first.task.Role: *a.attempt(first).Output}
+	want := map[string]contract.Ref{"input": a.calls[0].request.Inputs[0], "skills": a.skillsRef(t), "implement": *a.attempt(a.calls[0]).Output, "review-" + first.task.Role: *a.attempt(first).Output}
 	if !reflect.DeepEqual(report.Result.Outputs, want) {
 		t.Fatalf("outputs %+v, want %+v", report.Result.Outputs, want)
 	}
@@ -626,7 +626,7 @@ func TestPrePRReviewDecisionFailure(t *testing.T) {
 	})
 	report := a.report
 	requireFailure(t, report, "invalid or duplicate scope/decision name")
-	if report.Final != nil || len(report.Result.Outputs) != 4 {
+	if report.Final != nil || len(report.Result.Outputs) != 5 {
 		t.Fatalf("final %+v outputs %+v", report.Final, report.Result.Outputs)
 	}
 	if !errors.Is(snapshotAtReturn, os.ErrNotExist) {
@@ -683,7 +683,7 @@ func TestPrePRReviewRepair(t *testing.T) {
 			if fb := basic[1].request.Feedback; fb == nil || !strings.Contains(fb.Message, tc.diagnostic) || len(fb.Refs) != 0 {
 				t.Fatalf("repair feedback %+v, want %q", fb, tc.diagnostic)
 			}
-			if basic[1].task != basic[0].task || !reflect.DeepEqual(basic[1].request.Inputs, basic[0].request.Inputs) {
+			if !reflect.DeepEqual(basic[1].task, basic[0].task) || !reflect.DeepEqual(basic[1].request.Inputs, basic[0].request.Inputs) {
 				t.Fatalf("repair task or inputs changed")
 			}
 			var repairDispatch string
@@ -700,7 +700,7 @@ func TestPrePRReviewRepair(t *testing.T) {
 }
 
 // One less than the live sessions, sessions or attempts pre-PR review needs
-// (three, three and four with the input Attach; TestPrePRReviewSucceeds runs
+// (three, three and five with the input and skills Attaches; TestPrePRReviewSucceeds runs
 // at those live sessions) stops the run with a run-scope
 // LimitExceeded after every started session's exit is confirmed.
 func TestPrePRReviewLimits(t *testing.T) {
@@ -709,9 +709,9 @@ func TestPrePRReviewLimits(t *testing.T) {
 		live, sessions, attempts int
 		want                     string
 	}{
-		{"live", 2, 3, 4, "session limit exceeded"},
-		{"sessions", 3, 2, 4, "session limit exceeded"},
-		{"attempts", 3, 3, 3, "run attempt limit exceeded"},
+		{"live", 2, 3, 5, "session limit exceeded"},
+		{"sessions", 3, 2, 5, "session limit exceeded"},
+		{"attempts", 3, 3, 4, "run attempt limit exceeded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)

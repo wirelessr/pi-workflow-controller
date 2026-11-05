@@ -51,6 +51,8 @@ class SuiteTest(unittest.TestCase):
                     'TestPublishSucceeds': base + '-publish', 'TestPrePRReviewSucceeds': base + '-review',
                     'TestPrePRReviewerFailure': base + '-review', 'TestDeepReviewLimits': base + '-review',
                     'TestStateWaitSettle': base + '-state', 'TestStateFinalReadFailureKeepsWorktree': base + '-state',
+                    'TestConvergeTermination': base + '-converge-termination', 'TestConvergeLimits': base + '-converge',
+                    'TestConvergeTerminationLater': base + '-converge-termination',
                     'TestImplementReady': base, 'TestCheckReview': base, 'TestFi': base,
                     'TestBrandNewFamily': base, 'TestReviewFix': base}
         tops = {package: sorted(expected), 'other/pkg': ['TestFixOther']}

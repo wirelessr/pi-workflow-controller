@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pi-workflow-controller.local/schemas/code-change/pr-state.v1.json",
-  "description": "Controller record of the pull request state as read-only GitHub reads showed it after a mechanical wait: identities, states, locations and links, nullable fields as GitHub gave them. A field that cannot be null missing from GitHub's answer failed the read, and each list matched the total count GitHub reported on every page with no key repeated, or nothing was recorded. It holds no bodies, logs or comment text. The Controller used no state or conclusion beyond the wait's test and judged nothing; their meaning is the reader's to judge",
+  "description": "Controller record of the pull request state as read-only GitHub reads showed it after a mechanical wait: identities, states, locations and links, nullable fields as GitHub gave them. A field that cannot be null missing from GitHub's answer failed the read, and each list matched the total count GitHub reported on every page with no key repeated, or nothing was recorded. It holds no bodies, logs or comment text. The Controller used no state or conclusion beyond the wait's test, and the pull request's state, merged and head_sha to end the convergence rounds, and judged nothing; their meaning is the reader's to judge",
   "type": "object",
   "additionalProperties": false,
   "required": [

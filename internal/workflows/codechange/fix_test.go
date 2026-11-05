@@ -101,10 +101,11 @@ func (a a1Run) startedAt(t *testing.T) map[string]int {
 // the pull request record. Its receipt is checked once against the worktree
 // and GitHub with the pull request identity taken from the record; then the
 // workflow records fix-verified, strictly closes the session and re-reads
-// the HEAD, and only its successful return sets the removal, so the worktree
-// is still there when it returns and the run's cleanup removes it. A commit
-// someone else pushed meanwhile, merged by the fixer before its push, keeps
-// the verified head an ancestor and passes.
+// the HEAD; the convergence rounds follow, here one that converges, and
+// only the workflow's successful return after them sets the removal, so the
+// worktree is still there when it returns and the run's cleanup removes it.
+// A commit someone else pushed meanwhile, merged by the fixer before its
+// push, keeps the verified head an ancestor and passes.
 func TestFixSucceeds(t *testing.T) {
 	for _, tc := range []struct {
 		name, correction string
@@ -144,7 +145,7 @@ func TestFixSucceeds(t *testing.T) {
 				t.Fatalf("outcome %s exit %d failure %v", report.Outcome, report.ExitCode, report.Failure)
 			}
 			outputs := report.Result.Outputs
-			if report.Result.Final == nil || *report.Result.Final != (engine.FinalSelection{Output: "fix"}) || report.Final == nil || report.Final.Ref != outputs["fix"] {
+			if report.Result.Final == nil || *report.Result.Final != (engine.FinalSelection{Output: "round-001-converge"}) || report.Final == nil || report.Final.Ref != outputs["round-001-converge"] {
 				t.Fatalf("final selection %+v delivery %+v", report.Result.Final, report.Final)
 			}
 			if (pushed == implemented) != (tc.correction == "no_change") {
@@ -162,7 +163,7 @@ func TestFixSucceeds(t *testing.T) {
 			if role := report.Snapshot.Sessions[attempt.HandleID].Role; role.Name != fixRole || role.Model != implementModel || role.CWD != f.piCWD {
 				t.Fatalf("fixer role %+v", role)
 			}
-			if c.task != (task{Role: "fixer", Requirements: baselineRequirements + "\n\n" + fixRequirements, Worktree: a.worktree()}) {
+			if !reflect.DeepEqual(c.task, task{Role: "fixer", Requirements: baselineRequirements + "\n\n" + fixRequirements, Worktree: a.worktree()}) {
 				t.Fatalf("fix task %+v", c.task)
 			}
 			if !reflect.DeepEqual(c.request.Inputs, []contract.Ref{outputs["input"], outputs["implement"], outputs["pull-request"], outputs["deep-review-report"]}) || c.request.Feedback != nil || c.request.Output.SchemaID != FixSchema {
@@ -173,39 +174,44 @@ func TestFixSucceeds(t *testing.T) {
 			closed, finalizing, decided := a.journalIndex(t)
 			started := a.startedAt(t)[attempt.HandleID]
 			for _, other := range a.calls {
-				if h := a.attempt(other).HandleID; h != attempt.HandleID && (len(closed[h]) == 0 || closed[h][0] > started) {
+				if h := a.attempt(other).HandleID; h != attempt.HandleID && other.request.Output.SchemaID != ConvergeSchema && (len(closed[h]) == 0 || closed[h][0] > started) {
 					t.Fatalf("session %s closed at %v, fixer started at %d", h, closed[h], started)
 				}
 			}
 			if at := closed[attempt.HandleID]; len(at) != 1 || at[0] < decided["fix-verified"] || at[0] > finalizing {
 				t.Fatalf("fixer session closed at %v, verified at %d, finalizing at %d", at, decided["fix-verified"], finalizing)
 			}
-			if got := a.decisions(t); !reflect.DeepEqual(got[len(got)-1], decision{Scope: "root", Name: "fix-verified", Refs: []contract.Ref{outputs["fix"]}}) {
-				t.Fatalf("last decision %+v", got[len(got)-1])
+			if got := a.decisions(t); !slices.ContainsFunc(got, func(d decision) bool {
+				return reflect.DeepEqual(d, decision{Scope: "root", Name: "fix-verified", Refs: []contract.Ref{outputs["fix"]}})
+			}) {
+				t.Fatalf("decisions %+v", got)
 			}
 			// The receipt check's one PR GET, and no compare: the pushed head
-			// is the pull request head. Then the final state: one poll, which
-			// the fake GitHub's terminal state settles, and the snapshot.
+			// is the pull request head. Then the round: one poll, which the
+			// fake GitHub's terminal state settles, the snapshot, the round's
+			// receipt GET and the GET after its close; then the final state,
+			// one poll and the snapshot.
 			const get = "api --method GET --hostname github.com -H Accept: application/vnd.github+json "
-			state := []string{get + "repos/owner/repo/pulls/1", get + "repos/owner/repo/commits/" + pushed + "/check-runs?per_page=100 --paginate --slurp", get + "repos/owner/repo/commits/" + pushed + "/status?per_page=100 --paginate --slurp"}
-			want := append(append([]string{get + "repos/owner/repo/pulls/1"}, state...), append(state, "api graphql --hostname github.com -f query=<review threads> -f name=repo -f owner=owner -F number=1 --paginate --slurp")...)
+			pull := get + "repos/owner/repo/pulls/1"
+			poll := []string{pull, get + "repos/owner/repo/commits/" + pushed + "/check-runs?per_page=100 --paginate --slurp", get + "repos/owner/repo/commits/" + pushed + "/status?per_page=100 --paginate --slurp"}
+			state := append(append(slices.Clone(poll), poll...), "api graphql --hostname github.com -f query=<review threads> -f name=repo -f owner=owner -F number=1 --paginate --slurp")
+			want := slices.Concat([]string{pull}, state, []string{pull, pull}, state)
 			gh := f.ghCalls()
 			if last := slices.Index(gh, get+"repos/owner/repo/pulls/1/reviews?per_page=100 --paginate --slurp"); last < 0 || !slices.Equal(gh[last+1:], want) {
 				t.Fatalf("gh calls %q, want %q after the deep review", gh, want)
 			}
-			// The snapshot is attached after the fix Step; the fix contract
-			// stays the Final.
-			var fixDone, snapshotAt time.Time
+			// The final snapshot is attached after the round.
+			var roundDone, snapshotAt time.Time
 			for _, at := range report.Snapshot.Attempts {
 				switch at.Key {
-				case "fix":
-					fixDone = at.FinishedAt
+				case "converge":
+					roundDone = at.FinishedAt
 				case "final-snapshot":
 					snapshotAt = at.StartedAt
 				}
 			}
-			if s := snapshot(t, report); snapshotAt.IsZero() || !snapshotAt.After(fixDone) || s.PullRequest.HeadSHA != pushed || s.Wait.Outcome != "settled" || s.Wait.LastPolledHead != pushed {
-				t.Fatalf("final snapshot at %s after fix at %s: %+v", snapshotAt, fixDone, s)
+			if s := snapshot(t, report); snapshotAt.IsZero() || !snapshotAt.After(roundDone) || s.PullRequest.HeadSHA != pushed || s.Wait.Outcome != "settled" || s.Wait.LastPolledHead != pushed {
+				t.Fatalf("final snapshot at %s after the round at %s: %+v", snapshotAt, roundDone, s)
 			}
 			a.requireExitsConfirmed(t)
 			if checkoutAtReturn != nil {
@@ -300,7 +306,7 @@ func TestFixRepair(t *testing.T) {
 				},
 			})
 			report := a.report
-			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "fix" {
+			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "round-001-converge" {
 				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 			}
 			calls := a.fixCalls()
@@ -314,7 +320,7 @@ func TestFixRepair(t *testing.T) {
 			if fb := calls[1].request.Feedback; fb == nil || !strings.Contains(fb.Message, tc.diagnostic) || len(fb.Refs) != 0 {
 				t.Fatalf("repair feedback %+v, want %q", fb, tc.diagnostic)
 			}
-			if calls[1].task != calls[0].task || !reflect.DeepEqual(calls[1].request.Inputs, calls[0].request.Inputs) {
+			if !reflect.DeepEqual(calls[1].task, calls[0].task) || !reflect.DeepEqual(calls[1].request.Inputs, calls[0].request.Inputs) {
 				t.Fatal("repair task or inputs changed")
 			}
 			a.requireRepairKeepsWork(t, calls...)
@@ -584,14 +590,15 @@ func TestFixCancelled(t *testing.T) {
 	}
 }
 
-// The run succeeds within exactly three live sessions, nine sessions and
-// fifteen attempts when the fix Step uses all three of its attempts: input,
-// implementer, two pre-PR reviewers, correction, pull-request, the deep
-// review's five, the fixer's three and the final snapshot. One session less
-// stops the run before the fix Step is dispatched, one attempt less at the
-// final snapshot's Attach and two less at the fix Step's last repair, each
+// The run succeeds within exactly three live sessions, ten sessions and
+// eighteen attempts when the fix Step uses all three of its attempts and one
+// round converges: input, skills, implementer, two pre-PR reviewers,
+// correction, pull-request, the deep review's five, the fixer's three, the
+// round's snapshot and converger, and the final snapshot. Two sessions less
+// stop the run before the fix Step is dispatched, three attempts less at the
+// round snapshot's Attach and four less at the fix Step's last repair, each
 // with a run-scope LimitExceeded, no Final, no external objects record and
-// no snapshot.
+// no snapshot. TestConvergeLimits pins the worst case.
 func TestFixLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
@@ -600,10 +607,10 @@ func TestFixLimits(t *testing.T) {
 		dispatched int
 		want       string
 	}{
-		{"exact", 9, 15, 3, ""},
-		{"sessions", 8, 15, 0, "session limit exceeded"},
-		{"attempts-at-snapshot", 9, 14, 3, "run attempt limit exceeded"},
-		{"attempts", 9, 13, 2, "run attempt limit exceeded"},
+		{"exact", 10, 18, 3, ""},
+		{"sessions", 8, 18, 0, "session limit exceeded"},
+		{"attempts-at-snapshot", 10, 15, 3, "run attempt limit exceeded"},
+		{"attempts", 10, 14, 2, "run attempt limit exceeded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
@@ -629,7 +636,7 @@ func TestFixLimits(t *testing.T) {
 			}
 			a.requireExitsConfirmed(t)
 			if tc.want == "" {
-				if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "fix" {
+				if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "round-001-converge" {
 					t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 				}
 				return
@@ -641,8 +648,10 @@ func TestFixLimits(t *testing.T) {
 			if _, ok := report.Result.Outputs["external-objects"]; ok || report.Final != nil {
 				t.Fatalf("outputs %+v final %+v", report.Result.Outputs, report.Final)
 			}
-			if _, ok := report.Result.Outputs["final-snapshot"]; ok {
-				t.Fatalf("outputs %+v", report.Result.Outputs)
+			for _, key := range []string{"round-001-snapshot", "final-snapshot"} {
+				if _, ok := report.Result.Outputs[key]; ok {
+					t.Fatalf("outputs %+v", report.Result.Outputs)
+				}
 			}
 			requireKept(t, a.run)
 		})

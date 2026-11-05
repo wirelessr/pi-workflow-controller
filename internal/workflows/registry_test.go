@@ -22,7 +22,7 @@ import (
 )
 
 func TestRegistryContainsProductWorkflows(t *testing.T) {
-	registry, err := engine.NewRegistry(workflows.Definitions("", ""))
+	registry, err := engine.NewRegistry(workflows.Definitions("", "", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestRegistryContainsProductWorkflows(t *testing.T) {
 	}
 	schemas, err := contract.NewRegistry(workflows.Resources(), workflows.Schemas())
 	if err != nil || !schemas.Has("smoke.echo.v1") || !schemas.Has("triage.report.v1") || !schemas.Has("triage.round.v1") || !schemas.Has("code-change.input.v1") || !schemas.Has("code-change.implement.v1") || !schemas.Has("code-change.review.v1") ||
-		!schemas.Has("code-change.publish.v1") || !schemas.Has("code-change.pull-request.v1") || !schemas.Has("code-change.fix.v1") || !schemas.Has("code-change.external-objects.v1") || !schemas.Has("code-change.pr-state.v1") {
+		!schemas.Has("code-change.publish.v1") || !schemas.Has("code-change.pull-request.v1") || !schemas.Has("code-change.fix.v1") || !schemas.Has("code-change.external-objects.v1") || !schemas.Has("code-change.pr-state.v1") || !schemas.Has("code-change.skills.v1") || !schemas.Has("code-change.converge.v1") {
 		t.Fatalf("product schemas unavailable: %v", err)
 	}
 }
@@ -46,7 +46,7 @@ func TestRegistryContainsProductWorkflows(t *testing.T) {
 // given, before any side effect; its use as the implementer's CWD is covered
 // in the codechange package.
 func TestRegistryPassesPiCWDToCodeChange(t *testing.T) {
-	registry, err := engine.NewRegistry(workflows.Definitions("", "relative-pi-cwd"))
+	registry, err := engine.NewRegistry(workflows.Definitions("", "relative-pi-cwd", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestSmokePreflightSubprocess(t *testing.T) {
 }
 
 func TestSmokeEchoSharedPreflight(t *testing.T) {
-	registry, err := engine.NewRegistry(workflows.Definitions("", ""))
+	registry, err := engine.NewRegistry(workflows.Definitions("", "", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestSmokeEchoBundledDefinition(t *testing.T) {
 				written <- produced{request, original}
 				return bundled.Reply{ToolName: "write", ToolArguments: map[string]any{"path": candidatePath, "content": string(original)}}
 			}})
-			registry, err := engine.NewRegistry(workflows.Definitions("", ""))
+			registry, err := engine.NewRegistry(workflows.Definitions("", "", ""))
 			if err != nil {
 				t.Fatal(err)
 			}

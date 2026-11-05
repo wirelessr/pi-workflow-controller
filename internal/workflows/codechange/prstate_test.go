@@ -33,7 +33,7 @@ func (f *fixture) stateSeam(t *testing.T, sp statePolicy) (engine.Definition, st
 	head := f.setOriginBranch(workBranch, f.head)
 	f.openPull(t, workBranch)
 	return f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-		p, err := prepare(ctx, r, in, f.piCWD, f.fileSource())
+		p, err := prepare(ctx, r, in, f.piCWD, f.skills, f.fileSource())
 		if err != nil {
 			return engine.Result{}, err
 		}
@@ -128,7 +128,7 @@ func requireSnapshotSucceeded(t *testing.T, report engine.Report) prStateRecord 
 	if report.Outcome != engine.Succeeded || report.ExitCode != 0 || report.Failure != nil || report.Final == nil || report.Final.Output != "pull-request" {
 		t.Fatalf("outcome %s exit %d failure %v final %+v", report.Outcome, report.ExitCode, report.Failure, report.Final)
 	}
-	requireAttached(t, report, "input", "pull-request", "final-snapshot")
+	requireAttached(t, report, "input", "skills", "pull-request", "final-snapshot")
 	return snapshot(t, report)
 }
 
@@ -428,7 +428,7 @@ func TestStateReadRejected(t *testing.T) {
 				polls > 0 && !strings.HasSuffix(summary, `failed, the last with: check runs GET: page 2: check_runs key "1" repeats an earlier item`)) {
 				t.Fatalf("failure %v, want the wait's failed polls and last error", report.Failure)
 			}
-			requireAttached(t, report, "input", "pull-request")
+			requireAttached(t, report, "input", "skills", "pull-request")
 			if _, ok := report.Result.Outputs["final-snapshot"]; ok {
 				t.Fatalf("outputs %+v", report.Result.Outputs)
 			}
@@ -464,7 +464,7 @@ func TestStateReadsBound(t *testing.T) {
 	if !errors.Is(report.Failure, errStateRead) || !errors.Is(report.Failure, errReadsCap) || report.Final == nil || report.Final.Output != "pull-request" {
 		t.Fatalf("failure %v final %+v", report.Failure, report.Final)
 	}
-	requireAttached(t, report, "input", "pull-request")
+	requireAttached(t, report, "input", "skills", "pull-request")
 }
 
 // waitFixture is the fake GitHub showing pull request 1 from a branch on the
@@ -615,7 +615,7 @@ func TestStateWaitCancelled(t *testing.T) {
 	if report.Outcome != engine.CancelledState || report.ExitCode != 130 || report.Final != nil {
 		t.Fatalf("outcome %s exit %d final %+v", report.Outcome, report.ExitCode, report.Final)
 	}
-	requireAttached(t, report, "input", "pull-request")
+	requireAttached(t, report, "input", "skills", "pull-request")
 	if n := len(f.checksTimes(t)); n != 1 {
 		t.Fatalf("check runs reads %d after the cancellation, want the first poll's only", n)
 	}
@@ -641,20 +641,22 @@ func TestStateSnapshotOverLimit(t *testing.T) {
 	if !errors.As(report.Failure, &failure) || failure.Code != engine.LimitExceeded || !strings.Contains(failure.Message, "controller data exceeds candidate byte limit") {
 		t.Fatalf("failure %v, want the Attach's candidate byte limit", report.Failure)
 	}
-	requireAttached(t, report, "input", "pull-request")
+	requireAttached(t, report, "input", "skills", "pull-request")
 }
 
-// In the full flow, a snapshot read failure after the fix Step fails the
-// run with errStateRead and the fix contract as the Final, and keeps the
-// worktree: the removal is set only after the snapshot.
+// In the full flow, a read failure of the final snapshot after a converged
+// round fails the run with errStateRead and the round's report as the
+// Final, and keeps the worktree: the removal is set only after the final
+// snapshot.
 func TestStateFinalReadFailureKeepsWorktree(t *testing.T) {
 	f := newFixture(t)
-	f.write(filepath.Join(f.dir, "gh-fail-threads"), "")
+	// The first query is the round's snapshot, the second the final one.
+	f.write(filepath.Join(f.dir, "gh-fail-threads"), "2")
 	var implemented string
 	a := f.run(t, agents{implement: f.implementReady(&implemented)})
 	report := a.report
 	requireFailure(t, report, commandFailure(report, "code-change cannot read the pull request state: review threads query: "))
-	if !errors.Is(report.Failure, errStateRead) || report.Final == nil || report.Final.Output != "fix" || report.Final.Ref != report.Result.Outputs["fix"] {
+	if !errors.Is(report.Failure, errStateRead) || report.Final == nil || report.Final.Output != "round-001-converge" || report.Final.Ref != report.Result.Outputs["round-001-converge"] {
 		t.Fatalf("failure %v final %+v", report.Failure, report.Final)
 	}
 	if _, ok := report.Result.Outputs["final-snapshot"]; ok {

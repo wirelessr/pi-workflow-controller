@@ -275,7 +275,7 @@ func TestDeepReviewSucceeds(t *testing.T) {
 	closed, _, decided := a.journalIndex(t)
 	accepted, ok := decided["context-accepted"]
 	for _, c := range a.calls {
-		if at := closed[a.attempt(c).HandleID]; !deepReviewCall(c) && c.request.Output.SchemaID != FixSchema && (!ok || len(at) == 0 || at[0] > accepted) {
+		if at := closed[a.attempt(c).HandleID]; !deepReviewCall(c) && c.request.Output.SchemaID != FixSchema && c.request.Output.SchemaID != ConvergeSchema && (!ok || len(at) == 0 || at[0] > accepted) {
 			t.Fatalf("%s session closed at %v, deep review context accepted at %d", c.request.Output.SchemaID, at, accepted)
 		}
 	}
@@ -432,7 +432,7 @@ func TestDeepReviewWithoutReport(t *testing.T) {
 			if report.Final == nil || report.Final.Output != "pull-request" || report.Final.Ref != outputs["pull-request"] || report.Final.Step != "pull-request" {
 				t.Fatalf("final %+v", report.Final)
 			}
-			want := []string{"implement", "input", "publish", "pull-request", "review-basic", "review-consistency"}
+			want := []string{"implement", "input", "publish", "pull-request", "review-basic", "review-consistency", "skills"}
 			if tc.sessions > 0 {
 				want = append(want, "deep-review-prepare")
 			}
@@ -441,7 +441,7 @@ func TestDeepReviewWithoutReport(t *testing.T) {
 			}
 			// No session after the review's, and no Attach after the record.
 			a.requireSessionsClosed(t, 3+tc.sessions)
-			a.requireAttempts(t, 4+tc.sessions, "input", "pull-request")
+			a.requireAttempts(t, 4+tc.sessions, "input", "skills", "pull-request")
 			requireKept(t, a.run)
 			requireMissing(t, filepath.Join(a.run.Dir(), deepReviewName, "checkout"))
 			if f.pulls(t) != 1 {
@@ -485,8 +485,8 @@ func TestDeepReviewLimits(t *testing.T) {
 		sessions, attempts int
 		want               string
 	}{
-		{"sessions", 7, 11, "session limit exceeded"},
-		{"attempts", 8, 10, "run attempt limit exceeded"},
+		{"sessions", 7, 12, "session limit exceeded"},
+		{"attempts", 8, 11, "run attempt limit exceeded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)

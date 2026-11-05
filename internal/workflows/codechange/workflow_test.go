@@ -34,16 +34,22 @@ import (
 // read from the local origin at query time like GitHub; compare and refs come
 // from the real git on that origin. Per kind of read, gh-fail-<kind>
 // fails it, gh-body-<kind> replaces its body and pr-patch.json is merged into
-// a pull request; gh-move-head commits in that worktree during a pull
-// request read. With gh-require-closed, a branch ref or pull request list
+// a pull request, only once there were as many check runs reads as
+// pr-patch-after-checks says when it exists; gh-move-head commits in that
+// worktree during a pull request read. With gh-require-closed, a branch ref or pull request list
 // read fails until implementer-closed exists. The k-th check runs or status
 // read answers entry k of checks.json or statuses.json, the last entry once
 // k is past it, and fails for a null entry; without the file there are none.
 // Each check runs read appends its time to checks-times; each of the first
 // as many as gh-move-on-checks says first moves the pull request branch on
-// the origin to a new commit and writes it to gh-moved. Once there were as many check runs
-// reads as gh-fail-pull-after-checks says, a pull request read fails.
-// gh-block-threads blocks the review threads query like gh-block.
+// the origin to a new commit and writes it to gh-moved, and the one
+// gh-move-head-at-checks numbers first commits in the worktree it names. Once there were as many check runs
+// reads as gh-fail-pull-after-checks says, a pull request read fails, and
+// so does the one gh-fail-pull-at numbers among the pull request reads and
+// every later one.
+// gh-fail-threads fails the review threads query, from the query it
+// numbers on when it holds a number. gh-block-threads blocks it like
+// gh-block.
 func TestGHHelper(t *testing.T) {
 	dir := os.Getenv("PWC_CC_GH")
 	if dir == "" {
@@ -68,8 +74,20 @@ func TestGHHelper(t *testing.T) {
 		if !slices.Equal(args, want) {
 			os.Exit(2)
 		}
-		if _, err := os.Stat(filepath.Join(dir, "gh-fail-threads")); err == nil {
-			os.Exit(1)
+		if raw, err := os.ReadFile(filepath.Join(dir, "gh-fail-threads")); err == nil {
+			from := 1
+			if len(raw) > 0 {
+				if from, err = strconv.Atoi(string(raw)); err != nil {
+					os.Exit(2)
+				}
+			}
+			calls, err := os.ReadFile(filepath.Join(dir, "gh-calls"))
+			if err != nil {
+				os.Exit(2)
+			}
+			if strings.Count(string(calls), "api graphql ") >= from {
+				os.Exit(1)
+			}
 		}
 		if _, err := os.Stat(filepath.Join(dir, "gh-block-threads")); err == nil {
 			block(dir)
@@ -145,6 +163,11 @@ func TestGHHelper(t *testing.T) {
 				os.Exit(1)
 			}
 		}
+		if raw, err := os.ReadFile(filepath.Join(dir, "gh-fail-pull-at")); err == nil {
+			if n, err := strconv.Atoi(string(raw)); err != nil || pullReads(dir) >= n {
+				os.Exit(1)
+			}
+		}
 		if target, err := os.ReadFile(filepath.Join(dir, "gh-move-head")); err == nil {
 			if originGit(string(target), "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty", "-m", "moved") == "" {
 				_ = os.Remove(filepath.Join(dir, "gh-move-head"))
@@ -154,7 +177,15 @@ func TestGHHelper(t *testing.T) {
 		if !ok {
 			os.Exit(1)
 		}
-		if raw, err := os.ReadFile(filepath.Join(dir, "pr-patch.json")); err == nil {
+		patched := true
+		if raw, err := os.ReadFile(filepath.Join(dir, "pr-patch-after-checks")); err == nil {
+			n, err := strconv.Atoi(string(raw))
+			if err != nil {
+				os.Exit(2)
+			}
+			patched = stateReads(dir, "checks") >= n
+		}
+		if raw, err := os.ReadFile(filepath.Join(dir, "pr-patch.json")); err == nil && patched {
 			var patch map[string]any
 			if json.Unmarshal(raw, &patch) != nil {
 				os.Exit(2)
@@ -224,6 +255,24 @@ func stateReads(dir, kind string) int {
 	return n
 }
 
+// pullReads is how many pull request reads gh-calls holds, the current one
+// included.
+func pullReads(dir string) int {
+	raw, err := os.ReadFile(filepath.Join(dir, "gh-calls"))
+	if err != nil {
+		os.Exit(2)
+	}
+	n := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		if fields := strings.Fields(line); len(fields) == 9 && fields[1] == "--method" {
+			if kind, _ := ghKind(fields[8]); kind == "pull" {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // stateChecks records the time of check runs read k and, while k is at most
 // gh-move-on-checks, moves pull request 1's branch on origin.
 func stateChecks(dir, origin string, k int) {
@@ -233,6 +282,12 @@ func stateChecks(dir, origin string, k int) {
 	}
 	_, _ = fmt.Fprintln(times, time.Now().UnixNano())
 	_ = times.Close()
+	if raw, err := os.ReadFile(filepath.Join(dir, "gh-move-head-at-checks")); err == nil {
+		at, worktree, _ := strings.Cut(string(raw), " ")
+		if n, err := strconv.Atoi(at); err != nil || (n == k && originGit(worktree, "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty", "-m", "moved between rounds") != "") {
+			os.Exit(2)
+		}
+	}
 	raw, err := os.ReadFile(filepath.Join(dir, "gh-move-on-checks"))
 	if err != nil {
 		return
@@ -460,8 +515,10 @@ func subcommand(args []string) string {
 }
 
 type fixture struct {
-	t                      *testing.T
-	dir, launch, piCWD     string
+	t                  *testing.T
+	dir, launch, piCWD string
+	// skills is the private skill directory, with a converge subtree.
+	skills                 string
 	origin, source, gitBin string
 	head, historyBlob      string
 }
@@ -480,8 +537,8 @@ func newFixture(t *testing.T) *fixture {
 	if dir, err = filepath.EvalSymlinks(dir); err != nil {
 		t.Fatal(err)
 	}
-	f := &fixture{t: t, dir: dir, launch: filepath.Join(dir, "launch"), piCWD: filepath.Join(dir, "pi-cwd"), source: filepath.Join(dir, "source"), origin: filepath.Join(dir, "origin.git"), gitBin: gitBin}
-	for _, d := range []string{f.launch, f.piCWD, f.source, filepath.Join(dir, "home"), filepath.Join(dir, "xdg"), filepath.Join(dir, "base")} {
+	f := &fixture{t: t, dir: dir, launch: filepath.Join(dir, "launch"), piCWD: filepath.Join(dir, "pi-cwd"), skills: filepath.Join(dir, "skills"), source: filepath.Join(dir, "source"), origin: filepath.Join(dir, "origin.git"), gitBin: gitBin}
+	for _, d := range []string{f.launch, f.piCWD, f.source, filepath.Join(dir, "home"), filepath.Join(dir, "xdg"), filepath.Join(dir, "base"), f.skills, filepath.Join(f.skills, convergeSkill)} {
 		if err := os.Mkdir(d, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -511,6 +568,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	f.write(filepath.Join(f.launch, "docs", "design one.md"), "# Design\n\nexact \x00 bytes\n")
 	f.write(filepath.Join(dir, "repo.json"), fixtureRepo)
+	f.write(filepath.Join(f.skills, convergeSkill, "SKILL.md"), "# Converge\n\nOne round.\n")
 	pathexec.Install(t, "gh", "TestGHHelper")
 	t.Setenv("PWC_CC_GH", dir)
 	pathexec.Install(t, "git", "TestGitHelper")
@@ -564,7 +622,7 @@ func (f *fixture) fileSource() gitSource { return gitSource{remote: f.remote, al
 // prepareOnly is the Controller preparation with only its GitHub git remote
 // replaced, ending with the input as Final, so preparation tests need no Pi.
 func (f *fixture) prepareOnly(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-	p, err := prepare(ctx, r, in, f.piCWD, f.fileSource())
+	p, err := prepare(ctx, r, in, f.piCWD, f.skills, f.fileSource())
 	if err != nil {
 		return engine.Result{}, err
 	}
@@ -628,7 +686,7 @@ func (f *fixture) execute(def engine.Definition, prompt string) (*engine.Run, en
 }
 
 func (f *fixture) definition(execute engine.Workflow) engine.Definition {
-	def := Definition(f.piCWD)
+	def := Definition(f.piCWD, f.skills)
 	if execute != nil {
 		def.Execute = execute
 	}
@@ -699,7 +757,7 @@ func requireMissing(t *testing.T, path string) {
 }
 
 func TestDefinitionPolicy(t *testing.T) {
-	def := Definition("/abs")
+	def := Definition("/abs", "/skills")
 	want := engine.DefaultRunPolicy()
 	want.RunTimeout = 8 * time.Hour
 	want.MaxLiveSessions, want.MaxTotalSessions, want.MaxTotalAttempts = 3, 22, 80
@@ -708,12 +766,19 @@ func TestDefinitionPolicy(t *testing.T) {
 		t.Fatalf("definition: %s %s %+v", def.Name, def.Version, def.Policy)
 	}
 	// The description says where this version stops.
-	if !strings.Contains(def.Description, "this version stops after taking a snapshot of the pull request state") {
+	if !strings.Contains(def.Description, "this version stops after the convergence rounds and a final snapshot of the pull request state, with no final cleanup or summary") {
 		t.Fatalf("description: %s", def.Description)
 	}
-	// The production wait and read bounds, which await live data.
+	// The production wait and read bounds, round cap, time admission and
+	// clock, which await live data.
 	if prStatePolicy != (statePolicy{wait: 30 * time.Minute, settle: 3 * time.Minute, poll: 30 * time.Second, reads: 10 * time.Minute}) {
 		t.Fatalf("state policy %+v", prStatePolicy)
+	}
+	if convergeRounds.rounds != 10 || convergeRounds.reserve != 160*time.Minute || reflect.ValueOf(convergeRounds.now).Pointer() != reflect.ValueOf(time.Now).Pointer() {
+		t.Fatalf("round policy %+v", convergeRounds)
+	}
+	if SkillsDirEnv != "PWC_CODE_CHANGE_SKILLS_DIR" {
+		t.Fatalf("skills env %s", SkillsDirEnv)
 	}
 	if _, err := engine.NewRegistry([]engine.Definition{def}); err != nil {
 		t.Fatal(err)
@@ -753,8 +818,9 @@ func TestParsePrompt(t *testing.T) {
 }
 
 // The production Execute rejects in a fixed order: prompt, PWC_PI_CWD, TLS,
-// design doc, repository. Each case breaks every later check too, so only the
-// earliest may report.
+// design doc, private skill directory, repository. Each case breaks every
+// later check too, so only the earliest may report; the skill directory is
+// unset unless a case sets it.
 func TestRejectionOrderBeforeSideEffects(t *testing.T) {
 	const noPush = `{"full_name":"owner/repo","default_branch":"main","permissions":{"push":false}}`
 	piCWD := func(f *fixture) string { return f.piCWD }
@@ -762,30 +828,38 @@ func TestRejectionOrderBeforeSideEffects(t *testing.T) {
 		name, prompt, tls, want string
 		piCWD                   func(f *fixture) string
 		get                     bool
+		skills                  func(f *fixture) string
 	}{
-		{"prompt", "owner/repo", "0", "code-change prompt must be", func(*fixture) string { return "" }, false},
-		{"pi-cwd-unset", "owner/repo missing.md", "0", `requires PWC_PI_CWD to be an absolute path, got ""`, func(*fixture) string { return "" }, false},
-		{"pi-cwd-relative", "owner/repo missing.md", "0", `requires PWC_PI_CWD to be an absolute path, got "pi-cwd"`, func(*fixture) string { return "pi-cwd" }, false},
-		{"pi-cwd-missing", "owner/repo missing.md", "0", "code-change PWC_PI_CWD: stat ", func(f *fixture) string { return filepath.Join(f.dir, "absent") }, false},
-		{"pi-cwd-file", "owner/repo missing.md", "0", "requires PWC_PI_CWD to be a directory", func(f *fixture) string { return filepath.Join(f.dir, "repo.json") }, false},
+		{"prompt", "owner/repo", "0", "code-change prompt must be", func(*fixture) string { return "" }, false, nil},
+		{"pi-cwd-unset", "owner/repo missing.md", "0", `requires PWC_PI_CWD to be an absolute path, got ""`, func(*fixture) string { return "" }, false, nil},
+		{"pi-cwd-relative", "owner/repo missing.md", "0", `requires PWC_PI_CWD to be an absolute path, got "pi-cwd"`, func(*fixture) string { return "pi-cwd" }, false, nil},
+		{"pi-cwd-missing", "owner/repo missing.md", "0", "code-change PWC_PI_CWD: stat ", func(f *fixture) string { return filepath.Join(f.dir, "absent") }, false, nil},
+		{"pi-cwd-file", "owner/repo missing.md", "0", "requires PWC_PI_CWD to be a directory", func(f *fixture) string { return filepath.Join(f.dir, "repo.json") }, false, nil},
 		{"pi-cwd-symlink-followed", "owner/repo missing.md", "0", "TLS preflight blocked", func(f *fixture) string {
 			link := filepath.Join(f.dir, "pi-cwd-link")
 			if err := os.Symlink(f.piCWD, link); err != nil {
 				f.t.Fatal(err)
 			}
 			return link
-		}, false},
-		{"tls", "owner/repo missing.md", "0", "TLS preflight blocked", piCWD, false},
-		{"design-doc", "owner/repo missing.md", "1", `design doc "missing.md"`, piCWD, false},
-		{"repository", prompt, "1", "no push permission", piCWD, true},
+		}, false, nil},
+		{"tls", "owner/repo missing.md", "0", "TLS preflight blocked", piCWD, false, nil},
+		{"design-doc", "owner/repo missing.md", "1", `design doc "missing.md"`, piCWD, false, nil},
+		{"skills-unset", prompt, "1", `code-change PWC_CODE_CHANGE_SKILLS_DIR: skill directory must be an absolute path, got ""`, piCWD, false, nil},
+		{"skills-relative", prompt, "1", `code-change PWC_CODE_CHANGE_SKILLS_DIR: skill directory must be an absolute path, got "skills"`, piCWD, false, func(*fixture) string { return "skills" }},
+		{"repository", prompt, "1", "no push permission", piCWD, true, func(f *fixture) string { return f.skills }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
 			f.write(filepath.Join(f.dir, "repo.json"), noPush)
 			t.Setenv("NODE_TLS_REJECT_UNAUTHORIZED", tc.tls)
-			r, report := f.execute(Definition(tc.piCWD(f)), tc.prompt)
+			skills := ""
+			if tc.skills != nil {
+				skills = tc.skills(f)
+			}
+			r, report := f.execute(Definition(tc.piCWD(f), skills), tc.prompt)
 			requireFailure(t, report, tc.want)
 			f.requireUntouched(t, r, report)
+			requireMissing(t, filepath.Join(r.Dir(), skillsExpansion))
 			if got := len(f.ghCalls()); got != map[bool]int{false: 0, true: 1}[tc.get] {
 				t.Fatalf("gh calls: %d", got)
 			}
@@ -798,7 +872,7 @@ func TestRejectionOrderBeforeSideEffects(t *testing.T) {
 func TestGitWithoutNoLazyFetchRejected(t *testing.T) {
 	f := newFixture(t)
 	f.write(filepath.Join(f.dir, "git-old"), "")
-	r, report := f.execute(Definition(f.piCWD), prompt)
+	r, report := f.execute(Definition(f.piCWD, f.skills), prompt)
 	requireFailure(t, report, "code-change needs a git that supports --no-lazy-fetch (2.45 or newer)")
 	if !errors.Is(report.Failure, errGitNoLazyFetch) {
 		t.Fatalf("failure %v, want errGitNoLazyFetch", report.Failure)
@@ -1028,12 +1102,12 @@ func TestSuccessRecordsInputAndKeepsWorktree(t *testing.T) {
 	if report.Final == nil || report.Final.Output != "input" || report.Final.Ref != report.Result.Outputs["input"] || report.Final.Step != "input" {
 		t.Fatalf("final: %+v", report.Final)
 	}
-	// One Controller attempt and no session.
-	if len(report.Snapshot.Sessions) != 0 || len(report.Snapshot.Attempts) != 1 {
+	// Two Controller attempts, the input and the skills, and no session.
+	if len(report.Snapshot.Sessions) != 0 || len(report.Snapshot.Attempts) != 2 {
 		t.Fatalf("sessions %d attempts %d", len(report.Snapshot.Sessions), len(report.Snapshot.Attempts))
 	}
 	for _, attempt := range report.Snapshot.Attempts {
-		if !attempt.Controller || attempt.Key != "input" {
+		if !attempt.Controller || (attempt.Key != "input" && attempt.Key != "skills") {
 			t.Fatalf("attempt: %+v", attempt)
 		}
 	}
@@ -1077,7 +1151,7 @@ func TestSuccessRecordsInputAndKeepsWorktree(t *testing.T) {
 func TestProductionGitPolicy(t *testing.T) {
 	f := newFixture(t)
 	f.write(filepath.Join(f.dir, "git-fail"), "fetch")
-	r, report := f.execute(Definition(f.piCWD), prompt)
+	r, report := f.execute(Definition(f.piCWD, f.skills), prompt)
 	requireFailure(t, report, commandFailure(report, `git fetch "main": `))
 	repoDir := filepath.Join(r.Dir(), worktreeDir, "repository.git")
 	f.requirePolicy(t, repoDir, nil)
@@ -1185,7 +1259,7 @@ func TestPartialWorktreeFailureRemovesCheckout(t *testing.T) {
 				source = tc.source(f)
 			}
 			r, report := f.execute(f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-				return execute(ctx, r, in, f.piCWD, source, testState)
+				return execute(ctx, r, in, f.piCWD, f.skills, source, testState, convergeRounds)
 			}), prompt)
 			want := tc.want
 			if errors.Is(report.Failure, syscall.EPERM) {
@@ -1303,7 +1377,7 @@ func TestRegisteredWorktreeKeptUnlessRemoveSet(t *testing.T) {
 		f := newFixture(t)
 		var input contract.Ref
 		r, report := f.execute(f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-			p, err := prepare(ctx, r, in, f.piCWD, f.fileSource())
+			p, err := prepare(ctx, r, in, f.piCWD, f.skills, f.fileSource())
 			if err != nil {
 				return engine.Result{}, err
 			}

@@ -15,11 +15,12 @@ import (
 	"pi-workflow-controller/internal/engine"
 	"pi-workflow-controller/internal/tui"
 	"pi-workflow-controller/internal/workflows"
+	"pi-workflow-controller/internal/workflows/codechange"
 	"pi-workflow-controller/internal/workflows/triage"
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, cliOptions{definitions: workflows.Definitions(os.Getenv(triage.SkillsDirEnv), os.Getenv("PWC_PI_CWD")), resources: workflows.Resources(), schemas: workflows.Schemas()}))
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, cliOptions{definitions: workflows.Definitions(os.Getenv(triage.SkillsDirEnv), os.Getenv("PWC_PI_CWD"), os.Getenv(codechange.SkillsDirEnv)), resources: workflows.Resources(), schemas: workflows.Schemas()}))
 }
 
 // Construction-time dependencies, never flags or workflow configuration.

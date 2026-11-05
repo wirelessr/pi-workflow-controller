@@ -14,7 +14,9 @@ import (
 // Definition is the code-change workflow. piCWD is the raw PWC_PI_CWD value;
 // it is checked before any side effect and is the CWD of every Agent this
 // workflow starts itself; the deep review's Agents run in review's own.
-func Definition(piCWD string) engine.Definition {
+// skillsDir is the raw value of SkillsDirEnv, the private skill directory,
+// which is read before any network call.
+func Definition(piCWD, skillsDir string) engine.Definition {
 	p := engine.DefaultRunPolicy()
 	p.RunTimeout = 8 * time.Hour
 	p.MaxLiveSessions, p.MaxTotalSessions, p.MaxTotalAttempts = 3, 22, 80
@@ -22,9 +24,9 @@ func Definition(piCWD string) engine.Definition {
 	// remove the deep review's checkout and a successful run's worktree; a
 	// removal under way is not interrupted. The value awaits live data.
 	p.Runtime.CleanupTimeout = 2 * time.Minute
-	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree, have two reviewers check them, correct the work, push one branch and open a pull request, deep-review the pull request at the verified head with the code-review flow, then have a fresh fixer triage the deep review's findings, fix them and push to the same branch; this version stops after taking a snapshot of the pull request state, once its checks and statuses settled or the wait reached its cap, with no convergence or final cleanup", Version: "1", Policy: p,
+	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree, have two reviewers check them, correct the work, push one branch and open a pull request, deep-review the pull request at the verified head with the code-review flow, then have a fresh fixer triage the deep review's findings, fix them and push to the same branch, then run convergence rounds, each waiting for the pull request's checks and statuses to settle, recording a snapshot of its state and having a fresh converger do one round of the private skill, until a round claims convergence without a push on an unchanged head or the rounds end unconverged; this version stops after the convergence rounds and a final snapshot of the pull request state, with no final cleanup or summary", Version: "1", Policy: p,
 		Execute: func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-			return execute(ctx, r, in, piCWD, gitSource{remote: githubRemote}, prStatePolicy)
+			return execute(ctx, r, in, piCWD, skillsDir, gitSource{remote: githubRemote}, prStatePolicy, convergeRounds)
 		}}
 }
 
@@ -36,10 +38,11 @@ type prepared struct {
 	repository    string
 	defaultBranch string
 	worktree      *worktree
+	skills        runSkills
 }
 
-func execute(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, source gitSource, state statePolicy) (engine.Result, error) {
-	p, err := prepare(ctx, r, in, piCWD, source)
+func execute(ctx context.Context, r *engine.Run, in engine.Input, piCWD, skillsDir string, source gitSource, state statePolicy, rounds roundPolicy) (engine.Result, error) {
+	p, err := prepare(ctx, r, in, piCWD, skillsDir, source)
 	if err != nil {
 		return engine.Result{}, err
 	}
@@ -59,23 +62,22 @@ func execute(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, 
 	if result, err = fix(ctx, r, p, piCWD, result); err != nil {
 		return result, err
 	}
-	// The fix contract stays the Final: the snapshot is the Controller's
-	// observation of the pull request, not a report of the work.
-	if result, err = p.finalState(ctx, r, result, state); err != nil {
+	if result, err = p.converge(ctx, r, piCWD, result, state, rounds); err != nil {
 		return result, err
 	}
-	// Only here may the run's cleanup remove the worktree: every session was
-	// confirmed closed, the fixer's last with the HEAD still the head
-	// verified on the pull request, and the snapshot is recorded.
+	// Only here may the run's cleanup remove the worktree: a round claimed
+	// convergence, every session was confirmed closed, the last converger's
+	// with the HEAD still the head verified on the pull request, and the
+	// final snapshot is recorded.
 	p.worktree.remove.Store(true)
 	return result, nil
 }
 
-// prepare checks the prompt, PWC_PI_CWD, Node TLS and the design doc before
-// any network call, then the repository with one GET, and writes nothing
-// before that GET succeeds. It then checks git, creates and registers the
-// worktree and records the input.
-func prepare(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, source gitSource) (prepared, error) {
+// prepare checks the prompt, PWC_PI_CWD, Node TLS, the design doc and the
+// private skill directory before any network call, then the repository with
+// one GET, and writes nothing before that GET succeeds. It then checks git,
+// creates and registers the worktree, and records the input and the skills.
+func prepare(ctx context.Context, r *engine.Run, in engine.Input, piCWD, skillsDir string, source gitSource) (prepared, error) {
 	repository, docPath, err := parsePrompt(in.Prompt)
 	if err != nil {
 		return prepared{}, err
@@ -87,6 +89,10 @@ func prepare(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, 
 		return prepared{}, err
 	}
 	doc, err := readDesignDoc(ctx, in.LaunchCWD, docPath)
+	if err != nil {
+		return prepared{}, err
+	}
+	skills, err := readSkills(ctx, skillsDir)
 	if err != nil {
 		return prepared{}, err
 	}
@@ -108,7 +114,11 @@ func prepare(ctx context.Context, r *engine.Run, in engine.Input, piCWD string, 
 	if err != nil {
 		return prepared{}, err
 	}
-	return prepared{input: ref, repository: repository, defaultBranch: meta.DefaultBranch, worktree: wt}, nil
+	recorded, err := recordSkills(ctx, r, skills)
+	if err != nil {
+		return prepared{}, err
+	}
+	return prepared{input: ref, repository: repository, defaultBranch: meta.DefaultBranch, worktree: wt, skills: recorded}, nil
 }
 
 type inputRecord struct {
