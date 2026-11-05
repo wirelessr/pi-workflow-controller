@@ -28,31 +28,44 @@ type roundPolicy struct {
 	now     func() time.Time
 }
 
-// convergeRounds is the production policy. The reserve is one round's bound,
-// the wait cap, the snapshot reads and the converge Step, 70 minutes, plus
-// the 90 minutes CODE-CHANGE reserves for the work after the rounds. Every
-// value awaits live data.
-var convergeRounds = roundPolicy{rounds: 10, reserve: 160 * time.Minute, now: time.Now}
+// convergeRounds is the production policy. The reserve is one round's bound
+// plus what follows the rounds. The round's bound is 80 minutes: the wait
+// cap, the snapshot reads, the converge Step and the read after the round.
+// What follows is 90 minutes: the cleanup Step, the final snapshot's wait
+// cap and reads, the summary's Attach and a 20-minute margin. The receipt
+// reads, the repairs and the strict closes have no bound of their own and
+// only the margin covers them, so the reserve leaves time for what follows
+// the rounds only when they do not add up past it. Every value awaits live
+// data.
+var convergeRounds = roundPolicy{rounds: 10, reserve: 170 * time.Minute, now: time.Now}
 
 // errNotConverged ends rounds that ran out, at the round cap or the run
 // deadline, without a round that meets the termination rule. Every round
-// that ran was verified; the last accepted report is the Final.
+// that ran was verified; the summary is the Final.
 var errNotConverged = errors.New("code-change: the pull request did not converge")
 
-// errPullRequestNotOpen ends the rounds once a round's snapshot shows the
-// pull request closed or merged; the last accepted report is the Final.
+// errPullRequestNotOpen ends the rounds once a round's snapshot, or the read
+// after a round, shows the pull request closed or merged; the summary is the
+// Final and no cleanup Step runs.
 var errPullRequestNotOpen = errors.New("code-change: the pull request is no longer open")
 
-// convergeReport is the part of a converge contract the Controller checks.
+// convergeReport is the part of a converge contract the Controller checks
+// and the summary copies.
 type convergeReport struct {
-	Snapshot  contract.Ref `json:"snapshot"`
-	Converged bool         `json:"converged"`
-	Items     []struct {
-		ID string `json:"id"`
-	} `json:"items"`
+	Snapshot      contract.Ref   `json:"snapshot"`
+	Converged     bool           `json:"converged"`
+	Unconverged   []string       `json:"unconverged"`
+	Items         []itemClaim    `json:"items"`
 	ThreadActions []threadAction `json:"thread_actions"`
 	CIReruns      []ciRerun      `json:"ci_reruns"`
 	pushed
+}
+
+// itemClaim is an item of a converge contract as the converger wrote it.
+type itemClaim struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // threadAction is the receipt of a reply to or the resolution of a review
@@ -75,6 +88,37 @@ func admitted(s engine.Snapshot, now time.Time, reserve time.Duration) bool {
 	return s.Policy.DisableRunTimeout || s.CreatedAt.Add(s.Policy.RunTimeout).Sub(now) >= reserve
 }
 
+// roundsEnd is how the convergence rounds ended, which decides what follows
+// them.
+type roundsEnd struct {
+	// result and err are what the run returns when nothing follows the
+	// rounds: the Final they leave and their error.
+	result engine.Result
+	err    error
+	// kind is the summary's rounds_end, the name of the Decision that ends
+	// the rounds when one does.
+	kind string
+	// started counts the rounds that began and accepted those whose
+	// contract was accepted and verified; last is the head the Controller
+	// last verified, the head of the last accepted report.
+	started, accepted int
+	last              string
+	// closed reports whether every session the rounds opened is confirmed
+	// closed.
+	closed bool
+}
+
+func roundName(n int) string { return fmt.Sprintf("round-%03d", n) }
+
+// reportKey names the last accepted report after accepted rounds: the fix
+// contract before any round's.
+func reportKey(accepted int) string {
+	if accepted == 0 {
+		return "fix"
+	}
+	return roundName(accepted) + "-converge"
+}
+
 // converge runs the convergence rounds after the fix Step in an ordinary
 // loop, not a Retry, each round n in its own Child scope round-NNN of root,
 // started only within rp's round cap and time admission. A round waits for
@@ -84,125 +128,130 @@ func admitted(s engine.Snapshot, now time.Time, reserve time.Duration) bool {
 // from memory for the round; runs the converge Step with runPush in a fresh
 // session with CWD piCWD, its last verified head the previous report's, its
 // thread and rerun receipts checked with verifyWrites after the push
-// receipt; and reads the pull request once more.
+// receipt; and reads the pull request once more, which ends the rounds with
+// errPullRequestNotOpen too when it shows the pull request closed or merged.
 //
 // The rounds converge when a round claimed convergence, pushed nothing,
 // reported no thread action and no rerun, and that read shows its
-// snapshot's head: the final snapshot follows and the
-// round's report is the Final with a nil error. Rounds that run out end
-// with the final snapshot and errNotConverged. Any other failure returns
-// the original error and no further round runs. From a round's dispatch
-// through the HEAD read after its session's close, a failed Step, receipt
-// or identity check included, the round's external objects record is the
-// Final while the run can still act. Before the dispatch, and once the
-// session is closed and the receipt verified, at the read after the round,
-// the converged Decision or the final snapshot, the last accepted report is
-// the Final: the fix contract before any round's, the round's own after its
-// receipt.
-func (p prepared) converge(ctx context.Context, r *engine.Run, piCWD string, prior engine.Result, sp statePolicy, rp roundPolicy) (engine.Result, error) {
+// snapshot's head, with a nil error. Rounds that run out end with
+// errNotConverged. Any other failure returns the original error and no
+// further round runs. From a round's dispatch through the HEAD read after
+// its session's close, a failed Step, receipt or identity check included,
+// the round's external objects record is the result's Final while the run
+// can still act. Before the dispatch, and once the session is closed and
+// the receipt verified, it is the last accepted report: the fix contract
+// before any round's, the round's own after its receipt.
+func (p prepared) converge(ctx context.Context, r *engine.Run, piCWD string, prior engine.Result, sp statePolicy, rp roundPolicy) roundsEnd {
 	outputs := prior.Outputs
-	report := "fix"
+	d := roundsEnd{closed: true}
 	stopped := func() engine.Result {
-		return engine.Result{Outputs: outputs, Final: &engine.FinalSelection{Output: report}}
+		return engine.Result{Outputs: outputs, Final: &engine.FinalSelection{Output: reportKey(d.accepted)}}
+	}
+	stop := func(kind string, err error) roundsEnd {
+		d.result, d.err, d.kind = stopped(), err, kind
+		return d
 	}
 	pr, err := engine.Decode[pullRequestRecord](ctx, r, outputs["pull-request"])
 	if err != nil {
-		return stopped(), err
+		return stop("round_failed", err)
 	}
 	verified, err := engine.Decode[fixed](ctx, r, outputs["fix"])
 	if err != nil {
-		return stopped(), err
+		return stop("round_failed", err)
 	}
-	last := verified.Head
+	d.last = verified.Head
 	var snapshot contract.Ref
 	for n := 1; ; n++ {
 		if n > rp.rounds {
-			return p.unconverged(ctx, r, outputs, report, snapshot, "rounds-exhausted",
+			return stop("rounds-exhausted", p.unconverged(ctx, r, outputs, reportKey(d.accepted), snapshot, "rounds-exhausted",
 				fmt.Sprintf("No round claimed convergence without a push, a thread reply or resolution or a rerun, on an unchanged head, within the round cap of %d", rp.rounds),
-				fmt.Errorf("%w within the round cap of %d", errNotConverged, rp.rounds), sp)
+				fmt.Errorf("%w within the round cap of %d", errNotConverged, rp.rounds)))
 		}
 		if !admitted(r.Snapshot(), rp.now(), rp.reserve) {
-			return p.unconverged(ctx, r, outputs, report, snapshot, "rounds-not-admitted",
+			return stop("rounds-not-admitted", p.unconverged(ctx, r, outputs, reportKey(d.accepted), snapshot, "rounds-not-admitted",
 				fmt.Sprintf("The run deadline leaves less than %s for round %d", rp.reserve, n),
-				fmt.Errorf("%w: the run deadline leaves less than %s for round %d", errNotConverged, rp.reserve, n), sp)
+				fmt.Errorf("%w: the run deadline leaves less than %s for round %d", errNotConverged, rp.reserve, n)))
 		}
-		name := fmt.Sprintf("round-%03d", n)
+		name := roundName(n)
 		s, err := r.Root().Child(name)
 		if err != nil {
-			return stopped(), err
+			return stop("round_failed", err)
 		}
+		d.started = n
 		snap, state, err := p.recordState(ctx, r, s, "snapshot", pr.Number, sp)
+		if errors.Is(err, errStateRead) {
+			return stop("state_read_failed", err)
+		}
 		if err != nil {
-			return stopped(), err
+			return stop("round_failed", err)
 		}
 		outputs[name+"-snapshot"], snapshot = snap, snap
 		if state.PullRequest.State != "open" || state.PullRequest.Merged {
-			return stopped(), fmt.Errorf("%w: the %s snapshot shows state %q merged %t", errPullRequestNotOpen, name, state.PullRequest.State, state.PullRequest.Merged)
+			return stop("pull_request_not_open", fmt.Errorf("%w: the %s snapshot shows state %q merged %t", errPullRequestNotOpen, name, state.PullRequest.State, state.PullRequest.Merged))
 		}
 		skill, err := p.skills.expandRound(r, n)
 		if err != nil {
-			return stopped(), err
+			return stop("round_failed", err)
 		}
 		prompt, err := json.Marshal(task{Role: "converger", Requirements: baselineRequirements + "\n\n" + convergeRequirements, Worktree: p.worktree.repo.Worktree(), Skills: []string{skill}, Round: n})
 		if err != nil {
-			return stopped(), err
+			return stop("round_failed", err)
 		}
-		v, result, err := runPush(ctx, r, p, pr, last, pushStep{scope: s, key: "converge", output: name + "-converge", prefix: name + "-", step: "converge", at: name,
+		v, result, closed, err := runPush(ctx, r, p, pr, d.last, pushStep{scope: s, key: "converge", output: name + "-converge", prefix: name + "-", step: "converge", at: name,
 			role: engine.RoleSpec{Name: convergeRole, Model: convergeModel, CWD: piCWD}, who: "converger", decision: "converge-verified", prompt: string(prompt),
-			inputs: []contract.Ref{p.input, outputs["implement"], outputs["pull-request"], snap, outputs[report]}, schema: ConvergeSchema, timeout: convergeTimeout},
+			inputs: []contract.Ref{p.input, outputs["implement"], outputs["pull-request"], snap, outputs[reportKey(d.accepted)]}, schema: ConvergeSchema, timeout: convergeTimeout},
 			outputs, stopped(), func(v convergeReport) error { return checkRound(v, snap) },
 			func(ctx context.Context, v convergeReport) error { return p.verifyWrites(ctx, r.Dir(), pr, v) })
+		d.closed = closed
 		if err != nil {
-			return result, err
+			d.result, d.err, d.kind = result, err, "round_failed"
+			return d
 		}
-		report, last = name+"-converge", v.Head
-		after, err := p.headAfter(ctx, r.Dir(), pr.Number, sp)
+		d.accepted, d.last = n, v.Head
+		after, err := p.pullAfter(ctx, r.Dir(), pr.Number, sp)
 		if err != nil {
-			return stopped(), fmt.Errorf("after %s: %w", name, err)
+			return stop("state_read_failed", fmt.Errorf("after %s: %w", name, err))
 		}
-		if v.Converged && v.Correction == "no_change" && len(v.ThreadActions) == 0 && len(v.CIReruns) == 0 && after == state.PullRequest.HeadSHA {
-			if err := r.Root().Decision(ctx, "converged", fmt.Sprintf("Round %d claimed convergence without a push, a thread reply or resolution or a rerun, and the pull request head read after its session closed, %s, is its snapshot's head", n, after), []contract.Ref{outputs[report], snap}); err != nil {
-				return stopped(), err
+		if after.State != "open" || *after.Merged {
+			return stop("pull_request_not_open", fmt.Errorf("%w: the read after %s shows state %q merged %t", errPullRequestNotOpen, name, after.State, *after.Merged))
+		}
+		if v.Converged && v.Correction == "no_change" && len(v.ThreadActions) == 0 && len(v.CIReruns) == 0 && after.Head.SHA == state.PullRequest.HeadSHA {
+			if err := r.Root().Decision(ctx, "converged", fmt.Sprintf("Round %d claimed convergence without a push, a thread reply or resolution or a rerun, and the pull request head read after its session closed, %s, is its snapshot's head", n, after.Head.SHA), []contract.Ref{outputs[reportKey(n)], snap}); err != nil {
+				return stop("round_failed", err)
 			}
-			return p.finalState(ctx, r, stopped(), sp)
+			return stop("converged", nil)
 		}
 	}
 }
 
 // unconverged ends rounds that ran out: it records decision with reason on
-// the last report and the last snapshot, if any, takes the final snapshot
-// and returns cause, joined with any error of these, with the last report
-// as the Final.
-func (p prepared) unconverged(ctx context.Context, r *engine.Run, outputs map[string]contract.Ref, report string, snapshot contract.Ref, decision, reason string, cause error, sp statePolicy) (engine.Result, error) {
-	result := engine.Result{Outputs: outputs, Final: &engine.FinalSelection{Output: report}}
+// report, the last report, and the last snapshot, if any, and returns cause,
+// joined with the Decision's error if it fails.
+func (p prepared) unconverged(ctx context.Context, r *engine.Run, outputs map[string]contract.Ref, report string, snapshot contract.Ref, decision, reason string, cause error) error {
 	refs := []contract.Ref{outputs[report]}
 	if snapshot != (contract.Ref{}) {
 		refs = append(refs, snapshot)
 	}
 	if err := r.Root().Decision(ctx, decision, reason, refs); err != nil {
-		return result, fmt.Errorf("%w; %w", cause, err)
+		return fmt.Errorf("%w; %w", cause, err)
 	}
-	result, err := p.finalState(ctx, r, result, sp)
-	if err != nil {
-		return result, fmt.Errorf("%w; %w", cause, err)
-	}
-	return result, cause
+	return cause
 }
 
-// headAfter is the head of pull request number as one read within sp.reads
-// shows it. A failed read wraps errStateRead; the run's cancellation,
-// deadline or fatal error is returned as its cause.
-func (p prepared) headAfter(ctx context.Context, dir string, number int, sp statePolicy) (string, error) {
+// pullAfter is pull request number as one read within sp.reads shows it. A
+// failed read wraps errStateRead; the run's cancellation, deadline or fatal
+// error is returned as its cause.
+func (p prepared) pullAfter(ctx context.Context, dir string, number int, sp statePolicy) (pullRequest, error) {
 	reads, cancel := context.WithTimeoutCause(ctx, sp.reads, errReadsCap)
 	defer cancel()
 	pr, err := getPullRequest(reads, dir, p.repository, number)
 	if err != nil {
 		if cause := context.Cause(ctx); cause != nil {
-			return "", cause
+			return pullRequest{}, cause
 		}
-		return "", fmt.Errorf("%w: %w", errStateRead, err)
+		return pullRequest{}, fmt.Errorf("%w: %w", errStateRead, err)
 	}
-	return pr.Head.SHA, nil
+	return pr, nil
 }
 
 // checkRound is the acceptance a repair can fix: the snapshot Ref echoed

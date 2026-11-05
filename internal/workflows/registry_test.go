@@ -37,7 +37,8 @@ func TestRegistryContainsProductWorkflows(t *testing.T) {
 	}
 	schemas, err := contract.NewRegistry(workflows.Resources(), workflows.Schemas())
 	if err != nil || !schemas.Has("smoke.echo.v1") || !schemas.Has("triage.report.v1") || !schemas.Has("triage.round.v1") || !schemas.Has("code-change.input.v1") || !schemas.Has("code-change.implement.v1") || !schemas.Has("code-change.review.v1") ||
-		!schemas.Has("code-change.publish.v1") || !schemas.Has("code-change.pull-request.v1") || !schemas.Has("code-change.fix.v1") || !schemas.Has("code-change.external-objects.v1") || !schemas.Has("code-change.pr-state.v1") || !schemas.Has("code-change.skills.v1") || !schemas.Has("code-change.converge.v1") {
+		!schemas.Has("code-change.publish.v1") || !schemas.Has("code-change.pull-request.v1") || !schemas.Has("code-change.fix.v1") || !schemas.Has("code-change.external-objects.v1") || !schemas.Has("code-change.pr-state.v1") || !schemas.Has("code-change.skills.v1") || !schemas.Has("code-change.converge.v1") ||
+		!schemas.Has("code-change.cleanup.v1") || !schemas.Has("code-change.summary.v1") {
 		t.Fatalf("product schemas unavailable: %v", err)
 	}
 }

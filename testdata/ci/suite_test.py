@@ -54,6 +54,7 @@ class SuiteTest(unittest.TestCase):
                     'TestConvergeTermination': base + '-converge-termination', 'TestConvergeLimits': base + '-converge',
                     'TestConvergeTerminationLater': base + '-converge-termination',
                     'TestConvergeWritesChecked': base + '-converge-termination',
+                    'TestCleanupStepSucceeds': base + '-cleanup', 'TestCleanupRegistrationFailureRemovesCheckout': base,
                     'TestImplementReady': base, 'TestCheckReview': base, 'TestFi': base,
                     'TestBrandNewFamily': base, 'TestReviewFix': base}
         tops = {package: sorted(expected), 'other/pkg': ['TestFixOther']}

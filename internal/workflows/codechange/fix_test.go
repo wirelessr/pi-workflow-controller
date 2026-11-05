@@ -101,9 +101,11 @@ func (a a1Run) startedAt(t *testing.T) map[string]int {
 // the pull request record. Its receipt is checked once against the worktree
 // and GitHub with the pull request identity taken from the record; then the
 // workflow records fix-verified, strictly closes the session and re-reads
-// the HEAD; the convergence rounds follow, here one that converges, and
-// only the workflow's successful return after them sets the removal, so the
-// worktree is still there when it returns and the run's cleanup removes it.
+// the HEAD; the convergence rounds follow, here one that converges, then
+// the cleanup Step, the final snapshot and the summary, which is the Final,
+// and only the workflow's successful return after them sets the removal,
+// so the worktree is still there when it returns and the run's cleanup
+// removes it.
 // A commit someone else pushed meanwhile, merged by the fixer before its
 // push, keeps the verified head an ancestor and passes.
 func TestFixSucceeds(t *testing.T) {
@@ -145,7 +147,7 @@ func TestFixSucceeds(t *testing.T) {
 				t.Fatalf("outcome %s exit %d failure %v", report.Outcome, report.ExitCode, report.Failure)
 			}
 			outputs := report.Result.Outputs
-			if report.Result.Final == nil || *report.Result.Final != (engine.FinalSelection{Output: "round-001-converge"}) || report.Final == nil || report.Final.Ref != outputs["round-001-converge"] {
+			if report.Result.Final == nil || *report.Result.Final != (engine.FinalSelection{Output: "summary"}) || report.Final == nil || report.Final.Ref != outputs["summary"] {
 				t.Fatalf("final selection %+v delivery %+v", report.Result.Final, report.Final)
 			}
 			if (pushed == implemented) != (tc.correction == "no_change") {
@@ -174,7 +176,7 @@ func TestFixSucceeds(t *testing.T) {
 			closed, finalizing, decided := a.journalIndex(t)
 			started := a.startedAt(t)[attempt.HandleID]
 			for _, other := range a.calls {
-				if h := a.attempt(other).HandleID; h != attempt.HandleID && other.request.Output.SchemaID != ConvergeSchema && (len(closed[h]) == 0 || closed[h][0] > started) {
+				if h := a.attempt(other).HandleID; h != attempt.HandleID && other.request.Output.SchemaID != ConvergeSchema && other.request.Output.SchemaID != CleanupSchema && (len(closed[h]) == 0 || closed[h][0] > started) {
 					t.Fatalf("session %s closed at %v, fixer started at %d", h, closed[h], started)
 				}
 			}
@@ -189,29 +191,30 @@ func TestFixSucceeds(t *testing.T) {
 			// The receipt check's one PR GET, and no compare: the pushed head
 			// is the pull request head. Then the round: one poll, which the
 			// fake GitHub's terminal state settles, the snapshot, the round's
-			// receipt GET and the GET after its close; then the final state,
-			// one poll and the snapshot.
+			// receipt GET and the GET after its close; then the cleanup
+			// Step's receipt GET and the final state, one poll and the
+			// snapshot.
 			const get = "api --method GET --hostname github.com -H Accept: application/vnd.github+json "
 			pull := get + "repos/owner/repo/pulls/1"
 			poll := []string{pull, get + "repos/owner/repo/commits/" + pushed + "/check-runs?per_page=100 --paginate --slurp", get + "repos/owner/repo/commits/" + pushed + "/status?per_page=100 --paginate --slurp"}
 			state := append(append(slices.Clone(poll), poll...), "api graphql --hostname github.com -f query=<review threads> -f name=repo -f owner=owner -F number=1 --paginate --slurp")
-			want := slices.Concat([]string{pull}, state, []string{pull, pull}, state)
+			want := slices.Concat([]string{pull}, state, []string{pull, pull, pull}, state)
 			gh := f.ghCalls()
 			if last := slices.Index(gh, get+"repos/owner/repo/pulls/1/reviews?per_page=100 --paginate --slurp"); last < 0 || !slices.Equal(gh[last+1:], want) {
 				t.Fatalf("gh calls %q, want %q after the deep review", gh, want)
 			}
-			// The final snapshot is attached after the round.
+			// The final snapshot is attached after the cleanup Step.
 			var roundDone, snapshotAt time.Time
 			for _, at := range report.Snapshot.Attempts {
 				switch at.Key {
-				case "converge":
+				case "cleanup":
 					roundDone = at.FinishedAt
 				case "final-snapshot":
 					snapshotAt = at.StartedAt
 				}
 			}
 			if s := snapshot(t, report); snapshotAt.IsZero() || !snapshotAt.After(roundDone) || s.PullRequest.HeadSHA != pushed || s.Wait.Outcome != "settled" || s.Wait.LastPolledHead != pushed {
-				t.Fatalf("final snapshot at %s after the round at %s: %+v", snapshotAt, roundDone, s)
+				t.Fatalf("final snapshot at %s after the cleanup Step at %s: %+v", snapshotAt, roundDone, s)
 			}
 			a.requireExitsConfirmed(t)
 			if checkoutAtReturn != nil {
@@ -306,7 +309,7 @@ func TestFixRepair(t *testing.T) {
 				},
 			})
 			report := a.report
-			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "round-001-converge" {
+			if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "summary" {
 				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 			}
 			calls := a.fixCalls()
@@ -590,13 +593,14 @@ func TestFixCancelled(t *testing.T) {
 	}
 }
 
-// The run succeeds within exactly three live sessions, ten sessions and
-// eighteen attempts when the fix Step uses all three of its attempts and one
+// The run succeeds within exactly three live sessions, eleven sessions and
+// twenty attempts when the fix Step uses all three of its attempts and one
 // round converges: input, skills, implementer, two pre-PR reviewers,
 // correction, pull-request, the deep review's five, the fixer's three, the
-// round's snapshot and converger, and the final snapshot. Two sessions less
-// stop the run before the fix Step is dispatched, three attempts less at the
-// round snapshot's Attach and four less at the fix Step's last repair, each
+// round's snapshot and converger, the cleaner, the final snapshot and the
+// summary. Three sessions less stop the run before the fix Step is
+// dispatched, five attempts less at the round snapshot's Attach and six less
+// at the fix Step's last repair, each
 // with a run-scope LimitExceeded, no Final, no external objects record and
 // no snapshot. TestConvergeLimits pins the worst case.
 func TestFixLimits(t *testing.T) {
@@ -607,7 +611,7 @@ func TestFixLimits(t *testing.T) {
 		dispatched int
 		want       string
 	}{
-		{"exact", 10, 18, 3, ""},
+		{"exact", 11, 20, 3, ""},
 		{"sessions", 8, 18, 0, "session limit exceeded"},
 		{"attempts-at-snapshot", 10, 15, 3, "run attempt limit exceeded"},
 		{"attempts", 10, 14, 2, "run attempt limit exceeded"},
@@ -636,7 +640,7 @@ func TestFixLimits(t *testing.T) {
 			}
 			a.requireExitsConfirmed(t)
 			if tc.want == "" {
-				if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "round-001-converge" {
+				if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "summary" {
 					t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 				}
 				return

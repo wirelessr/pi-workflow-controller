@@ -46,8 +46,7 @@ import (
 // the origin to a new commit and writes it to gh-moved, and the one
 // gh-move-head-at-checks numbers first commits in the worktree it names. Once there were as many check runs
 // reads as gh-fail-pull-after-checks says, a pull request read fails, and
-// so does the one gh-fail-pull-at numbers among the pull request reads and
-// every later one.
+// so does the one gh-fail-pull-at numbers among the pull request reads.
 // gh-fail-threads fails the review threads query, from the query it
 // numbers on when it holds a number. gh-block-threads blocks it like
 // gh-block. The review thread query of a node ID answers the node in
@@ -194,7 +193,7 @@ func TestGHHelper(t *testing.T) {
 			}
 		}
 		if raw, err := os.ReadFile(filepath.Join(dir, "gh-fail-pull-at")); err == nil {
-			if n, err := strconv.Atoi(string(raw)); err != nil || pullReads(dir) >= n {
+			if n, err := strconv.Atoi(string(raw)); err != nil || pullReads(dir) == n {
 				os.Exit(1)
 			}
 		}
@@ -797,8 +796,9 @@ func TestDefinitionPolicy(t *testing.T) {
 	if def.Name != "code-change" || def.Version != "1" || !reflect.DeepEqual(def.Policy, want) {
 		t.Fatalf("definition: %s %s %+v", def.Name, def.Version, def.Policy)
 	}
-	// The description says where this version stops.
-	if !strings.Contains(def.Description, "this version stops after the convergence rounds and a final snapshot of the pull request state, with no final cleanup or summary") {
+	// The description names the whole flow, through the cleanup Step and
+	// the summary.
+	if !strings.HasSuffix(def.Description, "then have a fresh cleaner do a last comment cleanup and push it, take a final snapshot of the pull request state, and deliver a final summary that sets the reports beside what the Controller observed, judging none of them") {
 		t.Fatalf("description: %s", def.Description)
 	}
 	// The production wait and read bounds, round cap, time admission and
@@ -806,7 +806,7 @@ func TestDefinitionPolicy(t *testing.T) {
 	if prStatePolicy != (statePolicy{wait: 30 * time.Minute, settle: 3 * time.Minute, poll: 30 * time.Second, reads: 10 * time.Minute}) {
 		t.Fatalf("state policy %+v", prStatePolicy)
 	}
-	if convergeRounds.rounds != 10 || convergeRounds.reserve != 160*time.Minute || reflect.ValueOf(convergeRounds.now).Pointer() != reflect.ValueOf(time.Now).Pointer() {
+	if convergeRounds.rounds != 10 || convergeRounds.reserve != 170*time.Minute || reflect.ValueOf(convergeRounds.now).Pointer() != reflect.ValueOf(time.Now).Pointer() {
 		t.Fatalf("round policy %+v", convergeRounds)
 	}
 	if SkillsDirEnv != "PWC_CODE_CHANGE_SKILLS_DIR" {

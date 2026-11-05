@@ -1,6 +1,6 @@
 # Code change workflow 規劃（草案）
 
-**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，C4a（PR 狀態唯讀 adapter、機械等待與最後快照）已落地，C4b（D 收斂迴圈、私有 skill 與每輪 Step）與 C4c（thread reply／resolve 與 Actions rerun 的授權及唯讀核對）已落地，目前到收斂輪與最後快照為止；其餘單元依第 8 節的順序施工。`code-change` 只是暫用名稱。
+**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，C4a（PR 狀態唯讀 adapter、機械等待與最後快照）已落地，C4b（D 收斂迴圈、私有 skill 與每輪 Step）與 C4c（thread reply／resolve 與 Actions rerun 的授權及唯讀核對）與 C4d（E 最後清理、final summary、outcome 對應與 Description）已落地，C4 完成；C5 依第 8 節的順序施工。`code-change` 只是暫用名稱。
 
 Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，經實作、發 PR 前審閱、發 PR、PR 後深度審閱、自行 triage 修正、收斂 PR，到最後清理，交付一個已開出的 PR。這是第一個會寫本機 repository 並對外部系統產生副作用的 workflow；現有 workflows 都只讀或只寫自有 artifacts。
 
@@ -63,7 +63,7 @@ Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，�
 - A1、A2 的審閱對象是本機尚未發佈的 diff，因此不能直接用 B 的流程；B 需要既存的 PR。
 - A3 是更正（回到同一個實作者）加發佈，沒有再審閱的迴圈。更嚴謹的把關在 B：B 審的是 PR 本身，需求來源由 B 的 Prepare 從 PR body 與其連結的原始規格找出，B 沒有拿到 design doc；design doc 與 code 的一致性只由 A2 檢查，A3 之後不再檢查，這是承認的範圍。
 - B 只在 A3 回報並經 Controller 核對的 head 上跑一次，以該 SHA 為預期值傳入（規則同下方 receipt 核對：相等或為 PR 當下 head 的祖先）。若 PR 當下 head 已較新（例如 bot 推了 commit），B 仍審 A3 的 head，report 不能是 `complete`（機械保證只有這一點與 Missing 列出 `unreviewed-head-commits`；X 與 Y 範圍的文字靠 Prepare 照抄，見 WORKFLOW-REUSE R6）；final summary 並列兩個 head 的明示在 C4。C、D、E 的改動不再被深度審閱。
-- E 獨立成 Step，是為了讓 D 未收斂或某輪逾時時仍做最後清理。E 只在 D 已開始之後才執行；A3 之前的失敗、A3 的 repair 用盡、B 的 `incomplete`、C 的失敗都直接終止，不進 E（PR 保留）。進入 E 的條件：D 最後開過的 session 的 `CloseSessionReport` 已確認關閉且 Wait 完成（未確認就不進 E；D 從未開過 session 則無此條件）。Run deadline、取消、fatal，以及身分或 receipt 核對失敗都不進 E（身分已對不上的 PR 不再寫入）。E 結束後仍回傳 D 的原始結果或錯誤。
+- E 獨立成 Step，是為了讓 D 未收斂或某輪逾時時仍做最後清理。E 只在 D 已開始之後才執行；A3 之前的失敗、A3 的 repair 用盡、B 的 `incomplete`、C 的失敗都直接終止，不進 E（PR 保留）。進入 E 的條件：D 最後開過的 session 的 `CloseSessionReport` 已確認關閉且 Wait 完成（未確認就不進 E；D 從未開過 session 則無此條件）。Run deadline、取消、fatal，以及身分或 receipt 核對失敗都不進 E（身分已對不上的 PR 不再寫入）。PR 在 D 期間或收斂輪之後不再 open 時同樣不進 E。某輪派送後失敗而 worktree 留下未核對的 commit 時，E 不派送（E 的派送前 HEAD 必須等於上次已核對的 head，Controller 不把未核對的 commit 當基準），但仍做最後快照與 final summary，summary 標明清理未執行與原因。Run 的錯誤：D 有錯誤時以 D 的為分類、E 的錯誤附在訊息後，否則就是 E 的錯誤；Final 為 final summary。
 
 ### Controller 在 D 的職責與界線
 
@@ -162,10 +162,10 @@ Prompt 格式：
 | triage-fix report | C | D | 對 B report 的每個 confirmed finding 的處置與理由（Go 只核對 ID 覆蓋，不看內容）、correction（committed：head 是記錄的 reported_head 之後的新 commit，且 reported_head 是 head 的祖先，即不改寫已審的 head；no_change：不 push，head 等於 reported_head）、head、notes（其餘項目的處理與未確認事項）；Controller 以 A3 相同的機械核對 push receipt，PR 身分與 branch 取自 `pull-request` 記錄而非 Agent 回報。C 派送前的失敗以 `pull-request` 記錄為 Final，派送後的失敗以 `external-objects`（`step`: `fix`）為 Final |
 | PR 狀態快照 | Controller（Attach） | D 每輪、Final | head SHA、checks／statuses 與未解 threads 的識別、狀態、連結、等待是否逾時與等待最後完整讀取的 head；PR number 須等於記錄、清單 key 不重複、缺不可為 null 的欄位即讀取失敗；不含內容全文，不含判斷 |
 | converge round report | D 每輪 | 下一輪、E | 逐項狀態、是否宣稱已收斂、未收斂原因；各外部寫入的 receipt 與 head，可核對者由 Controller 核對 |
-| cleanup report | E | Final | push receipt、最終 head，Controller 核對 |
-| final summary | Controller（Attach） | 使用者 | 精確引用各階段最後一份報告與最後一份快照，各自標明對應的 head，與最終 head 不同時明示；逐項列出 skipped 與 not_checked；並列 Agent 宣稱與快照 |
+| cleanup report | E | Final | push receipt 與最終 head，Controller 以修正 Step 的同一套核對；派送後失敗以 `external-objects`（`step` 為 cleanup）記錄 |
+| final summary | Controller（Attach） | 使用者 | 精確引用各階段最後一份報告與最後一份快照，各自標明對應的 head；明示限三處：收斂宣稱的 head 與最終 head 不同、最後快照的 head 與最終 head 不同、清理 Step 派送後失敗而寫入未經核對；skipped 與 not_checked 附原因逐項保留在收斂宣稱的逐項狀態中，不計數、不算通過；並列 Agent 宣稱與快照 |
 
-`FinalSelection` 指向 final summary。Summary 以 exact Ref 引用各報告，並只逐字抽取固定欄位（Agent 的收斂宣稱與逐項狀態；快照的 head SHA、各 check 的名稱與狀態、未解 thread 的 ID），不改寫、不補充；完整內容讀被引用的 Ref。
+`FinalSelection` 指向 final summary。Summary 以 exact Ref 引用各報告，並只逐字抽取固定欄位（各報告回報的 head；Agent 的收斂宣稱與逐項狀態；快照的 head SHA、各 check 的名稱與狀態、未解 thread 的 ID），不改寫、不補充；完整內容讀被引用的 Ref。
 
 ## 6. 重用 map（初版，開工前需重新核對 source）
 
@@ -235,7 +235,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 | C4a | PR 狀態唯讀 adapter（REST check runs／combined status 分頁、GraphQL review threads，`runtime.GitHubGraphQL` 固定入口）、機械等待與快照 Attach；先接在 C 之後當作最後快照 | C3c、R7 |
 | C4b | D 迴圈（每輪新 Child、終止規則、輪數與時間准入）、私有 skill 展開（R8 skilldir，環境變數 `PWC_CODE_CHANGE_SKILLS_DIR`，子樹 `converge`，所有 code-change run 必填，每輪從記憶中的來源以新名稱展開，前一輪的 Agent 改不到下一輪讀的內容）與每輪 Step；此版本只授權 push，D 不做 comment 清理（E 做）。暫時的 Final 與結束：收斂為最後一輪報告（Succeeded）；輪數用盡或准入不足為 `errNotConverged`，Final 為最後一份已接受的報告（一輪都沒跑時為 `fix`），最後快照照做；輪派送之後的 receipt／身分失敗以該輪的 `external-objects`（`step` converge）為 Final；session 已關閉且 receipt 已核對之後的輪後讀取或 `converged` Decision 失敗、PR 不再 open（`errPullRequestNotOpen`）、派送前 HEAD 不符（`errReceipt`）皆以最後報告為 Final；移除旗標只在收斂時；C4d 以 summary 取代 | C4a、R8 |
 | C4c | 授權 D 的 thread reply／resolve 與 CI rerun（僅 GitHub Actions run）及各自的唯讀核對 | C4b |
-| C4d | E、final summary、outcome 與 Description、品質掃描 skipped 語義 | C4c |
+| C4d | E、final summary、outcome 與 Description、品質掃描 skipped 語義。已落地：E 經 `runPush`；`cleanup.v1`、`summary.v1`；outcome 全表見 README；准入預留 170 分鐘；最壞會計 20 sessions／70 attempts（`TestConvergeLimits`） | C4c |
 | C5 | 實際整合驗收（需一次性測試 repo 與憑證，留在 repo 外；ticket 轉移見第 11 節） | C4d、M-model |
 
 共用單元（R6 至 R9）只交付政策無關的核心與原 consumer 的遷移；新 consumer 才需要的政策分支（可寫 worktree 的 fetch、GraphQL 查詢、寫入型 Step 的 receipt 核對）在第一個使用它的 C 單元落地並於該處驗收，不在共用單元預造。
@@ -261,13 +261,13 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 - **Controller 範圍增加。** Controller 新增 GitHub 唯讀 adapter，含分頁；不做 rate limit 偵測或退避，認證沿用 gh；它只讀不判斷，但仍是新增的維護面。
 - **Run 限額與期限。** sessions 至多約 20（A 1、A2 2、B 5、C 1、D 至多 10、E 1）。每個 Step 至多 3 個 attempts（首次加 2 次 contract repair，同一 handle，不增加 session）；provider auto retry 在同一 attempt 內，不消耗額度。A2 期間 A1 handle 存活加兩個審閱者共 3 個 live；A3 結束後關閉 A1 handle，B 與 D 期間不超過 3 個。
   - **額度約束：** Steps（約 21，每個至多 3 個 attempts）加 Attach（design doc 與 skills 記錄各 1、快照至多 D 輪數加 1、final summary 1）的最壞情況必須 ≤ `MaxTotalAttempts`；`MaxTotalSessions` 同理。run 範圍的 `LimitExceeded` 是 fatal，fatal 不解析 Final，所以額度要為 E、最後快照與 final summary 預留，即使 D 跑滿輪數。
-  - **時間約束：以 deadline 感知的准入，只保證 D 開始之後。** 每輪開始前由 workflow 以 `Run.Snapshot` 的 `CreatedAt` 加 `Policy.RunTimeout` 算出 deadline 與剩餘時間（`DisableRunTimeout` 為真則不准入）。剩餘時間小於「單輪上界加尾段預留」時不再開新一輪，D 以未收斂結束。單輪上界 = 等待上限（含靜置窗口）+ Controller 操作上限（只包快照的讀取，初值 10 分鐘；Attach 不在此期限內，只受 `AttemptTimeout` 限制，准入不為它另外預留，這是承認的殘餘）+ 一個 Step 上限。尾段預留 = E 的 Step 上限 + 最後快照的等待上限（含靜置窗口）與操作上限 + final summary 的 Attach（10 分鐘）+ 餘量 20 分鐘。初值：單輪上界 70 分鐘（靜置窗口含在等待上限內），尾段預留 90 分鐘（E 20、最後快照等待 30 與操作 10、summary 10、餘量 20），剩餘不足 160 分鐘即不開新一輪。
+  - **時間約束：以 deadline 感知的准入，只保證 D 開始之後。** 每輪開始前由 workflow 以 `Run.Snapshot` 的 `CreatedAt` 加 `Policy.RunTimeout` 算出 deadline 與剩餘時間（`DisableRunTimeout` 為真則不准入）。剩餘時間小於「單輪上界加尾段預留」時不再開新一輪，D 以未收斂結束。單輪上界 = 等待上限（含靜置窗口）+ Controller 操作上限（只包快照的讀取，初值 10 分鐘；Attach 不在此期限內，只受 `AttemptTimeout` 限制，准入不為它另外預留，這是承認的殘餘）+ 一個 Step 上限 + 輪後讀取的上限（同一個 10 分鐘）。receipt 讀取（數量隨回報增加）、repair 與嚴格關閉沒有自己的上界，只落在餘量內，所以准入只在名目路徑下保證 E 與 final，repair 與 receipt 讀取疊加時不保證。尾段預留 = E 的 Step 上限 + 最後快照的等待上限（含靜置窗口）與操作上限 + final summary 的 Attach（10 分鐘）+ 餘量 20 分鐘。初值：單輪上界 80 分鐘（等待 30、快照讀取 10、Step 30、輪後讀取 10），尾段預留 90 分鐘（E 20、最後快照等待 30 與操作 10、summary 10、餘量 20），剩餘不足 170 分鐘即不開新一輪。
   - **為何不乘 repair 倍數：** 沿用 triage 的取捨，為每個可能的 repair 預留完整 Step 上限會讓輪次在 deadline 前數小時就停止。代價是 repair 疊加時 E 與 final 仍可能被截斷，因此保證是有條件的，不是絕對的。
   - **範圍：** D 之前的階段沒有准入；deadline 若在 D 之前觸發，終態為 TimedOut，不進 E 也不產生 final summary。
 - **A3 一次更正。** A2 找到問題後只做一次修正，沒有再審閱，已確認由 B 把關。
 - **多樣性下降。** 見第 7 節。
 - **C 的信任鏈與殘餘風險。** PR 內文與 comments 經 B 的 report 流向一個有 push 權限的 Agent，防線只有 Step requirements；Controller 不限制 commit 觸及的路徑或內容，不偵測 CI 設定變更、機密寫入、其他 ref 或 default branch 的 push；C 不保存 GitHub 觀察記錄（`fix` 只有 Agent 回報的 head，C4 的 D 以自己的快照取得 GitHub 狀態）；B 與 C 之間 PR 被關閉或 merge 時，C 仍會派送並可能 push，之後才在 receipt 被發現；C 剛 push 後 PR 的 `head.sha` 若延遲會被誤判為 receipt 不符；run deadline 在 C 的 push 之後到達時沒有 external-objects 記錄。
-- **D 的信任鏈與殘餘風險。** 每輪一個有 push 權限的 fresh Agent 自行讀取 PR 的 review comments 與 check／status 輸出（公開 repo 上任何人都能留言或設定 check 名稱與連結），快照中第三方的 name、app、連結、thread 位置也進 Inputs，最多 10 輪，防線只有 baseline 與 round requirements；私有 skill 的來源由 Controller 讀取後每輪新展開，Agent 可以改寫當輪展開的內容，但不能影響之後的輪；`skills` 的 digest 是讀取時的內容，不代表當輪 Agent 讀到的位元組。授權範圍外的寫入（不是 thread 回覆的 comment、其他 CI 的 rerun 等）Controller 看不到，只靠 requirements；已授權的 reply、resolve、rerun 只核對 Agent 回報的 receipt，未回報者看不到，receipt 只證明該狀態存在、不證明為本輪所寫，Agent 重報舊 receipt 可延續迴圈到輪數上限；失敗時各 receipt 只在該輪 contract（`round-NNN-converge`，列於 Outputs），`external-objects` 不重述；reply 是以使用者帳號的公開發言，防線只有 requirements 的內容邊界；rerun 數量不設上限且消耗 CI 配額；receipt 讀取次數隨回報數線性增加，尾段預留在 C4d 一併重算；輪內 push 之後跨過 run deadline 時沒有記錄；輪的上界另含輪後讀取與 receipt 核對的 GET，尾段預留須在 C4d 重算。draft 不算「不再 open」，PR 轉為 draft 時由 receipt 核對在 push 之後發現。
+- **D 的信任鏈與殘餘風險。** 每輪一個有 push 權限的 fresh Agent 自行讀取 PR 的 review comments 與 check／status 輸出（公開 repo 上任何人都能留言或設定 check 名稱與連結），快照中第三方的 name、app、連結、thread 位置也進 Inputs，最多 10 輪，防線只有 baseline 與 round requirements；私有 skill 的來源由 Controller 讀取後每輪新展開，Agent 可以改寫當輪展開的內容，但不能影響之後的輪；`skills` 的 digest 是讀取時的內容，不代表當輪 Agent 讀到的位元組。授權範圍外的寫入（不是 thread 回覆的 comment、其他 CI 的 rerun 等）Controller 看不到，只靠 requirements；已授權的 reply、resolve、rerun 只核對 Agent 回報的 receipt，未回報者看不到，receipt 只證明該狀態存在、不證明為本輪所寫，Agent 重報舊 receipt 可延續迴圈到輪數上限；失敗時各 receipt 只在該輪 contract（`round-NNN-converge`，列於 Outputs），`external-objects` 不重述；reply 是以使用者帳號的公開發言，防線只有 requirements 的內容邊界；rerun 數量不設上限且消耗 CI 配額；receipt 讀取次數隨回報數線性增加，不在准入預留之內（見時間約束）；輪內 push 之後跨過 run deadline 時沒有記錄；輪的上界含輪後讀取，receipt 核對的 GET 不含（見時間約束）；E 是最後一個寫入者，其 push 之後 Controller 不驗證 CI 是否通過；E 在 push 後失敗時 summary 的最終 head 是最後核對的 head。draft 不算「不再 open」，PR 轉為 draft 時由 receipt 核對在 push 之後發現。
 - **本機 receipt 的範圍。** 它防的是錯誤與謊報，不防擁有同樣使用者權限的 Agent 偽造（registration 目錄、shallow、grafts 皆可被改寫）；「新 commit」只表示 HEAD 不是 base 或其祖先，不證明是 Agent 所建，也不證明是 base 的後代。
 - **未經 live 驗證的 Agent 行為。** repair 派送的新開頭句、A1 常數與 schema 的遵循度、`--no-lazy-fetch` 對 lazy fetch 的實際效果。
 - **只模擬或單元測試無法證明的事：** 模型能否遵循 schema、私有 skill 的單輪版能否在無人狀態下完成、品質掃描 skip 的實際行為、bot 靜置窗口、Agent 在 CWD 之外操作 worktree 時，各工具（git、build、test、專案內的相對路徑設定）的實際行為。皆列為 live 缺口。
@@ -287,7 +287,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 | C／E | 45／20 分鐘 | |
 | B | 沿用 review 現有：Prepare 20、各 reviewer 30、Validate 30 分鐘 | |
 | RunTimeout | 8 小時 | 預設 4 小時不足以容納跑滿輪數的常見情況；由准入規則保證 E 與 final |
-| MaxLiveSessions／MaxTotalSessions／MaxTotalAttempts | 3／22／80 | 最壞值隨版本增加而重算，以 `TestConvergeLimits`（完整流程、真實限額）為準（目前 19 sessions、64 attempts；C4 完成後約 20、70）；80 為保守值 |
+| MaxLiveSessions／MaxTotalSessions／MaxTotalAttempts | 3／22／80 | 最壞值隨版本增加而重算，以 `TestConvergeLimits`（完整流程、真實限額）為準（C4 完成後最壞 20 sessions、70 attempts）；80 為保守值 |
 | thinking | code-change 自己的角色沿 triage 慣例：GLM 用 high，deepseek flash 用 off（B 的角色維持各自現有設定，見第 7 節） | 變更前須確認該模型支援 |
 | D 未收斂的終態 | 比照 gap：交付 final 並以具名錯誤結束（Failed、exit 1） | |
 | 等待逾時 | 記為快照欄位，照常派該輪並計入輪數 | |
@@ -298,9 +298,10 @@ C4 決定（初值，待 live 調整）：
 |---|---|
 | 終態與靜置 | check run `status == completed`、commit status `state` 為 success、failure 或 error，其餘（含未知值）視為非終態；靜置＝窗口內每次輪詢都成立且 head 不變；`conclusion` 只抄進快照，Controller 不據以判斷 |
 | 輪詢 | 間隔 30 秒；讀取失敗重設靜置、記最後錯誤、不結束等待（整體上限仍有效）；快照讀取失敗為 `errStateRead`，該輪不派送、D 結束、照常進 E 與 summary |
-| 時間准入 | 靜置含在等待上限內；單輪 70 分鐘、尾段 90 分鐘（E 20、等待 30、最後快照 10、summary 10、餘量 20）；剩餘不到 160 分鐘不開新一輪；`DisableRunTimeout` 為真時不做時間准入（同 triage）；sessions／attempts 的最壞值以 `TestConvergeLimits` 釘住（完整流程、真實限額），不做執行期額度准入 |
+| 時間准入 | 靜置含在等待上限內；單輪 80 分鐘（含輪後讀取 10）、尾段 90 分鐘（E 20、等待 30、最後快照 10、summary 10、餘量 20）；剩餘不到 170 分鐘不開新一輪；receipt 讀取、repair 與嚴格關閉只靠餘量；`DisableRunTimeout` 為真時不做時間准入（同 triage）；sessions／attempts 的最壞值以 `TestConvergeLimits` 釘住（完整流程、真實限額），不做執行期額度准入 |
 | PR 在 D 期間不再 open | 以 `errPullRequestNotOpen` 結束 D，不進 E，summary 為 Final |
-| D／E 身分或 receipt 不符 | `external-objects` 為 Final，不做最後快照與 summary |
+| D／E 身分或 receipt 不符 | `external-objects` 為 Final，不做最後快照與 summary；某輪失敗後 E 因 worktree HEAD 未核對而不派送，不屬此列（做最後快照與 summary） |
+| E 的前提 | D 已開始、run 仍可動作、D 不是以身分或 receipt 不符結束、PR 仍 open、D 開過的 session 都確認關閉，派送前 HEAD 等於上次核對的 head；不滿足時 E 不派送，原因記於 summary |
 | 未收斂 | 交付 summary 為 Final，以 `errNotConverged` 結束（Failed、exit 1），輪數用盡與時間准入不足共用；worktree 保留 |
 | 品質掃描 | schema 要求 `quality-scan` 恰好一項；`skipped` 只允許預先列舉的 id 且必有 reason，不得算作通過 |
 | thread receipt | GraphQL node ID；核對屬於該 PR、`isResolved`、reply 出現在 thread 的留言中 |

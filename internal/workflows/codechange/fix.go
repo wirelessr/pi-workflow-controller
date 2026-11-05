@@ -55,7 +55,7 @@ func fix(ctx context.Context, r *engine.Run, p prepared, piCWD string, reviewed 
 	if err != nil {
 		return failed, err
 	}
-	_, result, err := runPush(ctx, r, p, pr, pr.ReportedHead, pushStep{scope: r.Root(), key: "fix", output: "fix", step: "fix", at: "the fix Step",
+	_, result, _, err := runPush(ctx, r, p, pr, pr.ReportedHead, pushStep{scope: r.Root(), key: "fix", output: "fix", step: "fix", at: "the fix Step",
 		role: engine.RoleSpec{Name: fixRole, Model: implementModel, CWD: piCWD}, who: "fixer", decision: "fix-verified", prompt: string(prompt),
 		inputs: []contract.Ref{p.input, outputs["implement"], outputs["pull-request"], report}, schema: FixSchema, timeout: fixTimeout},
 		outputs, failed, func(v fixed) error {
@@ -100,36 +100,45 @@ type pushContract interface {
 	receipt(pr pullRequestRecord) receipt
 }
 
+// headMismatch is runPush's check before the dispatch that found the
+// worktree HEAD not the last verified head: a receipt mismatch, wrapping
+// errReceipt, that no session of the Step saw.
+type headMismatch struct{ error }
+
+func (e headMismatch) Unwrap() error { return e.error }
+
 // runPush runs ps on the pull request of the record pr in a fresh session,
 // once the worktree HEAD read through the registration is still last, the
-// last verified head. It checks the accepted contract's receipt once with the
-// correction Step's checks, the pull request and its branch taken from the
-// record and a committed head required to be built on last, then, when
-// writes is set, the contract's other external writes with it; records
-// ps.decision in ps.scope; strictly closes the session; and succeeds only
-// when the worktree HEAD read after that close is still the pushed head,
-// returning the accepted contract. A failure before the dispatch returns
-// before; every failure from the dispatch on, while the run can still act,
-// records the external objects that exist as the Final. Both return the
-// original error.
-func runPush[T pushContract](ctx context.Context, r *engine.Run, p prepared, pr pullRequestRecord, last string, ps pushStep, outputs map[string]contract.Ref, before engine.Result, check func(T) error, writes func(context.Context, T) error) (T, engine.Result, error) {
+// last verified head, which headMismatch reports otherwise. It checks the
+// accepted contract's receipt once with the correction Step's checks, the
+// pull request and its branch taken from the record and a committed head
+// required to be built on last, then, when writes is set, the contract's
+// other external writes with it; records ps.decision in ps.scope; strictly
+// closes the session; and succeeds only when the worktree HEAD read after
+// that close is still the pushed head, returning the accepted contract. A
+// failure before the dispatch returns before; every failure from the
+// dispatch on, while the run can still act, records the external objects
+// that exist as the Final. Both return the original error. closed reports
+// whether the session it opened, if any, is confirmed closed: by the strict
+// close, or by the external objects record.
+func runPush[T pushContract](ctx context.Context, r *engine.Run, p prepared, pr pullRequestRecord, last string, ps pushStep, outputs map[string]contract.Ref, before engine.Result, check func(T) error, writes func(context.Context, T) error) (_ T, _ engine.Result, closed bool, _ error) {
 	var none T
 	// Agents ran after the last read, and only their requirements kept them
 	// from the worktree.
 	current, err := p.worktree.head(ctx)
 	if err != nil {
-		return none, before, err
+		return none, before, true, err
 	}
 	if current != last {
-		return none, before, fmt.Errorf("%w: the worktree HEAD is %s before %s; want the verified head %s", errReceipt, current, ps.at, last)
+		return none, before, true, headMismatch{fmt.Errorf("%w: the worktree HEAD is %s before %s; want the verified head %s", errReceipt, current, ps.at, last)}
 	}
 	h, err := r.OpenSession(ctx, ps.role)
 	if err != nil {
-		return none, before, err
+		return none, before, false, err
 	}
 	identity, err := r.SessionIdentity(ctx, h)
 	if err != nil {
-		return none, before, err
+		return none, before, false, err
 	}
 	out, v, err := stepDecoded(ctx, r, ps.scope, engine.StepSpec{Key: ps.key, Session: h, Prompt: ps.prompt, Inputs: ps.inputs,
 		Output: contract.Spec{SchemaID: ps.schema}, Timeout: ps.timeout, RepairKeepsWork: true}, check)
@@ -150,10 +159,10 @@ func runPush[T pushContract](ctx context.Context, r *engine.Run, p prepared, pr 
 		err = p.pushTail(ctx, r, ps, hand, out, rc, other)
 	}
 	if err != nil {
-		result, err := p.externalObjects(ctx, r, ps.scope, ps.prefix, hand, ps.step, outputs, reported, err)
-		return v, result, err
+		result, closed, err := p.externalObjects(ctx, r, ps.scope, ps.prefix, hand, ps.step, outputs, reported, err)
+		return v, result, closed, err
 	}
-	return v, engine.Result{}, nil
+	return v, engine.Result{}, true, nil
 }
 
 // pushTail checks rc, the accepted contract's receipt of ps, against the

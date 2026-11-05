@@ -1,0 +1,399 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/code-change/summary.v1.json",
+  "description": "Controller final summary of the run: what the Controller observed and what the Agents reported, side by side, every value copied from the committed Refs it cites. Nothing in it is judged, counted or reconciled; a claim that disagrees with a snapshot stands beside it",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "rounds_end",
+    "pull_request",
+    "reports",
+    "final_head",
+    "statements",
+    "rounds",
+    "claim",
+    "cleanup",
+    "final_snapshot"
+  ],
+  "properties": {
+    "failure": {
+      "description": "The error the run fails with; absent when it succeeds",
+      "type": "string",
+      "minLength": 1
+    },
+    "rounds_end": {
+      "description": "How the convergence rounds ended, by the Controller's mechanical rule; the first three are the names of the Decisions that end them. converged: a round claimed convergence without any write on an unchanged head. rounds-exhausted: the round cap was reached first. rounds-not-admitted: the run deadline left too little for another round. pull_request_not_open: a round's snapshot, or the read after a round, showed the pull request closed or merged. state_read_failed: a read of the pull request state failed. round_failed: another failure, which failure states",
+      "enum": [
+        "converged",
+        "rounds-exhausted",
+        "rounds-not-admitted",
+        "pull_request_not_open",
+        "state_read_failed",
+        "round_failed"
+      ]
+    },
+    "pull_request": {
+      "description": "The pull request record: the pull request as GitHub showed it after the correction Step, reported_head the head that Step reported, which the deep review reviewed, and head_sha the pull request head GitHub showed then",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "url",
+        "number",
+        "branch",
+        "reported_head",
+        "head_sha"
+      ],
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "url": {
+          "type": "string"
+        },
+        "number": {
+          "type": "integer"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "reported_head": {
+          "$ref": "#/$defs/sha"
+        },
+        "head_sha": {
+          "$ref": "#/$defs/sha"
+        }
+      }
+    },
+    "reports": {
+      "description": "The last accepted report of each stage in order, each with the head it is for: the implement, correction and fix contracts, the deep review report with the pull request record's reported_head, which the deep review was given as its expected head and pinned the report to, the last accepted converge contract and the cleanup contract. The reports of earlier rounds are in rounds",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "output",
+          "ref",
+          "head"
+        ],
+        "properties": {
+          "output": {
+            "description": "The report's name in the run's outputs",
+            "type": "string",
+            "minLength": 1
+          },
+          "ref": {
+            "$ref": "#/$defs/ref"
+          },
+          "head": {
+            "$ref": "#/$defs/sha"
+          }
+        }
+      }
+    },
+    "final_head": {
+      "description": "The last report's head: the head the Controller verified last",
+      "$ref": "#/$defs/sha"
+    },
+    "statements": {
+      "description": "Exactly these, each when it holds: the claim's head is not the final head; the final snapshot shows another head than the final head; the cleanup Step failed from its dispatch on, so its writes are unverified",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "rounds": {
+      "description": "Each convergence round that began, with its snapshot, its report once accepted and its external objects record if it failed after its dispatch",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "round",
+          "snapshot",
+          "report",
+          "external_objects"
+        ],
+        "properties": {
+          "round": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "snapshot": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ref"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "report": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ref"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "external_objects": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ref"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "claim": {
+      "description": "The last accepted converge contract's claim, copied; null when no round's was accepted. Each item keeps its status and reason as the converger wrote them; a claim of convergence does not cover the items skipped or not_checked, which are neither counted nor passed",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "output",
+            "converged",
+            "items"
+          ],
+          "properties": {
+            "output": {
+              "type": "string",
+              "minLength": 1
+            },
+            "converged": {
+              "type": "boolean"
+            },
+            "unconverged": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/item"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "cleanup": {
+      "description": "The cleanup Step. skipped, when it was not dispatched: pull_request_not_open, the pull request was no longer open; session_unconfirmed, a session of the rounds was not confirmed closed; unverified_head, the worktree HEAD was not the head the Controller verified last. report: its contract once accepted and verified; external_objects: the record of its failure from its dispatch on",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "report",
+        "external_objects"
+      ],
+      "properties": {
+        "skipped": {
+          "enum": [
+            "pull_request_not_open",
+            "session_unconfirmed",
+            "unverified_head"
+          ]
+        },
+        "report": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "external_objects": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "final_snapshot": {
+      "description": "The final pull request state snapshot, its head, check runs, statuses and unresolved threads copied; unavailable, with the detail, when it could not be taken",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "check_runs",
+        "statuses",
+        "unresolved_threads"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "recorded",
+            "unavailable"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "head_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "check_runs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "status",
+              "conclusion"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "conclusion": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "statuses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "context",
+              "state"
+            ],
+            "properties": {
+              "context": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "unresolved_threads": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "status": {
+            "const": "recorded"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "ref",
+          "head_sha"
+        ]
+      },
+      "else": {
+        "required": [
+          "detail"
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "skipped",
+            "not_checked"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "attempt_id",
+        "path",
+        "schema_id",
+        "sha256",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "schema_id": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

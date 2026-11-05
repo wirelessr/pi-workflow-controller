@@ -275,7 +275,7 @@ func TestDeepReviewSucceeds(t *testing.T) {
 	closed, _, decided := a.journalIndex(t)
 	accepted, ok := decided["context-accepted"]
 	for _, c := range a.calls {
-		if at := closed[a.attempt(c).HandleID]; !deepReviewCall(c) && c.request.Output.SchemaID != FixSchema && c.request.Output.SchemaID != ConvergeSchema && (!ok || len(at) == 0 || at[0] > accepted) {
+		if at := closed[a.attempt(c).HandleID]; !deepReviewCall(c) && c.request.Output.SchemaID != FixSchema && c.request.Output.SchemaID != ConvergeSchema && c.request.Output.SchemaID != CleanupSchema && (!ok || len(at) == 0 || at[0] > accepted) {
 			t.Fatalf("%s session closed at %v, deep review context accepted at %d", c.request.Output.SchemaID, at, accepted)
 		}
 	}

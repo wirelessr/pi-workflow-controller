@@ -120,6 +120,8 @@ type agents struct {
 	// converge answers every round's converge Step; nil claims convergence
 	// without a change.
 	converge func(t *testing.T, c agentCall) string
+	// cleanup answers the cleanup Step; nil cleans up nothing.
+	cleanup func(t *testing.T, c agentCall) string
 	// rounds, when set, is the round policy of the run r; the production
 	// policy otherwise.
 	rounds func(r *engine.Run) roundPolicy
@@ -282,6 +284,11 @@ func (f *fixture) run(t *testing.T, as agents) a1Run {
 					agent = as.converge
 					if agent == nil {
 						agent = f.acceptConverge
+					}
+				case c.request.Output.SchemaID == CleanupSchema:
+					agent = as.cleanup
+					if agent == nil {
+						agent = f.acceptCleanup
 					}
 				default:
 					agent = as.review
@@ -581,10 +588,10 @@ func TestImplementReady(t *testing.T) {
 	}
 	// The implement receipt's HEAD and history, the HEAD after the review,
 	// the correction receipt's HEAD and history, the HEAD after its close,
-	// and for the fix Step and the one convergence round, neither of which
-	// commits, the HEAD before each, its receipt's HEAD and the HEAD after
-	// its close.
-	if !reflect.DeepEqual(reads, []string{"rev-parse", "rev-list", "rev-parse", "rev-parse", "rev-list", "rev-parse", "rev-parse", "rev-parse", "rev-parse", "rev-parse", "rev-parse", "rev-parse"}) || !reflect.DeepEqual(snapshot, []string{"init", "worktree"}) {
+	// and for the fix Step, the one convergence round and the cleanup Step,
+	// none of which commits, the HEAD before each, its receipt's HEAD and
+	// the HEAD after its close.
+	if !reflect.DeepEqual(reads, []string{"rev-parse", "rev-list", "rev-parse", "rev-parse", "rev-list", "rev-parse", "rev-parse", "rev-parse", "rev-parse", "rev-parse", "rev-parse", "rev-parse", "rev-parse", "rev-parse", "rev-parse"}) || !reflect.DeepEqual(snapshot, []string{"init", "worktree"}) {
 		t.Fatalf("registration reads %v, snapshot git %v", reads, snapshot)
 	}
 }

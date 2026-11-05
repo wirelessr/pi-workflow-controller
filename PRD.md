@@ -8,7 +8,7 @@
 
 多種 workflow 以 Go 程式碼預先定義，不提供外部 workflow config、動態流程修改、DSL、GUI 編排或通用 DAG interpreter。「零配置」只指 workflow 定義方式，不代表不需要 Pi／Node、provider 認證或工具環境。
 
-目前產品 workflows 為 `smoke-echo`、固定 deep `code-review`（角色、模型、contracts、權限與業務結果見 [CODE-REVIEW](docs/CODE-REVIEW.md)）、`jira-triage`（見 [JIRA-TRIAGE](docs/JIRA-TRIAGE.md)）與 `code-change`（目前到收斂輪與最後快照為止，見 [CODE-CHANGE](docs/CODE-CHANGE.md)）。任何具體 workflow 的角色數量、名稱及順序都不是框架限制。
+目前產品 workflows 為 `smoke-echo`、固定 deep `code-review`（角色、模型、contracts、權限與業務結果見 [CODE-REVIEW](docs/CODE-REVIEW.md)）、`jira-triage`（見 [JIRA-TRIAGE](docs/JIRA-TRIAGE.md)）與 `code-change`（見 [CODE-CHANGE](docs/CODE-CHANGE.md)）。任何具體 workflow 的角色數量、名稱及順序都不是框架限制。
 
 ## 2. 輸入、部署與配置
 

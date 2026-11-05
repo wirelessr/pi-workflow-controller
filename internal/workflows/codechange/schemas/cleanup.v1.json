@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-workflow-controller.local/schemas/code-change/cleanup.v1.json",
+  "description": "The final cleaner's report of its comment cleanup: notes, the change and the pushed head",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "notes",
+    "correction",
+    "head"
+  ],
+  "properties": {
+    "notes": {
+      "description": "What the cleanup changed or left and why, and what remains unconfirmed; empty when there is nothing to note",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "correction": {
+      "description": "Where this Step left the worktree HEAD. committed: at a new commit after the previous report's head, pushed to the pull request record's branch. no_change: still at that head, with nothing pushed",
+      "enum": [
+        "committed",
+        "no_change"
+      ]
+    },
+    "head": {
+      "description": "The worktree HEAD at the end of this Step, which, when committed, is the commit pushed to the pull request record's branch",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  }
+}

@@ -18,6 +18,7 @@ import (
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/runtime"
 )
 
 // roundSnapshot is the round's pull request state snapshot in c's inputs.
@@ -75,8 +76,6 @@ func (a a1Run) convergeCalls() []agentCall {
 	return out
 }
 
-func roundName(n int) string { return fmt.Sprintf("round-%03d", n) }
-
 // implementPublished is the implementer, followed by what the seam lets the
 // test do for the correction Step: the commit is put on workBranch, pushed,
 // and GitHub shows pull request 1 from it.
@@ -93,7 +92,8 @@ func (f *fixture) implementPublished(t *testing.T, c agentCall) string {
 // map): the real preparation with the private skill, the real implement
 // Step with implementPublished, a strict close of the implementer's session
 // and the real pull-request Attach at its head, for the correction Step that
-// does not run; the real fix Step; then the same converge execute runs. The
+// does not run; the real fix Step; then the same rounds, cleanup Step,
+// final snapshot and summary as execute's. The
 // fix Step's deep review report is a stand-in, the pull request record,
 // which holds no findings: the deep review does not run, and the fixer only
 // reads the report's finding IDs. The seam never sets the worktree's
@@ -119,7 +119,7 @@ func (f *fixture) convergeSeam(ctx context.Context, r *engine.Run, in engine.Inp
 	if result, err = fix(ctx, r, p, f.piCWD, result); err != nil {
 		return result, err
 	}
-	return p.converge(ctx, r, f.piCWD, result, testState, rounds)
+	return p.finish(ctx, r, f.piCWD, p.converge(ctx, r, f.piCWD, result, testState, rounds), testState)
 }
 
 // seam runs as from the seam; its rounds get more than the fixture's
@@ -180,8 +180,8 @@ func roundSkill(a a1Run, n int) string {
 // is an ordinary Child round-NNN of root, not a Retry, with its own
 // snapshot, a fresh session for the converger in PWC_PI_CWD with the
 // round's own expansion of the private skill, and its converge-verified
-// Decision; the round's report is the Final and the final snapshot follows
-// the rounds.
+// Decision; the cleanup Step, the final snapshot and the summary, which is
+// the Final, follow the rounds.
 func TestConvergeTermination(t *testing.T) {
 	claim, open := roundBehavior{claim: true}, roundBehavior{}
 	for _, tc := range []struct {
@@ -212,8 +212,11 @@ func TestConvergeTermination(t *testing.T) {
 			n := len(tc.rounds)
 			final := roundName(n) + "-converge"
 			outputs := report.Result.Outputs
-			if report.Outcome != engine.Succeeded || report.Failure != nil || report.Final == nil || report.Final.Output != final || report.Final.Ref != outputs[final] {
-				t.Fatalf("outcome %s failure %v final %+v, want %s", report.Outcome, report.Failure, report.Final, final)
+			if report.Outcome != engine.Succeeded || report.Failure != nil || report.Final == nil || report.Final.Output != "summary" || report.Final.Ref != outputs["summary"] {
+				t.Fatalf("outcome %s failure %v final %+v, want the summary", report.Outcome, report.Failure, report.Final)
+			}
+			if s := output[summaryRecord](t, a, "summary"); s.RoundsEnd != "converged" || s.Claim == nil || s.Claim.Output != final || len(s.Rounds) != n {
+				t.Fatalf("summary %+v", s)
 			}
 			if s := output[prStateRecord](t, a, "round-001-snapshot"); tc.polledBehind == (s.Wait.LastPolledHead == s.PullRequest.HeadSHA) {
 				t.Fatalf("first snapshot head_sha %s, last polled head %s", s.PullRequest.HeadSHA, s.Wait.LastPolledHead)
@@ -253,7 +256,8 @@ func TestConvergeTermination(t *testing.T) {
 				}
 				want = append(want, decision{Scope: "root/" + name, Name: "converge-verified", Refs: []contract.Ref{outputs[name+"-converge"]}})
 			}
-			want = append(want, decision{Scope: "root", Name: "converged", Refs: []contract.Ref{outputs[final], outputs[roundName(n)+"-snapshot"]}})
+			want = append(want, decision{Scope: "root", Name: "converged", Refs: []contract.Ref{outputs[final], outputs[roundName(n)+"-snapshot"]}},
+				decision{Scope: "root", Name: "cleanup-verified", Refs: []contract.Ref{outputs["cleanup"]}})
 			got := a.decisions(t)
 			if fixed := slices.IndexFunc(got, func(d decision) bool { return d.Name == "fix-verified" }); fixed < 0 || !reflect.DeepEqual(got[fixed+1:], want) {
 				t.Fatalf("decisions %+v, want %+v after fix-verified", got, want)
@@ -302,29 +306,35 @@ func TestConvergeAdmitted(t *testing.T) {
 // The rounds end unconverged at the round cap, here 2, with
 // rounds-exhausted, or once a round is not admitted, the run deadline
 // leaving less than the reserve at the time the round policy's clock gives,
-// with rounds-not-admitted: with no round admitted the fix contract is the
-// Final, otherwise the last round's report. The Decision cites that report
-// and the last snapshot, the final snapshot is still taken and the run fails
-// with errNotConverged. A run without a deadline admits rounds the clock
-// puts past it.
+// with rounds-not-admitted. The Decision cites the last accepted report,
+// the fix contract when no round was admitted, and the last snapshot; the
+// cleanup Step still runs on that report, the final snapshot is still
+// taken, the summary is the Final and the run fails with errNotConverged.
+// A cleanup Step that fails after rounds that did not converge, here with
+// its repairs exhausted, adds its error to errNotConverged's message and
+// keeps errNotConverged's classification. A run without a deadline admits
+// rounds the clock puts past it.
 func TestConvergeRoundsEnd(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		cap  int
 		// late is the 1-based clock read from which the clock is past the
 		// reserve; 0 never.
-		late     int
-		disable  bool
-		rounds   []roundBehavior
-		final    string
-		decision string
-		refs     []string
-		want     string
+		late    int
+		disable bool
+		rounds  []roundBehavior
+		// cleanupFails exhausts the cleanup Step's repairs.
+		cleanupFails bool
+		// previous is the last accepted report, which the cleanup Step gets.
+		previous, kind string
+		refs           []string
+		want           string
 	}{
-		{"round-cap", 2, 0, false, []roundBehavior{{push: true}, {}}, "round-002-converge", "rounds-exhausted", []string{"round-002-converge", "round-002-snapshot"}, " within the round cap of 2"},
-		{"no-round-admitted", 10, 1, false, nil, "fix", "rounds-not-admitted", []string{"fix"}, ": the run deadline leaves less than 2h40m0s for round 1"},
-		{"second-round-not-admitted", 10, 2, false, []roundBehavior{{push: true}}, "round-001-converge", "rounds-not-admitted", []string{"round-001-converge", "round-001-snapshot"}, ": the run deadline leaves less than 2h40m0s for round 2"},
-		{"no-run-deadline", 10, 1, true, []roundBehavior{{}, {claim: true}}, "round-002-converge", "", nil, ""},
+		{"round-cap", 2, 0, false, []roundBehavior{{push: true}, {}}, false, "round-002-converge", "rounds-exhausted", []string{"round-002-converge", "round-002-snapshot"}, " within the round cap of 2"},
+		{"round-cap-cleanup-fails", 1, 0, false, []roundBehavior{{push: true}}, true, "round-001-converge", "rounds-exhausted", []string{"round-001-converge", "round-001-snapshot"}, " within the round cap of 1; the cleanup Step: "},
+		{"no-round-admitted", 10, 1, false, nil, false, "fix", "rounds-not-admitted", []string{"fix"}, ": the run deadline leaves less than 2h50m0s for round 1"},
+		{"second-round-not-admitted", 10, 2, false, []roundBehavior{{push: true}}, false, "round-001-converge", "rounds-not-admitted", []string{"round-001-converge", "round-001-snapshot"}, ": the run deadline leaves less than 2h50m0s for round 2"},
+		{"no-run-deadline", 10, 1, true, []roundBehavior{{}, {claim: true}}, false, "round-002-converge", "converged", []string{"round-002-converge", "round-002-snapshot"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
@@ -343,45 +353,84 @@ func TestConvergeRoundsEnd(t *testing.T) {
 				},
 				policy: func(p *engine.RunPolicy) { p.DisableRunTimeout = tc.disable },
 			})
+			if tc.cleanupFails {
+				as.cleanup = func(t *testing.T, c agentCall) string {
+					writeCandidate(t, c, map[string]any{"rejected": true})
+					return ""
+				}
+			}
 			a := f.run(t, as)
 			report := a.report
 			outputs := report.Result.Outputs
-			if report.Final == nil || report.Final.Output != tc.final || report.Final.Ref != outputs[tc.final] || len(a.convergeCalls()) != len(tc.rounds) {
+			if report.Final == nil || report.Final.Output != "summary" || report.Final.Ref != outputs["summary"] || len(a.convergeCalls()) != len(tc.rounds) {
 				t.Fatalf("final %+v converge dispatches %d failure %v", report.Final, len(a.convergeCalls()), report.Failure)
 			}
-			if _, ok := outputs["final-snapshot"]; !ok {
-				t.Fatalf("outputs %+v", outputs)
+			cleanups := a.cleanupCalls()
+			if len(cleanups) != map[bool]int{false: 1, true: 1 + contractRepairs}[tc.cleanupFails] ||
+				!reflect.DeepEqual(cleanups[0].request.Inputs, []contract.Ref{outputs["input"], outputs["implement"], outputs["pull-request"], outputs[tc.previous]}) {
+				t.Fatalf("cleanup dispatches %d inputs %+v, want the previous report %s", len(cleanups), cleanups, tc.previous)
+			}
+			s := output[summaryRecord](t, a, "summary")
+			if s.RoundsEnd != tc.kind || (s.Claim == nil) != (tc.previous == "fix") || s.FinalSnapshot.Status != "recorded" || len(s.Rounds) != len(tc.rounds) ||
+				(s.Cleanup.Report == nil) != tc.cleanupFails || (s.Cleanup.ExternalObjects != nil) != tc.cleanupFails {
+				t.Fatalf("summary %+v", s)
+			}
+			for k, round := range s.Rounds {
+				if round.Report == nil || *round.Report != outputs[fmt.Sprintf("round-%03d-converge", k+1)] {
+					t.Fatalf("summary round %d %+v", k+1, round)
+				}
+			}
+			// The last accepted report is the last before the cleanup contract's.
+			at := len(s.Reports) - 1
+			if !tc.cleanupFails {
+				at--
+			}
+			if last := s.Reports[at]; last.Output != tc.previous || last.Ref != outputs[tc.previous] || len(s.Reports) != map[bool]int{false: 4, true: 3}[tc.previous == "fix"]+map[bool]int{false: 1, true: 0}[tc.cleanupFails] {
+				t.Fatalf("summary reports %+v, want %s last before the cleanup contract's", s.Reports, tc.previous)
+			}
+			var refs []contract.Ref
+			for _, key := range tc.refs {
+				refs = append(refs, outputs[key])
+			}
+			last := []decision{{Scope: "root", Name: tc.kind, Refs: refs}, {Scope: "root", Name: "cleanup-verified", Refs: []contract.Ref{outputs["cleanup"]}}}
+			if tc.cleanupFails {
+				last = last[:1]
+			}
+			if got := a.decisions(t); !reflect.DeepEqual(got[len(got)-len(last):], last) {
+				t.Fatalf("last decisions %+v", got[len(got)-len(last):])
 			}
 			if tc.want == "" {
 				if report.Outcome != engine.Succeeded {
 					t.Fatalf("outcome %s failure %v", report.Outcome, report.Failure)
 				}
+				a.requireExitsConfirmed(t)
 				return
 			}
-			requireFailure(t, report, "code-change: the pull request did not converge"+tc.want)
-			var refs []contract.Ref
-			for _, key := range tc.refs {
-				refs = append(refs, outputs[key])
+			want := "code-change: the pull request did not converge" + tc.want
+			if tc.cleanupFails {
+				want += output[externalObjectsRecord](t, a, "external-objects").Failure
 			}
-			if got := a.decisions(t); !errors.Is(report.Failure, errNotConverged) || !reflect.DeepEqual(got[len(got)-1], decision{Scope: "root", Name: tc.decision, Refs: refs}) {
-				t.Fatalf("failure %v last decision %+v", report.Failure, got[len(got)-1])
+			if report.Outcome != engine.Failed || report.ExitCode != 1 || report.Failure.Error() != want || s.Failure != want || !errors.Is(report.Failure, errNotConverged) || report.Snapshot.Failure.Code != engine.WorkflowFailed {
+				t.Fatalf("outcome %s exit %d failure %v, want %q", report.Outcome, report.ExitCode, report.Failure, want)
 			}
-			if _, ok := outputs[roundName(len(tc.rounds)+1)+"-snapshot"]; ok {
+			if _, ok := outputs[fmt.Sprintf("round-%03d-snapshot", len(tc.rounds)+1)]; ok {
 				t.Fatalf("outputs %+v", outputs)
 			}
 			a.requireExitsConfirmed(t)
+			requireKept(t, a.run)
 		})
 	}
 }
 
-// A round failing from its dispatch on ends the rounds: the round's external
-// objects record, step converge, attached in the round's scope and named
-// after it, is the Final with the original error, and no other round or final
-// snapshot follows. A receipt the worktree or GitHub does not confirm is not
-// repaired; the receipt check is the fix Step's, which TestFixReceiptRejected
-// and TestPublishReceiptRejected cover, so only a rewritten history, which a
-// round must not push either, and a reported head that is not the worktree
-// HEAD in a later round are here.
+// A round's receipt that the worktree or GitHub does not confirm ends the
+// rounds: the round's external objects record, step converge, attached in
+// the round's scope and named after it, is the Final with the original
+// error, not repaired, and no other round, cleanup Step, final snapshot or
+// summary follows. The receipt check is the fix Step's, which
+// TestFixReceiptRejected and TestPublishReceiptRejected cover, so only a
+// rewritten history, which a round must not push either, and a reported
+// head that is not the worktree HEAD in a later round are here; the other
+// failures after a round's dispatch are in TestCleanupStepAfterRoundFailure.
 func TestConvergeRoundFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -390,14 +439,6 @@ func TestConvergeRoundFailure(t *testing.T) {
 		act  func(t *testing.T, f *fixture, c agentCall) map[string]any
 		want string
 	}{
-		{"repairs-exhausted", 1, func(t *testing.T, f *fixture, c agentCall) map[string]any {
-			if c.request.Feedback == nil {
-				f.convergeWork(t, c, false, "committed")
-			}
-			data := convergeData(t, c, true, "committed", f.gitIn(c.task.Worktree, "rev-parse", "HEAD"))
-			data["items"] = []any{qualityScan("passed"), map[string]any{"id": "lint", "status": "passed"}, map[string]any{"id": "lint", "status": "failed"}}
-			return data
-		}, `items[2].id: got "lint", which items[1] already uses`},
 		{"history-rewritten", 1, func(t *testing.T, f *fixture, c agentCall) map[string]any {
 			wt := c.task.Worktree
 			f.write(filepath.Join(wt, "tracked.txt"), "rewritten in a round\n")
@@ -427,18 +468,21 @@ func TestConvergeRoundFailure(t *testing.T) {
 			if report.Outcome != engine.Failed || !strings.Contains(report.Failure.Error(), tc.want) || report.Final == nil || report.Final.Output != name+"-external-objects" || report.Final.Ref != outputs[name+"-external-objects"] {
 				t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 			}
-			if tc.name != "repairs-exhausted" && (!errors.Is(report.Failure, errReceipt) || len(a.convergeCalls()) != tc.round) {
+			record := output[externalObjectsRecord](t, a, name+"-external-objects")
+			if !errors.Is(report.Failure, errReceipt) || len(a.convergeCalls()) != tc.round {
 				t.Fatalf("failure %v converge dispatches %d, want no repair", report.Failure, len(a.convergeCalls()))
 			}
-			record := output[externalObjectsRecord](t, a, name+"-external-objects")
 			last := a.convergeCalls()[len(a.convergeCalls())-1]
 			if record.Step != "converge" || record.Failure != report.Failure.Error() || !record.Session.ExitConfirmed || record.Reported == nil || record.Reported.Branch != workBranch {
-				t.Fatalf("external objects %+v", record)
+				t.Fatalf("external objects %+v, failure %v", record, report.Failure)
+			}
+			if len(a.cleanupCalls()) != 0 {
+				t.Fatalf("cleanup dispatches %d", len(a.cleanupCalls()))
 			}
 			if at := report.Snapshot.Attempts[outputs[name+"-external-objects"].AttemptID]; at.Scope != "root/"+name || at.Key != "external-objects" || outputs[name+"-converge"] != *a.attempt(last).Output {
 				t.Fatalf("external objects attempt %+v", at)
 			}
-			for _, key := range []string{"final-snapshot", "external-objects", roundName(tc.round+1) + "-snapshot"} {
+			for _, key := range []string{"final-snapshot", "summary", "external-objects", roundName(tc.round+1) + "-snapshot"} {
 				if _, ok := outputs[key]; ok {
 					t.Fatalf("outputs %+v", outputs)
 				}
@@ -449,18 +493,24 @@ func TestConvergeRoundFailure(t *testing.T) {
 }
 
 // A round that stops before its dispatch ends the rounds without opening
-// the round's session, so no external objects record and no final snapshot
-// follow, and the last accepted report is the Final: a round snapshot
-// showing the pull request merged or closed, errPullRequestNotOpen; a round
-// snapshot that cannot be read, errStateRead, recording no snapshot; the
-// round's skill expansion colliding with a directory that already exists,
-// errSkillsExpansion; and a worktree HEAD that moved between rounds,
-// errReceipt against the head the previous round pushed.
+// the round's session, so no external objects record follows: a round
+// snapshot showing the pull request merged or closed, errPullRequestNotOpen;
+// a round snapshot that cannot be read, errStateRead, recording no snapshot;
+// the round's skill expansion colliding with a directory that already
+// exists, errSkillsExpansion; and a worktree HEAD that moved between rounds,
+// errReceipt against the head the previous round pushed. The receipt
+// mismatch ends the run with the last accepted report as the Final; the
+// others are followed by the final snapshot and the summary, which is the
+// Final, the cleanup Step running on the last accepted report except for a
+// pull request no longer open. A final snapshot that cannot be read either
+// adds its error to the round's, which keeps its classification.
 func TestConvergeStopsBeforeDispatch(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// round is the round that stops; the earlier ones push.
-		round int
+		// round is the round that stops; the earlier ones push. previous is
+		// the last accepted report.
+		round    int
+		previous string
 		// setup prepares the fake GitHub before the run, act the first
 		// round's converger after its push.
 		setup    func(f *fixture)
@@ -468,36 +518,41 @@ func TestConvergeStopsBeforeDispatch(t *testing.T) {
 		sentinel error
 		want     func(f *fixture, a a1Run) string
 		snapshot bool
+		// skipped is why the summary's cleanup did not run, "" when it ran;
+		// none when there is no summary.
+		kind, skipped string
+		none          bool
 	}{
-		{"merged-before-round-1", 1, func(f *fixture) {
+		{"merged-before-round-1", 1, "fix", func(f *fixture) {
 			f.write(filepath.Join(f.dir, "pr-patch.json"), `{"state":"closed","merged":true}`)
 			f.write(filepath.Join(f.dir, "pr-patch-after-checks"), "1")
 		}, nil, errPullRequestNotOpen, func(*fixture, a1Run) string {
 			return `code-change: the pull request is no longer open: the round-001 snapshot shows state "closed" merged true`
-		}, true},
+		}, true, "pull_request_not_open", "pull_request_not_open", false},
 		// The first round's wait and snapshot read the check runs twice; the
 		// second round's wait reads them next.
-		{"closed-before-round-2", 2, func(f *fixture) {
+		{"closed-before-round-2", 2, "round-001-converge", func(f *fixture) {
 			f.write(filepath.Join(f.dir, "pr-patch.json"), `{"state":"closed"}`)
 			f.write(filepath.Join(f.dir, "pr-patch-after-checks"), "3")
 		}, nil, errPullRequestNotOpen, func(*fixture, a1Run) string {
 			return `code-change: the pull request is no longer open: the round-002 snapshot shows state "closed" merged false`
-		}, true},
-		{"snapshot-unreadable", 1, func(f *fixture) { f.write(filepath.Join(f.dir, "gh-fail-threads"), "1") }, nil, errStateRead, func(f *fixture, a a1Run) string {
+		}, true, "pull_request_not_open", "pull_request_not_open", false},
+		// Every review threads query fails, the final snapshot's too.
+		{"snapshot-unreadable", 1, "fix", func(f *fixture) { f.write(filepath.Join(f.dir, "gh-fail-threads"), "1") }, nil, errStateRead, func(f *fixture, a a1Run) string {
 			return commandFailure(a.report, "code-change cannot read the pull request state: review threads query: ")
-		}, false},
-		{"skills-expansion-collides", 2, nil, func(f *fixture, c agentCall) {
+		}, false, "state_read_failed", "", false},
+		{"skills-expansion-collides", 2, "round-001-converge", nil, func(f *fixture, c agentCall) {
 			if err := os.Mkdir(filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(c.task.Skills[0]))), skillsExpansion+"-002"), 0700); err != nil {
 				f.t.Error(err)
 			}
 		}, errSkillsExpansion, func(*fixture, a1Run) string {
 			return "code-change cannot expand the private skill for round 2: reserve code change skills 002: "
-		}, true},
-		{"head-moved-before-round-2", 2, nil, func(f *fixture, c agentCall) {
+		}, true, "round_failed", "", false},
+		{"head-moved-before-round-2", 2, "round-001-converge", nil, func(f *fixture, c agentCall) {
 			f.write(filepath.Join(f.dir, "gh-move-head-at-checks"), "3 "+c.task.Worktree)
 		}, errReceipt, func(f *fixture, a a1Run) string {
 			return "code-change receipt mismatch: the worktree HEAD is " + f.gitIn(a.worktree(), "rev-parse", "HEAD") + " before round-002; want the verified head " + f.originTip(workBranch)
-		}, true},
+		}, true, "", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
@@ -515,13 +570,10 @@ func TestConvergeStopsBeforeDispatch(t *testing.T) {
 			report := a.report
 			outputs := report.Result.Outputs
 			name := roundName(tc.round)
-			final := "fix"
-			if tc.round > 1 {
-				final = roundName(tc.round-1) + "-converge"
-			}
+			previous := tc.previous
 			requireFailure(t, report, tc.want(f, a))
-			if !errors.Is(report.Failure, tc.sentinel) || report.Final == nil || report.Final.Output != final || report.Final.Ref != outputs[final] || len(a.convergeCalls()) != tc.round-1 {
-				t.Fatalf("failure %v final %+v converge dispatches %d", report.Failure, report.Final, len(a.convergeCalls()))
+			if !errors.Is(report.Failure, tc.sentinel) || len(a.convergeCalls()) != tc.round-1 {
+				t.Fatalf("failure %v converge dispatches %d", report.Failure, len(a.convergeCalls()))
 			}
 			sessions := 0
 			for _, s := range report.Snapshot.Sessions {
@@ -535,45 +587,102 @@ func TestConvergeStopsBeforeDispatch(t *testing.T) {
 			if _, ok := outputs[name+"-snapshot"]; ok != tc.snapshot {
 				t.Fatalf("outputs %+v", outputs)
 			}
-			for _, key := range []string{name + "-external-objects", "final-snapshot"} {
-				if _, ok := outputs[key]; ok {
-					t.Fatalf("outputs %+v", outputs)
+			if _, ok := outputs[name+"-external-objects"]; ok {
+				t.Fatalf("outputs %+v", outputs)
+			}
+			cleanups := a.cleanupCalls()
+			if tc.none {
+				if report.Final == nil || report.Final.Output != previous || report.Final.Ref != outputs[previous] || len(cleanups) != 0 {
+					t.Fatalf("final %+v cleanup dispatches %d", report.Final, len(cleanups))
 				}
+				for _, key := range []string{"final-snapshot", "summary"} {
+					if _, ok := outputs[key]; ok {
+						t.Fatalf("outputs %+v", outputs)
+					}
+				}
+				a.requireExitsConfirmed(t)
+				return
+			}
+			if report.Final == nil || report.Final.Output != "summary" || report.Final.Ref != outputs["summary"] {
+				t.Fatalf("final %+v", report.Final)
+			}
+			if len(cleanups) != map[bool]int{false: 1, true: 0}[tc.skipped != ""] || (len(cleanups) == 1 && cleanups[0].request.Inputs[3] != outputs[previous]) {
+				t.Fatalf("cleanup dispatches %d, want them on %s", len(cleanups), previous)
+			}
+			s := output[summaryRecord](t, a, "summary")
+			if s.RoundsEnd != tc.kind || s.Cleanup.Skipped != tc.skipped || (s.Cleanup.Report == nil) != (tc.skipped != "") || s.Failure != report.Failure.Error() || len(s.Rounds) != tc.round {
+				t.Fatalf("summary %+v", s)
+			}
+			// The final snapshot reads the threads too, which fail in one case.
+			if _, ok := outputs["final-snapshot"]; ok != tc.snapshot || (s.FinalSnapshot.Status == "recorded") != tc.snapshot ||
+				strings.Contains(report.Failure.Error(), "; the final snapshot: "+s.FinalSnapshot.Detail) == tc.snapshot {
+				t.Fatalf("outputs %+v final snapshot %+v failure %v", outputs, s.FinalSnapshot, report.Failure)
 			}
 			a.requireExitsConfirmed(t)
 		})
 	}
 }
 
-// A read of the pull request after a round's session closed and its
-// receipt was verified that fails ends the rounds with errStateRead and the
-// round's report, the last accepted one, as the Final: no external objects
-// record, no further round and no final snapshot.
+// The read of the pull request after a round's session closed and its
+// receipt was verified ends the rounds, with no external objects record or
+// further round, even after a claim of convergence on an unchanged head,
+// when it fails, with errStateRead and the cleanup Step running on the
+// round's report, the last accepted one; or when it shows the pull request
+// closed, like a round's snapshot does, with errPullRequestNotOpen and no
+// cleanup Step. The summary is the Final.
 func TestConvergeReadAfterRoundFails(t *testing.T) {
-	f := newFixture(t)
-	a := f.run(t, f.seam(agents{converge: func(t *testing.T, c agentCall) string {
-		data := f.convergeWork(t, c, true, "no_change")
-		// The receipt check reads the pull request next, the read after the
-		// round once more.
-		f.write(filepath.Join(f.dir, "gh-fail-pull-at"), fmt.Sprint(pullReads(f.dir)+2))
-		writeCandidate(t, c, data)
-		return ""
-	}}))
-	report := a.report
-	outputs := report.Result.Outputs
-	requireFailure(t, report, commandFailure(report, "after round-001: code-change cannot read the pull request state: pull request GET: "))
-	if !errors.Is(report.Failure, errStateRead) || report.Final == nil || report.Final.Output != "round-001-converge" || report.Final.Ref != outputs["round-001-converge"] || len(a.convergeCalls()) != 1 {
-		t.Fatalf("failure %v final %+v converge dispatches %d", report.Failure, report.Final, len(a.convergeCalls()))
+	for _, tc := range []struct {
+		name string
+		// after acts once the round's receipt was verified, when its
+		// converger's session closes.
+		after         func(f *fixture)
+		want          string
+		sentinel      error
+		kind, skipped string
+	}{
+		{"read-fails", func(f *fixture) {
+			f.write(filepath.Join(f.dir, "gh-fail-pull-at"), fmt.Sprint(pullReads(f.dir)+1))
+		}, "after round-001: code-change cannot read the pull request state: pull request GET: ", errStateRead, "state_read_failed", ""},
+		{"pull-request-closed", func(f *fixture) {
+			f.write(filepath.Join(f.dir, "pr-patch.json"), `{"state":"closed"}`)
+		}, `code-change: the pull request is no longer open: the read after round-001 shows state "closed" merged false`, errPullRequestNotOpen, "pull_request_not_open", "pull_request_not_open"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			a := f.run(t, f.seam(agents{close: func(ctx context.Context, role string, s runtime.Session) (runtime.CleanupReport, error) {
+				if role == convergeRole {
+					tc.after(f)
+				}
+				return s.Close(ctx)
+			}}))
+			report := a.report
+			outputs := report.Result.Outputs
+			want := tc.want
+			if tc.sentinel == errStateRead {
+				want = commandFailure(report, want)
+			}
+			requireFailure(t, report, want)
+			if !errors.Is(report.Failure, tc.sentinel) || report.Final == nil || report.Final.Output != "summary" || len(a.convergeCalls()) != 1 {
+				t.Fatalf("failure %v final %+v converge dispatches %d", report.Failure, report.Final, len(a.convergeCalls()))
+			}
+			for _, key := range []string{"round-001-external-objects", "round-002-snapshot"} {
+				if _, ok := outputs[key]; ok {
+					t.Fatalf("outputs %+v", outputs)
+				}
+			}
+			if got := a.decisions(t); got[len(got)-1].Name == "converged" {
+				t.Fatalf("decisions %+v", got)
+			}
+			cleanups := a.cleanupCalls()
+			if len(cleanups) != map[bool]int{true: 1, false: 0}[tc.skipped == ""] || (len(cleanups) == 1 && cleanups[0].request.Inputs[3] != outputs["round-001-converge"]) {
+				t.Fatalf("cleanup dispatches %d", len(cleanups))
+			}
+			if s := output[summaryRecord](t, a, "summary"); s.RoundsEnd != tc.kind || s.Claim == nil || s.Claim.Output != "round-001-converge" || s.Cleanup.Skipped != tc.skipped || (s.Cleanup.Report == nil) != (tc.skipped != "") {
+				t.Fatalf("summary %+v", s)
+			}
+			a.requireExitsConfirmed(t)
+		})
 	}
-	for _, key := range []string{"round-001-external-objects", "round-002-snapshot", "final-snapshot"} {
-		if _, ok := outputs[key]; ok {
-			t.Fatalf("outputs %+v", outputs)
-		}
-	}
-	if got := a.decisions(t); got[len(got)-1].Name != "converge-verified" {
-		t.Fatalf("last decision %+v", got[len(got)-1])
-	}
-	a.requireExitsConfirmed(t)
 }
 
 // threadNodeJSON is a review thread of pull request number in repository as the
@@ -751,7 +860,7 @@ func TestConvergeWrites(t *testing.T) {
 	}}))
 	report := a.report
 	outputs := report.Result.Outputs
-	if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "round-003-converge" || len(a.convergeCalls()) != 3 {
+	if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "summary" || len(a.convergeCalls()) != 3 {
 		t.Fatalf("outcome %s failure %v final %+v converge dispatches %d", report.Outcome, report.Failure, report.Final, len(a.convergeCalls()))
 	}
 	first, second := output[convergeReport](t, a, "round-001-converge"), output[convergeReport](t, a, "round-002-converge")
@@ -763,8 +872,9 @@ func TestConvergeWrites(t *testing.T) {
 	for n := 1; n <= 3; n++ {
 		want = append(want, decision{Scope: "root/" + roundName(n), Name: "converge-verified", Refs: []contract.Ref{outputs[roundName(n)+"-converge"]}})
 	}
-	want = append(want, decision{Scope: "root", Name: "converged", Refs: []contract.Ref{outputs["round-003-converge"], outputs["round-003-snapshot"]}})
-	if got := a.decisions(t); !reflect.DeepEqual(got[len(got)-4:], want) {
+	want = append(want, decision{Scope: "root", Name: "converged", Refs: []contract.Ref{outputs["round-003-converge"], outputs["round-003-snapshot"]}},
+		decision{Scope: "root", Name: "cleanup-verified", Refs: []contract.Ref{outputs["cleanup"]}})
+	if got := a.decisions(t); !reflect.DeepEqual(got[len(got)-5:], want) {
 		t.Fatalf("decisions %+v", got)
 	}
 	if got := f.receiptReads(); got != [2]int{1, 1} {
@@ -798,17 +908,20 @@ func TestConvergeWritesRejected(t *testing.T) {
 	if got := a.decisions(t); got[len(got)-1].Name != "fix-verified" {
 		t.Fatalf("last decision %+v", got[len(got)-1])
 	}
-	for _, key := range []string{"round-002-snapshot", "final-snapshot"} {
+	for _, key := range []string{"round-002-snapshot", "final-snapshot", "summary"} {
 		if _, ok := outputs[key]; ok {
 			t.Fatalf("outputs %+v", outputs)
 		}
+	}
+	if len(a.cleanupCalls()) != 0 {
+		t.Fatalf("cleanup dispatches %d", len(a.cleanupCalls()))
 	}
 	a.requireExitsConfirmed(t)
 }
 
 // The Controller never judges the items: a claim with the quality scan
-// failed converges like one with it passed, and the Final report keeps the
-// item as the converger wrote it.
+// failed converges like one with it passed, and the summary's claim keeps
+// the item as the converger wrote it.
 func TestConvergeQualityScanNotJudged(t *testing.T) {
 	f := newFixture(t)
 	item := map[string]any{"id": "quality-scan", "status": "failed", "reason": "The page shows a broken layout"}
@@ -819,14 +932,16 @@ func TestConvergeQualityScanNotJudged(t *testing.T) {
 		return ""
 	}}))
 	report := a.report
-	if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "round-001-converge" {
+	if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "summary" {
 		t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 	}
 	got := output[struct {
-		Items []map[string]any `json:"items"`
-	}](t, a, "round-001-converge")
-	if !reflect.DeepEqual(got.Items, []map[string]any{item}) {
-		t.Fatalf("items %+v", got.Items)
+		Claim struct {
+			Items []map[string]any `json:"items"`
+		} `json:"claim"`
+	}](t, a, "summary")
+	if !reflect.DeepEqual(got.Claim.Items, []map[string]any{item}) {
+		t.Fatalf("items %+v", got.Claim.Items)
 	}
 }
 
@@ -887,7 +1002,7 @@ func TestConvergeContractRepair(t *testing.T) {
 	}}))
 	report := a.report
 	last := (len(variants) + 1) / 2
-	if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != roundName(last)+"-converge" {
+	if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "summary" || output[summaryRecord](t, a, "summary").Claim.Output != roundName(last)+"-converge" {
 		t.Fatalf("outcome %s failure %v final %+v", report.Outcome, report.Failure, report.Final)
 	}
 	for i, v := range variants {
@@ -927,8 +1042,8 @@ func TestConvergeCancelled(t *testing.T) {
 	if report.Outcome != engine.CancelledState || report.ExitCode != 130 || report.Final != nil {
 		t.Fatalf("outcome %s exit %d final %+v", report.Outcome, report.ExitCode, report.Final)
 	}
-	if _, ok := report.Result.Outputs["round-001-external-objects"]; ok {
-		t.Fatalf("outputs %+v", report.Result.Outputs)
+	if _, ok := report.Result.Outputs["round-001-external-objects"]; ok || len(a.cleanupCalls()) != 0 {
+		t.Fatalf("outputs %+v cleanup dispatches %d", report.Result.Outputs, len(a.cleanupCalls()))
 	}
 	a.requireExitsConfirmed(t)
 	requireKept(t, a.run)
@@ -1013,27 +1128,31 @@ func TestFixRequirementsUnchanged(t *testing.T) {
 	}
 }
 
-// The worst case of this version runs within the production policy: every
-// Step that repairs uses its three attempts and the rounds run to the
-// production cap of 10, the last claiming convergence. That is 19 sessions
-// (implementer, two pre-PR reviewers, the deep review's five, fixer and ten
-// convergers) and 64 attempts (input, skills, 3 for the implementer, 6 for
-// the pre-PR reviewers, 3 for the correction, pull-request, the deep
-// review's 5, 3 for the fixer, 10 round snapshots, 30 for the convergers
-// and final-snapshot), within the 3 live sessions, 22 sessions and 80
-// attempts of Definition; a failing round's external objects record
-// replaces the final snapshot, so no path takes more.
+// The worst case runs within the production policy: every Step that
+// repairs uses its three attempts, the rounds run to the production cap of
+// 10, the tenth exhausting its repairs, and the cleanup Step exhausts its
+// repairs too. That is 20 sessions (implementer, two pre-PR reviewers, the
+// deep review's five, fixer, ten convergers and cleaner) and 70 attempts
+// (input, skills, 3 for the implementer, 6 for the pre-PR reviewers, 3 for
+// the correction, pull-request, the deep review's 5, 3 for the fixer, 10
+// round snapshots, 30 for the convergers, the tenth round's external
+// objects record, 3 for the cleaner, its external objects record,
+// final-snapshot and summary), within the 3 live sessions, 22 sessions and
+// 80 attempts of Definition. A round that converges takes neither external
+// objects record and a round that fails otherwise ends the rounds, so no
+// path takes more.
 func TestConvergeLimits(t *testing.T) {
 	f := newFixture(t)
 	seen := map[string]int{}
 	var head string
 	var published map[string]any
+	rejected := map[string]any{"rejected": true}
 	// third reports whether c is its Step's third attempt, the first two
 	// writing a contract the schema rejects.
 	third := func(t *testing.T, c agentCall) bool {
 		key := fmt.Sprint(c.request.Output.SchemaID, c.task.Role, c.task.Round)
 		if seen[key]++; seen[key] < 3 {
-			writeCandidate(t, c, map[string]any{"rejected": true})
+			writeCandidate(t, c, rejected)
 			return false
 		}
 		return true
@@ -1071,8 +1190,16 @@ func TestConvergeLimits(t *testing.T) {
 		},
 		converge: func(t *testing.T, c agentCall) string {
 			if third(t, c) {
-				writeCandidate(t, c, f.convergeWork(t, c, c.task.Round == 10, "no_change"))
+				if c.task.Round == 10 {
+					writeCandidate(t, c, rejected)
+				} else {
+					writeCandidate(t, c, f.convergeWork(t, c, false, "no_change"))
+				}
 			}
+			return ""
+		},
+		cleanup: func(t *testing.T, c agentCall) string {
+			writeCandidate(t, c, rejected)
 			return ""
 		},
 		deadline: 5 * time.Minute,
@@ -1082,8 +1209,14 @@ func TestConvergeLimits(t *testing.T) {
 	if policy.MaxLiveSessions != 3 || policy.MaxTotalSessions != 22 || policy.MaxTotalAttempts != 80 {
 		t.Fatalf("policy %+v", policy)
 	}
-	if report.Outcome != engine.Succeeded || report.Final == nil || report.Final.Output != "round-010-converge" || len(a.convergeCalls()) != 30 || len(report.Snapshot.Sessions) != 19 || len(report.Snapshot.Attempts) != 64 {
-		t.Fatalf("outcome %s failure %v final %+v converge dispatches %d sessions %d attempts %d", report.Outcome, report.Failure, report.Final, len(a.convergeCalls()), len(report.Snapshot.Sessions), len(report.Snapshot.Attempts))
+	if report.Outcome != engine.Failed || report.Final == nil || report.Final.Output != "summary" || len(a.convergeCalls()) != 30 || len(a.cleanupCalls()) != 3 || len(report.Snapshot.Sessions) != 20 || len(report.Snapshot.Attempts) != 70 {
+		t.Fatalf("outcome %s failure %v final %+v converge dispatches %d cleanup dispatches %d sessions %d attempts %d", report.Outcome, report.Failure, report.Final, len(a.convergeCalls()), len(a.cleanupCalls()), len(report.Snapshot.Sessions), len(report.Snapshot.Attempts))
+	}
+	outputs := report.Result.Outputs
+	for _, key := range []string{"round-010-external-objects", "external-objects", "final-snapshot", "summary"} {
+		if _, ok := outputs[key]; !ok {
+			t.Fatalf("outputs %+v", outputs)
+		}
 	}
 	a.requireExitsConfirmed(t)
 }

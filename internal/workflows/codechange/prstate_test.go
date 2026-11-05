@@ -645,9 +645,9 @@ func TestStateSnapshotOverLimit(t *testing.T) {
 }
 
 // In the full flow, a read failure of the final snapshot after a converged
-// round fails the run with errStateRead and the round's report as the
-// Final, and keeps the worktree: the removal is set only after the final
-// snapshot.
+// round and the cleanup Step fails the run with errStateRead and keeps the
+// worktree: the removal is set only after the final snapshot. The summary
+// is the Final, the final snapshot in it unavailable with the read's error.
 func TestStateFinalReadFailureKeepsWorktree(t *testing.T) {
 	f := newFixture(t)
 	// The first query is the round's snapshot, the second the final one.
@@ -656,11 +656,15 @@ func TestStateFinalReadFailureKeepsWorktree(t *testing.T) {
 	a := f.run(t, agents{implement: f.implementReady(&implemented)})
 	report := a.report
 	requireFailure(t, report, commandFailure(report, "code-change cannot read the pull request state: review threads query: "))
-	if !errors.Is(report.Failure, errStateRead) || report.Final == nil || report.Final.Output != "round-001-converge" || report.Final.Ref != report.Result.Outputs["round-001-converge"] {
+	if !errors.Is(report.Failure, errStateRead) || report.Final == nil || report.Final.Output != "summary" || report.Final.Ref != report.Result.Outputs["summary"] {
 		t.Fatalf("failure %v final %+v", report.Failure, report.Final)
 	}
 	if _, ok := report.Result.Outputs["final-snapshot"]; ok {
 		t.Fatalf("outputs %+v", report.Result.Outputs)
+	}
+	if s := output[summaryRecord](t, a, "summary"); s.RoundsEnd != "converged" || s.Cleanup.Report == nil || s.Failure != report.Failure.Error() ||
+		!reflect.DeepEqual(s.FinalSnapshot, finalSummary{Status: "unavailable", Detail: report.Failure.Error(), CheckRuns: []checkRunSummary{}, Statuses: []statusSummary{}, UnresolvedThreads: []string{}}) {
+		t.Fatalf("summary %+v", s)
 	}
 	a.requireExitsConfirmed(t)
 	requireKept(t, a.run)
