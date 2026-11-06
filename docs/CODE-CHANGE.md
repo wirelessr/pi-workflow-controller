@@ -1,6 +1,6 @@
 # Code change workflow 規劃（草案）
 
-**狀態：規劃。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，C4a（PR 狀態唯讀 adapter、機械等待與最後快照）已落地，C4b（D 收斂迴圈、私有 skill 與每輪 Step）與 C4c（thread reply／resolve 與 Actions rerun 的授權及唯讀核對）與 C4d（E 最後清理、final summary、outcome 對應與 Description）已落地，C4 完成；C5 依第 8 節的順序施工。`code-change` 只是暫用名稱。
+**狀態：已實作並完成一輪 live 驗收（未驗項目見 VERIFICATION 第 6 節）。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，C4a（PR 狀態唯讀 adapter、機械等待與最後快照）已落地，C4b（D 收斂迴圈、私有 skill 與每輪 Step）與 C4c（thread reply／resolve 與 Actions rerun 的授權及唯讀核對）與 C4d（E 最後清理、final summary、outcome 對應與 Description）已落地，C4 完成；C5 依第 8 節的順序施工。`code-change` 只是暫用名稱。
 
 Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，經實作、發 PR 前審閱、發 PR、PR 後深度審閱、自行 triage 修正、收斂 PR，到最後清理，交付一個已開出的 PR。這是第一個會寫本機 repository 並對外部系統產生副作用的 workflow；現有 workflows 都只讀或只寫自有 artifacts。
 
@@ -236,7 +236,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 | C4b | D 迴圈（每輪新 Child、終止規則、輪數與時間准入）、私有 skill 展開（R8 skilldir，環境變數 `PWC_CODE_CHANGE_SKILLS_DIR`，子樹 `converge`，所有 code-change run 必填，每輪從記憶中的來源以新名稱展開，前一輪的 Agent 改不到下一輪讀的內容）與每輪 Step；此版本只授權 push，D 不做 comment 清理（E 做）。暫時的 Final 與結束：收斂為最後一輪報告（Succeeded）；輪數用盡或准入不足為 `errNotConverged`，Final 為最後一份已接受的報告（一輪都沒跑時為 `fix`），最後快照照做；輪派送之後的 receipt／身分失敗以該輪的 `external-objects`（`step` converge）為 Final；session 已關閉且 receipt 已核對之後的輪後讀取或 `converged` Decision 失敗、PR 不再 open（`errPullRequestNotOpen`）、派送前 HEAD 不符（`errReceipt`）皆以最後報告為 Final；移除旗標只在收斂時；C4d 以 summary 取代 | C4a、R8 |
 | C4c | 授權 D 的 thread reply／resolve 與 CI rerun（僅 GitHub Actions run）及各自的唯讀核對 | C4b |
 | C4d | E、final summary、outcome 與 Description、品質掃描 skipped 語義。已落地：E 經 `runPush`；`cleanup.v1`、`summary.v1`；outcome 全表見 README；准入預留 170 分鐘；最壞會計 20 sessions／70 attempts（`TestConvergeLimits`） | C4c |
-| C5 | 實際整合驗收（需一次性測試 repo 與憑證，留在 repo 外；ticket 轉移見第 11 節） | C4d、M-model |
+| C5 | 實際整合驗收（需一次性測試 repo 與憑證，留在 repo 外；ticket 轉移見第 11 節）。已執行，結果與未驗項目見 [VERIFICATION](VERIFICATION.md) 第 6 節 | C4d、M-model |
 
 共用單元（R6 至 R9）只交付政策無關的核心與原 consumer 的遷移；新 consumer 才需要的政策分支（可寫 worktree 的 fetch、GraphQL 查詢、寫入型 Step 的 receipt 核對）在第一個使用它的 C 單元落地並於該處驗收，不在共用單元預造。
 
@@ -311,4 +311,4 @@ C4 決定（初值，待 live 調整）：
 待核對、尚未決定：
 
 1. **CWD 上層鏈與工具行為的核對。** 已查：`PWC_PI_CWD` 目前使用的目錄及其上層（到 `/Users`）沒有 `AGENTS.md`、`CLAUDE.md`、`AGENTS.override.md` 或 `.agents`，只有家目錄的 `.pi`（全域 agent 目錄）。C1 前再核對一次部署實際值，並實測 Agent 在 CWD 之外操作 worktree 時，git、build、test 與依 CWD 找設定檔的工具是否順暢，以及全域的相鄰探索規則確實觸發。以上依文件與檔案系統現況推論，未經 live 驗證。
-2. **live 驗收中的 ticket 轉移。** 納入，但需一張專用測試 ticket 指派給操作者，在其上依序轉換狀態；C5 前建立，不使用真實 ticket。
+2. **live 驗收中的 ticket 轉移。** 不納入必要項：測試 repository 沒有 ticket 系統，ticket 轉移的成功路徑留待有專用測試 ticket 時驗證，不使用真實 ticket；失敗路徑（ticket 不存在）已如實回報為 failed。
