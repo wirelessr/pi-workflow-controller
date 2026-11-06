@@ -14,7 +14,7 @@ func TestModelBinding(t *testing.T) {
 		"prepare":    {"glm-5p3-flash", "low"},
 		"code":       {"glm-5p3", "high"},
 		"scale":      {"glm-5p3", "high"},
-		"simplicity": {"glm-5p3-flash", "medium"},
+		"simplicity": {"glm-5p3-flash", "high"},
 		"validate":   {"glm-5p3", "high"},
 	} {
 		got := model(role)

@@ -23,10 +23,12 @@ Provider 全部為 `fireworks`，ID 前綴為 `accounts/fireworks/models/`：
 | Prepare | glm-5p3-flash | low | 20 分鐘 |
 | Code | glm-5p3 | high | 30 分鐘 |
 | Scale/Failure | glm-5p3 | high | 30 分鐘 |
-| Simplicity | glm-5p3-flash | medium | 30 分鐘 |
+| Simplicity | glm-5p3-flash | high | 30 分鐘 |
 | Validation | glm-5p3 | high | 30 分鐘 |
 
 Run 120 分鐘，同時最多 3 個 live session，總共最多 5 sessions／5 attempts。Startup、RPC、abort、cleanup 及 contract 限額沿用框架預設。模型由程式碼固定，不繼承啟動者或 smoke-echo。
+
+Pi 的 GLM 模型設定只支援 low 與 high；指定其他層級時 Pi 會改選別的層級，session 以 `ThinkingChanged` 在 readiness 失敗，所以 GLM 角色只使用這兩個值。
 
 三位 reviewer 與 Validation 同屬一個模型家族，獨立性只來自各自的審閱視角與 session 隔離，沒有跨家族的多樣性。此配置的審閱品質與 schema 遵循尚未經 live 驗證，不宣稱與先前配置等價。
 

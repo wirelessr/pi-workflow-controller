@@ -33,7 +33,7 @@ func model(role string) runtime.ModelSpec {
 	case "prepare":
 		id, thinking = "glm-5p3-flash", "low"
 	case "simplicity":
-		id, thinking = "glm-5p3-flash", "medium"
+		id, thinking = "glm-5p3-flash", "high"
 	}
 	return runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/" + id, Thinking: thinking}
 }
