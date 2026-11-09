@@ -89,7 +89,7 @@ Controller 可以：依機械定義的狀態條件等待（只看是否進入終
 | A2 consistency | 審閱者 | fresh | 同 A2 basic | 重 |
 | B | 見 code-review | 各自 fresh | 沿用 review（checkout 外） | 見第 7 節 |
 | C | 修正者 | fresh | 同 A1 | 重 |
-| D 每輪 | 收斂者 | fresh | 同 A1 | 中 |
+| D 每輪 | 收斂者 | fresh | 同 A1 | 重 |
 | E | 清理者 | fresh | 同 A1 | 輕 |
 
 層級是提案。審閱角色與寫入角色都不把 CWD 放在 worktree 或使用者的日常 checkout，而是沿用既有的部署預設 `PWC_PI_CWD`（目前 triage 使用的同一個目錄，其下即全域規則所指的相鄰 repos 所在處），不另設 `Role.CWD` 的目錄概念；C1b 把同一個值明設為 A1 的 `Role.CWD`，使檢查的值與實際使用的值相同。理由：(1) 操作者的全域規則依「CWD 位於該目錄之下」才觸發跨 repo 的相鄰探索；(2) 目標 repo 自己的 `AGENTS.md`／`CLAUDE.md`、project skills 與 extensions 不會被載入，規則只來自全域與本 workflow 的 embedded／私有 skills；(3) 若 CWD 是使用者的日常 checkout，相對路徑的編輯會改到真實 repo 而不是 worktree，所以不用。Agent 以絕對路徑讀寫 worktree，並用 `git -C` 或在命令內 `cd` 操作；其他相鄰 repo 只讀。`PWC_PI_CWD` 未設定時 fallback 是啟動 Controller 時的目錄，可能就是某個真實 checkout，所以 code-change 在任何 Pi 啟動之前檢查它已設定、為絕對路徑且為既有目錄，否則以輸入錯誤終止。它不是使用者日常 checkout 這個前提只由部署者保證，Controller 不檢查它是否位於某個 git work tree，這是承認的殘餘風險。

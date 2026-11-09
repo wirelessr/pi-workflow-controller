@@ -18,7 +18,7 @@ const (
 	convergeTimeout = 30 * time.Minute
 )
 
-var convergeModel = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/glm-5p3-flash", Thinking: "high"}
+var convergeModel = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/glm-5p3", Thinking: "high"}
 
 // roundPolicy bounds the convergence rounds: at most rounds of them, each
 // started only while the run deadline leaves reserve at the time now gives.
