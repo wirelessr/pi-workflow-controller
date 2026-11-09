@@ -211,7 +211,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 
 - 目前三位 reviewer 跨三個模型家族；改配置會讓這個差異消失。
 - 需更新 `docs/CODE-REVIEW.md` 的模型表。目前沒有測試釘住 review 的模型 binding，所以要新增這類測試；模型品質與 schema 遵循的 live 驗證另列。
-- 已確認：Prepare 用 GLM-5p3-flash、Code 用 GLM-5p3、Scale/Failure 用 GLM-5p3、Simplicity 用 GLM-5p3-flash、Validation 用 GLM-5p3。review 因此全部落在 GLM 家族，三位 reviewer 不再跨模型家族，獨立性只靠各自的審閱視角與 session 隔離。這是對先前「跨家族多樣性」的取捨，已接受。thinking 層級沿現有各角色設定，變更前須確認該模型支援；品質與 schema 遵循須 live 驗證，未驗證前不宣稱與舊配置等價。
+- 已確認：Prepare 用 GLM-5p3-flash、Code 用 GLM-5p3、Scale/Failure 用 GLM-5p3、Simplicity 用 GLM-5p3-flash、Validation 用 GLM-5p3。review 因此全部落在 GLM 家族，三位 reviewer 不再跨模型家族，獨立性只靠各自的審閱視角與 session 隔離。這是對先前「跨家族多樣性」的取捨，已接受。thinking 層級沿現有各角色設定，變更前須確認該模型支援（Simplicity 原為 medium，GLM 不支援，已改為 high，見 [CODE-REVIEW](CODE-REVIEW.md) 模型表）；品質與 schema 遵循須 live 驗證，未驗證前不宣稱與舊配置等價。
 
 ## 8. 施工單元與相依
 
@@ -288,7 +288,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 | B | 沿用 review 現有：Prepare 20、各 reviewer 30、Validate 30 分鐘 | |
 | RunTimeout | 8 小時 | 預設 4 小時不足以容納跑滿輪數的常見情況；由准入規則保證 E 與 final |
 | MaxLiveSessions／MaxTotalSessions／MaxTotalAttempts | 3／22／80 | 最壞值隨版本增加而重算，以 `TestConvergeLimits`（完整流程、真實限額）為準（C4 完成後最壞 20 sessions、70 attempts）；80 為保守值 |
-| thinking | code-change 自己的角色沿 triage 慣例：GLM 用 high，deepseek flash 用 off（B 的角色維持各自現有設定，見第 7 節） | 變更前須確認該模型支援 |
+| thinking | code-change 自己的角色沿 triage 慣例：GLM 用 high，deepseek flash 用 off（B 的角色見第 7 節與 CODE-REVIEW 模型表） | 變更前須確認該模型支援 |
 | D 未收斂的終態 | 比照 gap：交付 final 並以具名錯誤結束（Failed、exit 1） | |
 | 等待逾時 | 記為快照欄位，照常派該輪並計入輪數 | |
 
@@ -311,4 +311,4 @@ C4 決定（初值，待 live 調整）：
 待核對、尚未決定：
 
 1. **CWD 上層鏈與工具行為的核對。** 已查：`PWC_PI_CWD` 目前使用的目錄及其上層（到 `/Users`）沒有 `AGENTS.md`、`CLAUDE.md`、`AGENTS.override.md` 或 `.agents`，只有家目錄的 `.pi`（全域 agent 目錄）。C1 前再核對一次部署實際值，並實測 Agent 在 CWD 之外操作 worktree 時，git、build、test 與依 CWD 找設定檔的工具是否順暢，以及全域的相鄰探索規則確實觸發。以上依文件與檔案系統現況推論，未經 live 驗證。
-2. **live 驗收中的 ticket 轉移。** 不納入必要項：測試 repository 沒有 ticket 系統，ticket 轉移的成功路徑留待有專用測試 ticket 時驗證，不使用真實 ticket；失敗路徑（ticket 不存在）已如實回報為 failed。
+2. **live 驗收中的 ticket 轉移。** 不納入必要項：測試 repository 沒有 ticket 系統，ticket 轉移的成功路徑留待有專用測試 ticket 時驗證，不使用真實 ticket；失敗路徑（ticket 不存在）已如實回報為 failed。操作者指定目標的實際使用中曾觀察到成功的轉移，這不是驗收，Controller 也不核對它。
