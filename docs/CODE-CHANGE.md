@@ -1,6 +1,6 @@
 # Code change workflow 規劃（草案）
 
-**狀態：已實作並完成一輪 live 驗收（未驗項目見 VERIFICATION 第 6 節）。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，C4a（PR 狀態唯讀 adapter、機械等待與最後快照）已落地，C4b（D 收斂迴圈、私有 skill 與每輪 Step）與 C4c（thread reply／resolve 與 Actions rerun 的授權及唯讀核對）與 C4d（E 最後清理、final summary、outcome 對應與 Description）已落地，C4 完成；C5 依第 8 節的順序施工。`code-change` 只是暫用名稱。
+**狀態：已實作，完成測試 repository 上的 live 驗收與一次真實 repository 的 live run（結果與未驗項目見 VERIFICATION 第 6 節）。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，C4a（PR 狀態唯讀 adapter、機械等待與最後快照）已落地，C4b（D 收斂迴圈、私有 skill 與每輪 Step）與 C4c（thread reply／resolve 與 Actions rerun 的授權及唯讀核對）與 C4d（E 最後清理、final summary、outcome 對應與 Description）已落地，C4 完成；C5 依第 8 節的順序施工。`code-change` 只是暫用名稱。
 
 Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，經實作、發 PR 前審閱、發 PR、PR 後深度審閱、自行 triage 修正、收斂 PR，到最後清理，交付一個已開出的 PR。這是第一個會寫本機 repository 並對外部系統產生副作用的 workflow；現有 workflows 都只讀或只寫自有 artifacts。
 
