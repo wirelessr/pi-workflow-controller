@@ -17,7 +17,7 @@ const (
 	cleanupTimeout = 20 * time.Minute
 )
 
-var cleanupModel = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: "off"}
+var cleanupModel = runtime.ModelSpec{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4p1-flash", Thinking: "high"}
 
 // cleanupOutcome is what became of the cleanup Step, for the summary.
 type cleanupOutcome struct {

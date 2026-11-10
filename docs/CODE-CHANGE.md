@@ -288,7 +288,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 | B | 沿用 review 現有：Prepare 20、各 reviewer 30、Validate 30 分鐘 | |
 | RunTimeout | 8 小時 | 預設 4 小時不足以容納跑滿輪數的常見情況；由准入規則保證 E 與 final |
 | MaxLiveSessions／MaxTotalSessions／MaxTotalAttempts | 3／22／80 | 最壞值隨版本增加而重算，以 `TestConvergeLimits`（完整流程、真實限額）為準（C4 完成後最壞 20 sessions、70 attempts）；80 為保守值 |
-| thinking | code-change 自己的角色沿 triage 慣例：GLM 用 high，deepseek flash 用 off（B 的角色見第 7 節與 CODE-REVIEW 模型表） | 變更前須確認該模型支援 |
+| thinking | code-change 自己的角色：GLM 用 high；E 的 deepseek flash 用 high（off 時曾把不明顯的原因當成重述程式碼刪除，deepseek flash 支援 off／low／high／max）（B 的角色見第 7 節與 CODE-REVIEW 模型表） | 變更前須確認該模型支援 |
 | D 未收斂的終態 | 比照 gap：交付 final 並以具名錯誤結束（Failed、exit 1） | |
 | 等待逾時 | 記為快照欄位，照常派該輪並計入輪數 | |
 

@@ -23,7 +23,7 @@ func TestModelBinding(t *testing.T) {
 		"review/basic":       {"glm-5p3-flash", "high"},
 		"review/consistency": {"glm-5p3", "high"},
 		"converge":           {"glm-5p3", "high"},
-		"cleanup":            {"deepseek-v4p1-flash", "off"},
+		"cleanup":            {"deepseek-v4p1-flash", "high"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("roles = %d, want %d", len(got), len(want))
