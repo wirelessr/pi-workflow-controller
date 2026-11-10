@@ -1,6 +1,6 @@
 # Code change workflow 規劃（草案）
 
-**狀態：已實作，完成測試 repository 上的 live 驗收與一次真實 repository 的 live run（結果與未驗項目見 VERIFICATION 第 6 節）。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，C4a（PR 狀態唯讀 adapter、機械等待與最後快照）已落地，C4b（D 收斂迴圈、私有 skill 與每輪 Step）與 C4c（thread reply／resolve 與 Actions rerun 的授權及唯讀核對）與 C4d（E 最後清理、final summary、outcome 對應與 Description）已落地，C4 完成；C5 依第 8 節的順序施工。`code-change` 只是暫用名稱。
+**狀態：已實作，完成測試 repository 上的 live 驗收，並有真實 repository 上的實際使用（不算驗收；結果與未驗項目見 VERIFICATION 第 6 節）。** P0（第 9 節的憲法修訂與重用登記）已落地；C1 拆為 C1a 與 C1b，C1a（Controller 前置與自有 worktree）、C1b（A1、本機 receipt、gap 出口、註冊）、C2a（A2 發 PR 前審閱）與 C2b（A3 發佈、PR receipt 核對、失敗時外部物件記錄、成功時移除 worktree；目前到此為止）已落地，C3a（共用層：compare 抽出與 review 的預期 head）已落地；C3b（B 接線）與 C3c（C 步驟）已落地，C4a（PR 狀態唯讀 adapter、機械等待與最後快照）已落地，C4b（D 收斂迴圈、私有 skill 與每輪 Step）與 C4c（thread reply／resolve 與 Actions rerun 的授權及唯讀核對）與 C4d（E 最後清理、final summary、outcome 對應與 Description）已落地，C4 完成；C5 依第 8 節的順序施工。`code-change` 只是暫用名稱。
 
 Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，經實作、發 PR 前審閱、發 PR、PR 後深度審閱、自行 triage 修正、收斂 PR，到最後清理，交付一個已開出的 PR。這是第一個會寫本機 repository 並對外部系統產生副作用的 workflow；現有 workflows 都只讀或只寫自有 artifacts。
 
@@ -288,7 +288,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 | B | 沿用 review 現有：Prepare 20、各 reviewer 30、Validate 30 分鐘 | |
 | RunTimeout | 8 小時 | 預設 4 小時不足以容納跑滿輪數的常見情況；由准入規則保證 E 與 final |
 | MaxLiveSessions／MaxTotalSessions／MaxTotalAttempts | 3／22／80 | 最壞值隨版本增加而重算，以 `TestConvergeLimits`（完整流程、真實限額）為準（C4 完成後最壞 20 sessions、70 attempts）；80 為保守值 |
-| thinking | code-change 自己的角色：GLM 用 high；E 的 deepseek flash 用 high（off 時曾把不明顯的原因當成重述程式碼刪除，deepseek flash 支援 off／low／high／max）（B 的角色見第 7 節與 CODE-REVIEW 模型表） | 變更前須確認該模型支援 |
+| thinking | code-change 自己的角色：GLM 用 high；E 的 deepseek flash 用 high（off 時曾把一則說明不明顯原因的註解連同重述程式碼的註解一起刪除；deepseek flash 支援 off／low／high／max）（B 的角色見第 7 節與 CODE-REVIEW 模型表） | 變更前須確認該模型支援 |
 | D 未收斂的終態 | 比照 gap：交付 final 並以具名錯誤結束（Failed、exit 1） | |
 | 等待逾時 | 記為快照欄位，照常派該輪並計入輪數 | |
 
