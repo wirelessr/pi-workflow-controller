@@ -1087,7 +1087,7 @@ func TestConvergeSkillsExpanded(t *testing.T) {
 // constant they share with other Steps shows up here and is made on purpose.
 func TestFixRequirementsUnchanged(t *testing.T) {
 	sum := sha256.Sum256([]byte(baselineRequirements + "\n\n" + fixRequirements))
-	if got := hex.EncodeToString(sum[:]); got != "14e9626f77e34f769155f65eb5a2d1dea97027c53c5e4468965cd1366f34e3cb" {
+	if got := hex.EncodeToString(sum[:]); got != "e375d614fc177451584837574ad7b36646132504f45c14aa640ad27b970ea135" {
 		t.Fatalf("fix requirements sha256 %s", got)
 	}
 }
