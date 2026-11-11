@@ -103,8 +103,7 @@ func publish(ctx context.Context, r *engine.Run, p prepared, hand handoff, revie
 		err = p.publishTail(ctx, r, hand, out, v, outputs)
 	}
 	if err != nil {
-		result, _, err := p.externalObjects(ctx, r, r.Root(), "", hand, "publish", outputs, reported, err)
-		return result, err
+		return p.externalObjects(ctx, r, r.Root(), "", hand, "publish", outputs, reported, err)
 	}
 	return engine.Result{Outputs: outputs}, nil
 }
@@ -355,10 +354,10 @@ func observation(pr pullRequest) pullObservation {
 // Final and cause is returned unchanged; a failed read is recorded as
 // unknown and does not change cause. While the run is cancelled, past its
 // deadline or stopped by a fatal error it can do none of this and returns
-// cause alone. The bool reports whether the session's exit was confirmed.
-func (p prepared) externalObjects(ctx context.Context, r *engine.Run, s *engine.Scope, prefix string, hand handoff, step string, outputs map[string]contract.Ref, reported *receipt, cause error) (engine.Result, bool, error) {
+// cause alone.
+func (p prepared) externalObjects(ctx context.Context, r *engine.Run, s *engine.Scope, prefix string, hand handoff, step string, outputs map[string]contract.Ref, reported *receipt, cause error) (engine.Result, error) {
 	if ctx.Err() != nil {
-		return engine.Result{Outputs: outputs}, false, cause
+		return engine.Result{Outputs: outputs}, cause
 	}
 	record := externalObjectsRecord{Failure: cause.Error(), Step: step}
 	// The session is closed first, so the Agent no longer writes while the
@@ -406,10 +405,10 @@ func (p prepared) externalObjects(ctx context.Context, r *engine.Run, s *engine.
 	}
 	ref, err := s.Attach(ctx, engine.AttachSpec{Key: "external-objects", Output: contract.Spec{SchemaID: ExternalObjectsSchema}, Data: record})
 	if err != nil {
-		return engine.Result{Outputs: outputs}, record.Session.ExitConfirmed, errors.Join(cause, err)
+		return engine.Result{Outputs: outputs}, errors.Join(cause, err)
 	}
 	outputs[prefix+"external-objects"] = ref
-	return engine.Result{Outputs: outputs, Final: &engine.FinalSelection{Output: prefix + "external-objects"}}, record.Session.ExitConfirmed, cause
+	return engine.Result{Outputs: outputs, Final: &engine.FinalSelection{Output: prefix + "external-objects"}}, cause
 }
 
 // observeBranch is branch on GitHub as one read shows it.

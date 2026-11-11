@@ -645,7 +645,7 @@ func TestStateSnapshotOverLimit(t *testing.T) {
 }
 
 // In the full flow, a read failure of the final snapshot after a converged
-// round and the cleanup Step fails the run with errStateRead and keeps the
+// round fails the run with errStateRead and keeps the
 // worktree: the removal is set only after the final snapshot. The summary
 // is the Final, the final snapshot in it unavailable with the read's error.
 func TestStateFinalReadFailureKeepsWorktree(t *testing.T) {
@@ -662,7 +662,7 @@ func TestStateFinalReadFailureKeepsWorktree(t *testing.T) {
 	if _, ok := report.Result.Outputs["final-snapshot"]; ok {
 		t.Fatalf("outputs %+v", report.Result.Outputs)
 	}
-	if s := output[summaryRecord](t, a, "summary"); s.RoundsEnd != "converged" || s.Cleanup.Report == nil || s.Failure != report.Failure.Error() ||
+	if s := output[summaryRecord](t, a, "summary"); s.RoundsEnd != "converged" || s.Failure != report.Failure.Error() ||
 		!reflect.DeepEqual(s.FinalSnapshot, finalSummary{Status: "unavailable", Detail: report.Failure.Error(), CheckRuns: []checkRunSummary{}, Statuses: []statusSummary{}, UnresolvedThreads: []string{}}) {
 		t.Fatalf("summary %+v", s)
 	}

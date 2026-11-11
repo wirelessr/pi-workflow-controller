@@ -24,7 +24,7 @@ func Definition(piCWD, skillsDir string) engine.Definition {
 	// remove the deep review's checkout and a successful run's worktree; a
 	// removal under way is not interrupted. The value awaits live data.
 	p.Runtime.CleanupTimeout = 2 * time.Minute
-	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree, have two reviewers check them, correct the work, push one branch and open a pull request, deep-review the pull request at the verified head with the code-review flow, then have a fresh fixer triage the deep review's findings, fix them and push to the same branch, then run convergence rounds, each waiting for the pull request's checks and statuses to settle, recording a snapshot of its state and having a fresh converger do one round of the private skill, until a round claims convergence without any write on an unchanged head or the rounds end unconverged, then have a fresh cleaner do a last comment cleanup and push it, take a final snapshot of the pull request state, and deliver a final summary that sets the reports beside what the Controller observed, judging none of them", Version: "1", Policy: p,
+	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree, have two reviewers check them, correct the work, push one branch and open a pull request, deep-review the pull request at the verified head with the code-review flow, then have a fresh fixer triage the deep review's findings, fix them and push to the same branch, then run convergence rounds, each waiting for the pull request's checks and statuses to settle, recording a snapshot of its state and having a fresh converger do one round of the private skill and the comment cleanup, until a round claims convergence without any write on an unchanged head or the rounds end unconverged, then take a final snapshot of the pull request state, and deliver a final summary that sets the reports beside what the Controller observed, judging none of them", Version: "1", Policy: p,
 		Execute: func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
 			return execute(ctx, r, in, piCWD, skillsDir, gitSource{remote: githubRemote}, prStatePolicy, convergeRounds)
 		}}
@@ -62,13 +62,13 @@ func execute(ctx context.Context, r *engine.Run, in engine.Input, piCWD, skillsD
 	if result, err = fix(ctx, r, p, piCWD, result); err != nil {
 		return result, err
 	}
-	if result, err = p.finish(ctx, r, piCWD, p.converge(ctx, r, piCWD, result, state, rounds), state); err != nil {
+	if result, err = p.finish(ctx, r, p.converge(ctx, r, piCWD, result, state, rounds), state); err != nil {
 		return result, err
 	}
 	// Only here may the run's cleanup remove the worktree: a round claimed
-	// convergence, every session was confirmed closed, the cleaner's with
-	// the HEAD still the head verified on the pull request, and the final
-	// snapshot and the summary are recorded.
+	// convergence, every session was confirmed closed, the last converger's
+	// with the HEAD still the head verified on the pull request, and the
+	// final snapshot and the summary are recorded.
 	p.worktree.remove.Store(true)
 	return result, nil
 }

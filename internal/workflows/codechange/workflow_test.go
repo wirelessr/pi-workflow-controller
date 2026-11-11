@@ -796,9 +796,9 @@ func TestDefinitionPolicy(t *testing.T) {
 	if def.Name != "code-change" || def.Version != "1" || !reflect.DeepEqual(def.Policy, want) {
 		t.Fatalf("definition: %s %s %+v", def.Name, def.Version, def.Policy)
 	}
-	// The description names the whole flow, through the cleanup Step and
-	// the summary.
-	if !strings.HasSuffix(def.Description, "then have a fresh cleaner do a last comment cleanup and push it, take a final snapshot of the pull request state, and deliver a final summary that sets the reports beside what the Controller observed, judging none of them") {
+	// The description names the whole flow, through the convergence rounds
+	// with their comment cleanup and the summary.
+	if !strings.HasSuffix(def.Description, "having a fresh converger do one round of the private skill and the comment cleanup, until a round claims convergence without any write on an unchanged head or the rounds end unconverged, then take a final snapshot of the pull request state, and deliver a final summary that sets the reports beside what the Controller observed, judging none of them") {
 		t.Fatalf("description: %s", def.Description)
 	}
 	// The production wait and read bounds, round cap, time admission and
@@ -806,7 +806,7 @@ func TestDefinitionPolicy(t *testing.T) {
 	if prStatePolicy != (statePolicy{wait: 30 * time.Minute, settle: 3 * time.Minute, poll: 30 * time.Second, reads: 10 * time.Minute}) {
 		t.Fatalf("state policy %+v", prStatePolicy)
 	}
-	if convergeRounds.rounds != 10 || convergeRounds.reserve != 170*time.Minute || reflect.ValueOf(convergeRounds.now).Pointer() != reflect.ValueOf(time.Now).Pointer() {
+	if convergeRounds.rounds != 10 || convergeRounds.reserve != 150*time.Minute || reflect.ValueOf(convergeRounds.now).Pointer() != reflect.ValueOf(time.Now).Pointer() {
 		t.Fatalf("round policy %+v", convergeRounds)
 	}
 	if SkillsDirEnv != "PWC_CODE_CHANGE_SKILLS_DIR" {

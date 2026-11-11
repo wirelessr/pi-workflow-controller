@@ -84,12 +84,11 @@
       "minLength": 1
     },
     "step": {
-      "description": "The Step that writes to GitHub after whose dispatch the run failed. publish: the correction Step that opened the pull request; its contract reports the branch, head and pull request. fix: the fix Step after the deep review; its contract reports only the head, and the branch and pull request are the pull request record's. converge: the converge Step of the convergence round that the round-NNN- prefix of this record's output name names; it reports like fix. cleanup: the cleanup Step after the convergence rounds; it reports like fix",
+      "description": "The Step that writes to GitHub after whose dispatch the run failed. publish: the correction Step that opened the pull request; its contract reports the branch, head and pull request. fix: the fix Step after the deep review; its contract reports only the head, and the branch and pull request are the pull request record's. converge: the converge Step of the convergence round that the round-NNN- prefix of this record's output name names; it reports like fix",
       "enum": [
         "publish",
         "fix",
-        "converge",
-        "cleanup"
+        "converge"
       ]
     },
     "session": {

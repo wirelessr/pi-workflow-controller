@@ -31,13 +31,12 @@ type roundPolicy struct {
 // convergeRounds is the production policy. The reserve is one round's bound
 // plus what follows the rounds. The round's bound is 80 minutes: the wait
 // cap, the snapshot reads, the converge Step and the read after the round.
-// What follows is 90 minutes: the cleanup Step, the final snapshot's wait
-// cap and reads, the summary's Attach and a 20-minute margin. The receipt
-// reads, the repairs and the strict closes have no bound of their own and
-// only the margin covers them, so the reserve leaves time for what follows
-// the rounds only when they do not add up past it. Every value awaits live
-// data.
-var convergeRounds = roundPolicy{rounds: 10, reserve: 170 * time.Minute, now: time.Now}
+// What follows is 70 minutes: the final snapshot's wait cap and reads, the
+// summary's Attach and a 20-minute margin. The receipt reads, the repairs
+// and the strict closes have no bound of their own and only the margin
+// covers them, so the reserve leaves time for what follows the rounds only
+// when they do not add up past it. Every value awaits live data.
+var convergeRounds = roundPolicy{rounds: 10, reserve: 150 * time.Minute, now: time.Now}
 
 // errNotConverged ends rounds that ran out, at the round cap or the run
 // deadline, without a round that meets the termination rule. Every round
@@ -46,7 +45,7 @@ var errNotConverged = errors.New("code-change: the pull request did not converge
 
 // errPullRequestNotOpen ends the rounds once a round's snapshot, or the read
 // after a round, shows the pull request closed or merged; the summary is the
-// Final and no cleanup Step runs.
+// Final.
 var errPullRequestNotOpen = errors.New("code-change: the pull request is no longer open")
 
 // convergeReport is the part of a converge contract the Controller checks
@@ -99,13 +98,8 @@ type roundsEnd struct {
 	// the rounds when one does.
 	kind string
 	// started counts the rounds that began and accepted those whose
-	// contract was accepted and verified; last is the head the Controller
-	// last verified, the head of the last accepted report.
+	// contract was accepted and verified.
 	started, accepted int
-	last              string
-	// closed reports whether every session the rounds opened is confirmed
-	// closed.
-	closed bool
 }
 
 func roundName(n int) string { return fmt.Sprintf("round-%03d", n) }
@@ -143,7 +137,7 @@ func reportKey(accepted int) string {
 // before any round's, the round's own after its receipt.
 func (p prepared) converge(ctx context.Context, r *engine.Run, piCWD string, prior engine.Result, sp statePolicy, rp roundPolicy) roundsEnd {
 	outputs := prior.Outputs
-	d := roundsEnd{closed: true}
+	var d roundsEnd
 	stopped := func() engine.Result {
 		return engine.Result{Outputs: outputs, Final: &engine.FinalSelection{Output: reportKey(d.accepted)}}
 	}
@@ -159,7 +153,7 @@ func (p prepared) converge(ctx context.Context, r *engine.Run, piCWD string, pri
 	if err != nil {
 		return stop("round_failed", err)
 	}
-	d.last = verified.Head
+	last := verified.Head
 	var snapshot contract.Ref
 	for n := 1; ; n++ {
 		if n > rp.rounds {
@@ -197,17 +191,16 @@ func (p prepared) converge(ctx context.Context, r *engine.Run, piCWD string, pri
 		if err != nil {
 			return stop("round_failed", err)
 		}
-		v, result, closed, err := runPush(ctx, r, p, pr, d.last, pushStep{scope: s, key: "converge", output: name + "-converge", prefix: name + "-", step: "converge", at: name,
+		v, result, err := runPush(ctx, r, p, pr, last, pushStep{scope: s, key: "converge", output: name + "-converge", prefix: name + "-", step: "converge", at: name,
 			role: engine.RoleSpec{Name: convergeRole, Model: convergeModel, CWD: piCWD}, who: "converger", decision: "converge-verified", prompt: string(prompt),
 			inputs: []contract.Ref{p.input, outputs["implement"], outputs["pull-request"], snap, outputs[reportKey(d.accepted)]}, schema: ConvergeSchema, timeout: convergeTimeout},
 			outputs, stopped(), func(v convergeReport) error { return checkRound(v, snap) },
 			func(ctx context.Context, v convergeReport) error { return p.verifyWrites(ctx, r.Dir(), pr, v) })
-		d.closed = closed
 		if err != nil {
 			d.result, d.err, d.kind = result, err, "round_failed"
 			return d
 		}
-		d.accepted, d.last = n, v.Head
+		d.accepted, last = n, v.Head
 		after, err := p.pullAfter(ctx, r.Dir(), pr.Number, sp)
 		if err != nil {
 			return stop("state_read_failed", fmt.Errorf("after %s: %w", name, err))

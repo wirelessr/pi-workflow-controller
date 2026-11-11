@@ -1,12 +1,62 @@
 package codechange
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
 
 	"pi-workflow-controller/internal/contract"
 	"pi-workflow-controller/internal/engine"
 )
+
+// finish follows the rounds d ended: the final snapshot and the summary,
+// which is the Final.
+//
+// Nothing follows rounds the run can no longer act on, cancelled, past its
+// deadline or stopped by a fatal error, or rounds that ended on a receipt or
+// identity check the worktree or GitHub did not confirm: d's result is
+// returned with d's error, or with the run's cause when d has none, so that
+// rounds that converged do not return as a success without the final
+// snapshot and the summary. Otherwise the final snapshot follows; a
+// snapshot that cannot be taken is recorded in the summary as unavailable.
+// A summary that cannot be attached leaves d's result as it was.
+//
+// The error is d's, with the final snapshot's added to its message, or the
+// final snapshot's alone when d has none; then the summary's.
+func (p prepared) finish(ctx context.Context, r *engine.Run, d roundsEnd, sp statePolicy) (engine.Result, error) {
+	if ctx.Err() != nil || identityFailure(d.err) {
+		return d.result, cmp.Or(d.err, context.Cause(ctx))
+	}
+	result, unavailable := p.finalState(ctx, r, d.result, sp)
+	err := d.err
+	if unavailable != nil {
+		if err == nil {
+			err = unavailable
+		} else {
+			err = fmt.Errorf("%w; the final snapshot: %v", err, unavailable)
+		}
+		if ctx.Err() != nil {
+			return result, err
+		}
+	}
+	ref, sErr := p.summarize(ctx, r, d, result.Outputs, unavailable, err)
+	if sErr != nil {
+		if err != nil {
+			return result, fmt.Errorf("%w; %w", err, sErr)
+		}
+		return result, sErr
+	}
+	result.Outputs["summary"] = ref
+	return engine.Result{Outputs: result.Outputs, Final: &engine.FinalSelection{Output: "summary"}}, err
+}
+
+// identityFailure reports whether err is a receipt or identity check that
+// the worktree or GitHub did not confirm: the pull request is no longer
+// written to.
+func identityFailure(err error) bool {
+	return errors.Is(err, errReceipt) || errors.Is(err, errUnverifiable)
+}
 
 // summaryRecord is the final summary: what the Controller observed and what
 // the Agents reported, side by side, every value copied from a committed
@@ -20,7 +70,6 @@ type summaryRecord struct {
 	Statements    []string           `json:"statements"`
 	Rounds        []roundSummary     `json:"rounds"`
 	Claim         *claimSummary      `json:"claim"`
-	Cleanup       cleanupSummary     `json:"cleanup"`
 	FinalSnapshot finalSummary       `json:"final_snapshot"`
 }
 
@@ -54,12 +103,6 @@ type claimSummary struct {
 	Items       []itemClaim `json:"items"`
 }
 
-type cleanupSummary struct {
-	Skipped         string        `json:"skipped,omitempty"`
-	Report          *contract.Ref `json:"report"`
-	ExternalObjects *contract.Ref `json:"external_objects"`
-}
-
 type finalSummary struct {
 	Status            string            `json:"status"`
 	Detail            string            `json:"detail,omitempty"`
@@ -81,21 +124,19 @@ type statusSummary struct {
 	State   string `json:"state"`
 }
 
-// summarize attaches the summary of the run that d's rounds and c's
-// cleanup Step leave in outputs, with failure, the error the run fails
-// with, and unavailable, why the final snapshot is missing.
+// summarize attaches the summary of the run that d's rounds leave in
+// outputs, with failure, the error the run fails with, and unavailable, why
+// the final snapshot is missing.
 //
 // It decodes each committed Ref it cites. The reports are the last of each
 // stage that was accepted, in order, each with the head it is for: the
 // implement, correction and fix contracts, the deep review report with the
 // pull request record's reported head, the head the review pinned it to,
-// the last accepted converge contract, whose claim the summary copies, and
-// the cleanup contract. The final head is the last report's head, the one
-// the Controller verified last. Each round's own Refs are in its round
-// entry. Exactly three facts get a statement: a claim for a head that is
-// not the final head, a final snapshot showing another head, and a cleanup
-// Step that failed from its dispatch on.
-func (p prepared) summarize(ctx context.Context, r *engine.Run, d roundsEnd, c cleanupOutcome, outputs map[string]contract.Ref, unavailable, failure error) (contract.Ref, error) {
+// and the last accepted converge contract, whose claim the summary copies.
+// The final head is the last report's head, the one the Controller verified
+// last. Each round's own Refs are in its round entry. Exactly one fact gets
+// a statement: a final snapshot showing another head.
+func (p prepared) summarize(ctx context.Context, r *engine.Run, d roundsEnd, outputs map[string]contract.Ref, unavailable, failure error) (contract.Ref, error) {
 	record := summaryRecord{RoundsEnd: d.kind, Reports: []reportSummary{}, Statements: []string{}, Rounds: []roundSummary{}}
 	if failure != nil {
 		record.Failure = failure.Error()
@@ -134,7 +175,6 @@ func (p prepared) summarize(ctx context.Context, r *engine.Run, d roundsEnd, c c
 		}
 		record.Rounds = append(record.Rounds, round)
 	}
-	var claimed string
 	if d.accepted > 0 {
 		key := reportKey(d.accepted)
 		claim, err := engine.Decode[convergeReport](ctx, r, outputs[key])
@@ -143,21 +183,8 @@ func (p prepared) summarize(ctx context.Context, r *engine.Run, d roundsEnd, c c
 		}
 		add(key, claim.Head)
 		record.Claim = &claimSummary{Output: key, Converged: claim.Converged, Unconverged: claim.Unconverged, Items: claim.Items}
-		claimed = claim.Head
-	}
-	record.Cleanup = cleanupSummary{Skipped: c.skipped, ExternalObjects: refOf(outputs, "external-objects")}
-	if c.accepted {
-		record.Cleanup.Report = refOf(outputs, "cleanup")
-		v, err := engine.Decode[pushed](ctx, r, *record.Cleanup.Report)
-		if err != nil {
-			return contract.Ref{}, err
-		}
-		add("cleanup", v.Head)
 	}
 	record.FinalHead = record.Reports[len(record.Reports)-1].Head
-	if record.Claim != nil && claimed != record.FinalHead {
-		record.Statements = append(record.Statements, fmt.Sprintf("The convergence claim of %s is for head %s; the final head %s had no convergence round", record.Claim.Output, claimed, record.FinalHead))
-	}
 	record.FinalSnapshot = finalSummary{CheckRuns: []checkRunSummary{}, Statuses: []statusSummary{}, UnresolvedThreads: []string{}}
 	if ref := refOf(outputs, "final-snapshot"); ref == nil {
 		record.FinalSnapshot.Status, record.FinalSnapshot.Detail = "unavailable", unavailable.Error()
@@ -179,9 +206,6 @@ func (p prepared) summarize(ctx context.Context, r *engine.Run, d roundsEnd, c c
 		if state.PullRequest.HeadSHA != record.FinalHead {
 			record.Statements = append(record.Statements, fmt.Sprintf("The final snapshot shows the pull request at head %s, not the final head %s", state.PullRequest.HeadSHA, record.FinalHead))
 		}
-	}
-	if record.Cleanup.ExternalObjects != nil {
-		record.Statements = append(record.Statements, "The cleanup Step was dispatched and failed; its writes are unverified; see cleanup.external_objects")
 	}
 	return r.Root().Attach(ctx, engine.AttachSpec{Key: "summary", Output: contract.Spec{SchemaID: SummarySchema}, Data: record})
 }

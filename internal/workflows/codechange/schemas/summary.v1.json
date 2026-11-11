@@ -12,7 +12,6 @@
     "statements",
     "rounds",
     "claim",
-    "cleanup",
     "final_snapshot"
   ],
   "properties": {
@@ -66,7 +65,7 @@
       }
     },
     "reports": {
-      "description": "The last accepted report of each stage in order, each with the head it is for: the implement, correction and fix contracts, the deep review report with the pull request record's reported_head, which the deep review was given as its expected head and pinned the report to, the last accepted converge contract and the cleanup contract. The reports of earlier rounds are in rounds",
+      "description": "The last accepted report of each stage in order, each with the head it is for: the implement, correction and fix contracts, the deep review report with the pull request record's reported_head, which the deep review was given as its expected head and pinned the report to, and the last accepted converge contract. The reports of earlier rounds are in rounds",
       "type": "array",
       "minItems": 1,
       "items": {
@@ -97,7 +96,7 @@
       "$ref": "#/$defs/sha"
     },
     "statements": {
-      "description": "Exactly these, each when it holds: the claim's head is not the final head; the final snapshot shows another head than the final head; the cleanup Step failed from its dispatch on, so its writes are unverified",
+      "description": "Exactly this, when it holds: the final snapshot shows another head than the final head",
       "type": "array",
       "items": {
         "type": "string",
@@ -192,44 +191,6 @@
           }
         }
       ]
-    },
-    "cleanup": {
-      "description": "The cleanup Step. skipped, when it was not dispatched: pull_request_not_open, the pull request was no longer open; session_unconfirmed, a session of the rounds was not confirmed closed; unverified_head, the worktree HEAD was not the head the Controller verified last. report: its contract once accepted and verified; external_objects: the record of its failure from its dispatch on",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "report",
-        "external_objects"
-      ],
-      "properties": {
-        "skipped": {
-          "enum": [
-            "pull_request_not_open",
-            "session_unconfirmed",
-            "unverified_head"
-          ]
-        },
-        "report": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/ref"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "external_objects": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/ref"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      }
     },
     "final_snapshot": {
       "description": "The final pull request state snapshot, its head, check runs, statuses and unresolved threads copied; unavailable, with the detail, when it could not be taken",

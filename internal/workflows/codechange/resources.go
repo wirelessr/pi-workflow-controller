@@ -47,13 +47,10 @@ const SkillsSchema = "code-change.skills.v1"
 // ConvergeSchema is a converger's report of one round and its push receipt.
 const ConvergeSchema = "code-change.converge.v1"
 
-// CleanupSchema is the cleaner's report and its push receipt.
-const CleanupSchema = "code-change.cleanup.v1"
-
 // SummarySchema is the Controller's final summary of the run.
 const SummarySchema = "code-change.summary.v1"
 
-var schemaNames = []string{"input", "implement", "review", "publish", "pull-request", "fix", "external-objects", "pr-state", "skills", "converge", "cleanup", "summary"}
+var schemaNames = []string{"input", "implement", "review", "publish", "pull-request", "fix", "external-objects", "pr-state", "skills", "converge", "summary"}
 
 func Resources() []contract.Resource {
 	var out []contract.Resource
