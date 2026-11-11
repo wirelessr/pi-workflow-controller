@@ -1118,12 +1118,11 @@ func TestConvergeSkillsExpanded(t *testing.T) {
 	}
 }
 
-// The dispatched fix requirements are byte for byte those before the
-// integration sentence became the constant the converger shares: evidence
-// that the extraction preserved them.
+// The dispatched fix requirements are pinned byte for byte, so a change to a
+// constant they share with other Steps shows up here and is made on purpose.
 func TestFixRequirementsUnchanged(t *testing.T) {
 	sum := sha256.Sum256([]byte(baselineRequirements + "\n\n" + fixRequirements))
-	if got := hex.EncodeToString(sum[:]); got != "1709defac58cc931f11dd35ee2ce23b070a000db0bd660e49c951d60aa0753b8" {
+	if got := hex.EncodeToString(sum[:]); got != "14e9626f77e34f769155f65eb5a2d1dea97027c53c5e4468965cd1366f34e3cb" {
 		t.Fatalf("fix requirements sha256 %s", got)
 	}
 }

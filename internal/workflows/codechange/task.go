@@ -46,7 +46,7 @@ const publishRequirements = `Role: the implementer, now correcting the implement
 const appendOnly = "- Every commit already on that branch stays in its history, this work's own pushed and reviewed commits included: only add commits on top of that history, never rewrite or discard any of them. Integrate the branch's commits that the worktree does not have only when you push; if you push nothing, leave the HEAD at "
 
 // commentCleanup is the comment cleanup that the fix and cleanup Steps do.
-const commentCleanup = "- Source code comments that this work added or modified since the input's base commit keep only a reason the code does not make obvious: remove those that restate what the code does, refer to the task, a review or the pull request, or tell how the change came about."
+const commentCleanup = "- Source code comments that this work added or modified since the input's base commit keep only what a reader cannot get from the code itself: why it is so, what must stay true or change together with it, and what the input's design doc asks a comment to say. Remove those that restate what the code does, refer to the task, a review or the pull request, or tell how the change came about."
 
 // pushAuthorized and pushEnds are the authorized writes and the end of the
 // fix and cleanup Steps, which push only to the pull request record's
