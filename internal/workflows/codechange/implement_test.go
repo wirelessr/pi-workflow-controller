@@ -731,8 +731,13 @@ func TestCheckImplementationEcho(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			echoed := input
 			change(&echoed)
-			if err := checkEcho("input", echoed, input); err == nil || !strings.HasPrefix(err.Error(), "input: got ") {
+			err := checkEcho("input", echoed, input)
+			if err == nil || !strings.HasPrefix(err.Error(), "input: got ") {
 				t.Fatalf("changed %s accepted: %v", name, err)
+			}
+			// Only the changed member is named, so a one-character slip is findable.
+			if m := contract.RefMismatches(echoed, input); len(m) != 1 || !strings.HasSuffix(err.Error(), fmt.Sprintf("; differing: input.%s got %q, want %q", name, m[0].Got, m[0].Want)) {
+				t.Fatalf("changed %s: diagnostic does not name only that member: %v", name, err)
 			}
 		})
 	}

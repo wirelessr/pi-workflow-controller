@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"pi-workflow-controller/internal/contract"
@@ -146,12 +147,18 @@ func closeStrictly(ctx context.Context, r *engine.Run, h *engine.SessionHandle, 
 	return nil
 }
 
-// checkEcho requires field, a Ref the request gave, copied byte-exact.
+// checkEcho requires field, a Ref the request gave, copied byte-exact. The
+// diagnostic names each differing member, since a one-character slip in a
+// 64-character digest is hard to find by comparing the two Refs.
 func checkEcho(field string, got, want contract.Ref) error {
 	if got != want {
 		g, _ := json.Marshal(got)
 		w, _ := json.Marshal(want)
-		return fmt.Errorf("%s: got %s; want the %s Ref copied byte-exact from request.inputs: %s", field, g, field, w)
+		var members []string
+		for _, m := range contract.RefMismatches(got, want) {
+			members = append(members, fmt.Sprintf("%s.%s got %q, want %q", field, m.Field, m.Got, m.Want))
+		}
+		return fmt.Errorf("%s: got %s; want the %s Ref copied byte-exact from request.inputs: %s; differing: %s", field, g, field, w, strings.Join(members, "; "))
 	}
 	return nil
 }

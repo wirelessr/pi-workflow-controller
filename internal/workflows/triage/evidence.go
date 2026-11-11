@@ -128,19 +128,8 @@ func describeRef(ref contract.Ref) string {
 
 func differingFields(got, want contract.Ref) string {
 	var fields []string
-	for _, f := range []struct {
-		name      string
-		got, want string
-	}{
-		{"run_id", got.RunID, want.RunID},
-		{"path", got.Path, want.Path},
-		{"schema_id", got.SchemaID, want.SchemaID},
-		{"sha256", got.SHA256, want.SHA256},
-		{"manifest_sha256", got.ManifestSHA256, want.ManifestSHA256},
-	} {
-		if f.got != f.want {
-			fields = append(fields, fmt.Sprintf("%s %q (committed %q)", f.name, f.got, f.want))
-		}
+	for _, f := range contract.RefMismatches(got, want) {
+		fields = append(fields, fmt.Sprintf("%s %q (committed %q)", f.Field, f.Got, f.Want))
 	}
 	return strings.Join(fields, ", ")
 }

@@ -167,3 +167,28 @@ func RefSetEqual(a, b []Ref) bool {
 	}
 	return true
 }
+
+// RefMismatch is one member of a Ref, by its JSON name, that differs from the
+// Ref it should equal.
+type RefMismatch struct {
+	Field, Got, Want string
+}
+
+// RefMismatches lists the members of got that differ from want, in the order
+// Ref declares them, so a diagnostic can name what a copy got wrong.
+func RefMismatches(got, want Ref) []RefMismatch {
+	var out []RefMismatch
+	for _, f := range []RefMismatch{
+		{"run_id", got.RunID, want.RunID},
+		{"attempt_id", got.AttemptID, want.AttemptID},
+		{"path", got.Path, want.Path},
+		{"schema_id", got.SchemaID, want.SchemaID},
+		{"sha256", got.SHA256, want.SHA256},
+		{"manifest_sha256", got.ManifestSHA256, want.ManifestSHA256},
+	} {
+		if f.Got != f.Want {
+			out = append(out, f)
+		}
+	}
+	return out
+}

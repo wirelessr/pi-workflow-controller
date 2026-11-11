@@ -761,7 +761,8 @@ func TestCheckReview(t *testing.T) {
 	err := checkReview(v, "basic", implement)
 	for _, diagnostic := range []string{
 		`role: got "consistency"; want "basic", the role in request.prompt`,
-		"implement: got " + string(got) + "; want the implement Ref copied byte-exact from request.inputs: " + string(want),
+		"implement: got " + string(got) + "; want the implement Ref copied byte-exact from request.inputs: " + string(want) +
+			`; differing: implement.sha256 got "` + v.Implement.SHA256 + `", want "` + implement.SHA256 + `"`,
 		`findings[2].id: got "a", which findings[0] already uses; want an ID unique among the findings`,
 	} {
 		if err == nil || !slices.Contains(strings.Split(err.Error(), "\n"), diagnostic) {
