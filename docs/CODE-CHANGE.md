@@ -71,7 +71,7 @@ Controller 可以：依機械定義的狀態條件等待（只看是否進入終
 - **身分核對屬第四條，不屬「不拒收」。** Controller 核對 Agent 回報的 push head 須同時滿足：等於自有 worktree 的 HEAD；確實是新 commit（不是上次已核對 head 的祖先或相同者）；為 PR 當下 head 或其祖先（以 compare 判定，容許 bot 在其間推 commit）。任一不符是具名的執行失敗，不重試，PR 保留，診斷指出欄位、收到的值與期望。這是跨來源的 Go validator，不是 prompt 規則。核對在 repair 迴圈接受最終 contract 之後執行一次，不放進 repair 的 `Validate`：只有 schema 與內容驗收會 repair，身分與 receipt 不符不會。「上次已核對的 head」只在核對通過後更新，所以 attempt 因其他欄位被打回、repair 後回報同一個 head，不會被誤判為非新 commit。沒有新 commit 的 Step（例如 C 決定都不修）以明示的 `no_change` 回報，Controller 核對回報的 head 與上次已核對者相同，且仍為 PR 當下 head 或其祖先（容許 bot 推 commit）。A3 被拒 attempt 的 PR receipt 不核對，只核對最終 contract；失敗時的外部物件記錄只在 context 仍有效時做（取消、run deadline、fatal、run-scope 額度用盡時做不到，是承認的缺口）。
 - **終止是機械條件。** 迴圈只在三者同時成立時終止：Agent 宣稱已收斂；本輪沒有任何外部寫入 receipt（push、CI rerun、thread reply／resolve）；Controller 在本輪結束後以 GET 取得的 PR head 等於本輪開始時快照的 head。Agent 不等待，看不到自己寫入所觸發的結果，所以有寫入的那一輪不採信為終止，下一輪的快照涵蓋該寫入；未回報的 push 由 head 比對攔下。這是依 receipt 與 head 這些機械事實做的轉移，不看快照內容的意義。輪數用盡前沒有符合條件的收斂宣稱，即未收斂。
 - **「已收斂」的宣稱不涵蓋 skipped 或 not_checked 的項目**，Final 逐項列出；是否值得為它們停下，由 Agent 判斷。
-- **殘餘風險：** 終止輪中 Agent 未回報的 reply、resolve 或 CI rerun，head 比對攔不到，承認為未被機械核對的範圍；CI rerun 的 receipt 只核對 run 的身分與 attempt（head repo、branch、attempt），不判斷其意義。
+- **殘餘風險：** 終止輪中 Agent 未回報的 reply、resolve 或 CI rerun，head 比對攔不到，承認為未被機械核對的範圍；CI rerun 的 receipt 只核對 run 的身分與 attempt（head repo、branch、attempt），不判斷其意義。在本輪之前的等待開始前就已 pending、經過達到上限的等待仍在執行的 check，其結果不在該輪的快照中，私有 skill 讓它不阻擋收斂（宣稱不涵蓋它）；這樣的收斂與 Succeeded 不涵蓋它的結果，結果只可能出現在同樣受等待上限限制的最後快照中，收斂者讀到 pending 之後才轉紅也不被任何一輪看到。
 - **並列顯示：** Final 同時呈現 Agent 的宣稱與最後一份快照，不一致時顯示而不拒收。快照中未解 thread 的用途是下一輪的輸入與 Final 的呈現，Controller 自己沒有用到它。
 - **快照只放識別與狀態，不放 log 或留言全文；** Agent 用既有 gh skill 自取。快照在 push 後即過期，Agent 仍須自行查最新狀態。
 - **每輪都派 Agent，** 即使快照看似無事：「無事」是否等於收斂是詮釋，品質掃描項也不在快照內。
@@ -99,7 +99,7 @@ Controller 可以：依機械定義的狀態條件等待（只看是否進入終
 - A2 任一必要審閱者失敗：執行失敗，不改標為資料不足，不發 PR。兩位都失敗時，錯誤分類取 basic 的，consistency 的失敗只保留在訊息中。
 - B 的 `limited`（來源缺失等）：合法，原樣交給 C。B 的 `incomplete`（必要 reviewer 失敗）：執行失敗，PR 保留，流程終止，不進 C。
 - D：輪數用盡仍無合格的收斂宣稱，即未收斂，依同一先例交付 final 並以具名錯誤結束。某輪逾時或失敗是執行失敗，不當成「已收斂」，也不由 Controller 自行重跑該輪。
-- 檢查項狀態只有四種：`passed`、`failed`、`skipped`、`not_checked`。`skipped` 只用於 schema enum 預先列舉的項目 ID，且需交代前提（例如沒有登入 session），集合外的值在 schema 層即被拒。`not_checked` 表示檢查因其他原因未能執行，必須附原因。兩者都不算通過，也不併入已驗證結論。這不是通用 fallback。
+- 檢查項狀態只有四種：`passed`、`failed`、`skipped`、`not_checked`。`skipped` 只用於 schema enum 預先列舉的項目 ID，且需交代前提（例如沒有登入 session），集合外的值在 schema 層即被拒。`not_checked` 表示檢查因其他原因未能執行（收斂輪另含尚無結果），必須附原因。兩者都不算通過，也不併入已驗證結論。這不是通用 fallback。
 - 寫入型 Step 的輸出不合 contract：沿用 triage 已有的 contract repair（同一 handle、有限預算、Controller 的具體診斷作為 Feedback），其共用機械由 R9 抽成 `engine.Scope.StepWithRepair`。Repair 只重寫本 attempt 的報告，不重做外部寫入，這條只寫在 engine 的 repair 派送（`StepSpec.RepairKeepsWork`，寫入型 Step 設定；對模型行為的效果未經 live 驗證），不在 Step requirements 重複；receipt 核對只對最終 contract 執行一次，被拒 attempt 的本機 head 不核對（本機 commit 只有一個 worktree HEAD，最終核對已涵蓋）：它攔得下回報的 head 與 worktree HEAD 不一致（謊報），攔不下 repair 中重做的寫入（新 push 產生新 commit，回報仍會一致），也攔不下重複的 thread reply 或重開的 PR，這些是承認的殘餘風險；前幾次被拒的 attempt 若有外部副作用，其 receipt 只有在最終 contract 承載時才會被核對，A3 被拒發布中的 PR receipt 是否核對，由 C2b 決定。engine 預設的 repair 派送文字要求 Agent 先執行 request.prompt 的任務，與「repair 只重寫報告」相衝突；設定 `RepairKeepsWork` 的 Step 改用不重做任務與寫入的開頭句，其模型行為尚待 live 驗證，驗證前重做寫入仍列為殘餘風險。含外部寫入的 Step（A3 起；A1 只做本機 commit，不適用）的任何失敗（repair 預算用盡、逾時、身分不符等）都是執行失敗；此時 Controller 從自有 worktree 讀出目前 branch，再以唯讀 GET 查對應的 PR，在失敗報告中交代已存在的外部物件，不自動撤銷。
 
 ## 4. 輸入、權限與授權範圍

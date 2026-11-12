@@ -110,7 +110,7 @@
           "minLength": 1
         },
         "status": {
-          "description": "passed or failed when the check ran. skipped: a check whose id this schema lists for it was not run because its precondition is missing, which the reason states. not_checked: the check could not run for another reason, which the reason states. Neither skipped nor not_checked is a pass",
+          "description": "passed or failed when the check ran. skipped: a check whose id this schema lists for it was not run because its precondition is missing, which the reason states. not_checked: the check could not run, or has no result yet, for another reason, which the reason states. Neither skipped nor not_checked is a pass",
           "enum": [
             "passed",
             "failed",
@@ -119,7 +119,7 @@
           ]
         },
         "reason": {
-          "description": "What was checked and found; for skipped, the missing precondition; for not_checked, why it could not run",
+          "description": "What was checked and found; for skipped, the missing precondition; for not_checked, why it could not run or has no result",
           "type": "string",
           "minLength": 1
         }
