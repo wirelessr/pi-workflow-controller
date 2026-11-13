@@ -352,7 +352,7 @@ func (a *Attempt) WriteControllerCandidate(data json.RawMessage, files []Control
 - Callback 回 error：立即失敗，不隱含重試。若 workflow 明確要修正 schema，可將該錯誤轉成 RetryAction。
 - Feedback 包含文字、來源 attempt/error code、可選已發布 Ref。寫入新 attempt 的 request，送回哪個 handle 由 workflow 決定。
 - Reviewer reject 與 schema 修正可以共用同一 Retry scope；是否拆 budget 由 workflow 程式碼決定。
-- 同一 Step 的 contract repair（`StepWithRepair`，第 4.2 節）不是 Retry：不建立 activation、不寫 Retry 事件，用盡時回最後的原始錯誤而非 `RetryExhausted`；每次 repair 仍消耗 run 的 attempt 額度。不可 repair 的核對（例如外部副作用的身分與 receipt）在其成功返回後由 workflow 執行一次。
+- 同一 Step 的 contract repair（`StepWithRepair`，第 4.2 節）不是 Retry：不建立 activation、不寫 Retry 事件，用盡時回最後的原始錯誤而非 `RetryExhausted`；每次 repair 仍消耗 run 的 attempt 額度。不可 repair 的核對（例如外部副作用的 receipt 身分；contract envelope 的 identity 不符則可 repair）在其成功返回後由 workflow 執行一次。
 - Provider auto retry 在同一 attempt 內，由 Pi 管理；記錄其獨立 counter，不消耗 workflow budget。
 - Controller 不在 pipe 斷線、ack timeout 或結果不明時自動重送 prompt。Retry 也不代表外部 API／檔案修改的 exactly-once。
 

@@ -2778,6 +2778,14 @@ func TestEngineStepWithRepair(t *testing.T) {
 					if failure == nil || failure.Code != code || fb.SourceAttemptID != prev || fb.SourceCode != string(code) {
 						t.Errorf("dispatch %d %s feedback = %+v after %+v", i+1, kind, fb, failure)
 					}
+					if kind == "identity" {
+						if report.Snapshot.Attempts[prev].State != Failed || results[i-1].Output != (contract.Ref{}) {
+							t.Errorf("mismatched identity of dispatch %d was accepted: %+v %+v", i, report.Snapshot.Attempts[prev], results[i-1])
+						}
+						if strings.Contains(fb.Message, prev) {
+							t.Errorf("dispatch %d feedback names the rejected attempt id %s as expected: %q", i+1, prev, fb.Message)
+						}
+					}
 					if failure != nil {
 						diagnostic = failure.Message
 					}

@@ -578,8 +578,9 @@ func TestStoreCandidateValidation(t *testing.T) {
 	}
 }
 
-// An identity mismatch names each differing meta field with the value
-// received and the value expected, and only those fields.
+// An identity mismatch names each differing meta field, only those, with the
+// value received and the request field to copy, not this attempt's value: a
+// repair runs as a new attempt with another identity.
 func TestStoreIdentityMismatchDiagnostic(t *testing.T) {
 	s := storeTestNew(t, Limits{})
 	a, id := storeTestAttempt(t, s, "")
@@ -593,8 +594,8 @@ func TestStoreIdentityMismatchDiagnostic(t *testing.T) {
 	storeTestWrite(t, a.CandidatePath(), storeTestJSON(t, v))
 	_, err := a.Stage(context.Background(), Spec{SchemaID: storeTestSchemaID})
 	storeTestCode(t, err, IdentityMismatch)
-	want := fmt.Sprintf("contract identity/schema differs from request: meta.attempt_id is %q, want %q; meta.schema_id is %q, want %q",
-		"0001-"+id.AttemptID, id.AttemptID, "other.output.v1", storeTestSchemaID)
+	want := fmt.Sprintf("contract identity/schema differs from request: meta.attempt_id is %q, want a copy of request.identity.attempt_id; meta.schema_id is %q, want a copy of request.output.schema_id",
+		"0001-"+id.AttemptID, "other.output.v1")
 	if got := err.(*Error).Message; got != want {
 		t.Fatalf("message = %q, want %q", got, want)
 	}

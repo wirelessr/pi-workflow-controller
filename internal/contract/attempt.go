@@ -234,18 +234,20 @@ func (s *Store) validate(raw []byte, a *Attempt) (*envelope, error) {
 }
 
 // identityMismatch names each meta field of the envelope that differs from
-// the request, with the value received and the value expected.
+// the request, with the value received and the request field it must copy.
+// It names the field, not this attempt's value, because a repair is a new
+// attempt whose identity differs.
 func identityMismatch(got Identity, gotSchema string, want Identity, wantSchema string) error {
 	var diffs []string
-	for _, f := range []struct{ name, got, want string }{
-		{"run_id", got.RunID, want.RunID},
-		{"invocation_id", got.InvocationID, want.InvocationID},
-		{"attempt_id", got.AttemptID, want.AttemptID},
-		{"dispatch_token", got.DispatchToken, want.DispatchToken},
-		{"schema_id", gotSchema, wantSchema},
+	for _, f := range []struct{ name, got, want, source string }{
+		{"run_id", got.RunID, want.RunID, "request.identity.run_id"},
+		{"invocation_id", got.InvocationID, want.InvocationID, "request.identity.invocation_id"},
+		{"attempt_id", got.AttemptID, want.AttemptID, "request.identity.attempt_id"},
+		{"dispatch_token", got.DispatchToken, want.DispatchToken, "request.identity.dispatch_token"},
+		{"schema_id", gotSchema, wantSchema, "request.output.schema_id"},
 	} {
 		if f.got != f.want {
-			diffs = append(diffs, fmt.Sprintf("meta.%s is %q, want %q", f.name, f.got, f.want))
+			diffs = append(diffs, fmt.Sprintf("meta.%s is %q, want a copy of %s", f.name, f.got, f.source))
 		}
 	}
 	return errors.New("contract identity/schema differs from request: " + strings.Join(diffs, "; "))

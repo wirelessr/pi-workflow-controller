@@ -270,7 +270,7 @@ R8 前，`triage.PrepareSkills` 綁 triage 的角色名與上游比對。新 wor
 
 以下保留目標與完成條件。
 
-兩個真 consumer：triage 的 `TaskSession.Run`（經 `RunTaskStep` 與 `rounds.go` 兩個入口呼叫，含 `repairBudget = 2`、每次 repair 的 `contract-repair-*` 子 scope、同一 handle、schema 與 acceptance 兩種診斷、已發布 Ref 的保留）與 code-change 的寫入型 Step。`review` 刻意沒有內容修正迴圈（見 `docs/CODE-REVIEW.md`），不是 consumer，也不在此遷移。
+兩個真 consumer：triage 的 `TaskSession.Run`（經 `RunTaskStep` 與 `rounds.go` 兩個入口呼叫，含 `repairBudget = 2`、每次 repair 的 `contract-repair-*` 子 scope、同一 handle、schema 與 acceptance 兩種診斷（之後加入 contract identity 不符，共三種）、已發布 Ref 的保留）與 code-change 的寫入型 Step。`review` 刻意沒有內容修正迴圈（見 `docs/CODE-REVIEW.md`），不是 consumer，也不在此遷移。
 
 - 只抽政策無關的核心：預算內的同 handle 重派、診斷作為 Feedback、子 scope 命名、執行類失敗（timeout、cancel、provider）不重試。triage 專屬的角色命名（`triage-` 前綴）、`TaskFailure` 與 recovery 型別、observation 回調留在 triage。
 - 差異矩陣須逐項列：取消、錯誤分類、ownership（repair 被取消時已發布 Ref 的保留）、限額（每 Step 的 attempts 上界）、穩定性、生命週期。不得改變 triage 的錯誤字串、預算與 attempts 會計，也不得默默套用其他語義。
