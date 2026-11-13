@@ -16,7 +16,7 @@ const feedbackDispatchNote = "This request carries request.feedback: read reques
 
 // noFilesInstruction replaces the evidence and artifact directory instruction
 // in the dispatches of a NoFiles Step.
-const noFilesInstruction = "This contract declares no files: its files is [] and the attempt directory holds nothing but the candidate."
+const noFilesInstruction = "This contract declares no files: set files to [] and write nothing into this attempt directory except the candidate."
 
 // taskInstruction opens every dispatch's instructions unless a repair of a
 // RepairKeepsWork Step replaces it with repairKeepsWorkInstruction, because

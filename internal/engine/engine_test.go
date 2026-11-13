@@ -2811,7 +2811,9 @@ func TestEngineStepWithRepair(t *testing.T) {
 
 // A repair dispatch of a RepairKeepsWork Step opens with the repair
 // instruction instead of the task instruction; every other dispatch, all of
-// triage's included, keeps the task instruction.
+// triage's included, keeps the task instruction. Every dispatch of a NoFiles
+// Step says it declares no files instead of naming the file directories,
+// with either opening.
 func TestEngineStepWithRepairDispatchText(t *testing.T) {
 	const execute = "\nFirst execute the task in request.prompt, using its inputs and feedback. Do not skip the task to construct an output. After the task finishes, read output.schema.path"
 	const rewrite = "\nThis is a contract repair: do not add or repeat any external write or local commit; only fix the violations request.feedback.message reports by rewriting this attempt's contract. Read output.schema.path"
@@ -2826,6 +2828,7 @@ func TestEngineStepWithRepairDispatchText(t *testing.T) {
 		{name: "default", instructions: []string{execute, execute, execute, execute}},
 		{name: "repair keeps work", keepsWork: true, instructions: []string{execute, rewrite, rewrite, execute}},
 		{name: "no files", noFiles: true, instructions: []string{execute, execute, execute, execute}},
+		{name: "repair keeps work without files", keepsWork: true, noFiles: true, instructions: []string{execute, rewrite, rewrite, execute}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &engTestRuntime{execute: func(_ context.Context, call engTestCall) engTestReply {
@@ -2866,7 +2869,7 @@ func TestEngineStepWithRepairDispatchText(t *testing.T) {
 				if got := call.Dispatch.Message; !strings.Contains(got, tc.instructions[i]) || strings.Contains(got, other) {
 					t.Errorf("dispatch %d: %q, want it to open with %q", i+1, got, tc.instructions[i])
 				}
-				const directories, none = "Write evidence files into ", "This contract declares no files: its files is [] and the attempt directory holds nothing but the candidate."
+				const directories, none = "Write evidence files into ", "This contract declares no files: set files to [] and write nothing into this attempt directory except the candidate."
 				if got := call.Dispatch.Message; strings.Contains(got, directories) == tc.noFiles || strings.Contains(got, none) != tc.noFiles {
 					t.Errorf("dispatch %d: %q, want the no-files instruction %v", i+1, got, tc.noFiles)
 				}
