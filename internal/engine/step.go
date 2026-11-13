@@ -14,6 +14,10 @@ import (
 // feedbackDispatchNote marks a dispatch whose request carries feedback.
 const feedbackDispatchNote = "This request carries request.feedback: read request.feedback.message before starting; it says why this attempt runs or what it must address."
 
+// noFilesInstruction replaces the evidence and artifact directory instruction
+// in the dispatches of a NoFiles Step.
+const noFilesInstruction = "This contract declares no files: its files is [] and the attempt directory holds nothing but the candidate."
+
 // taskInstruction opens every dispatch's instructions unless a repair of a
 // RepairKeepsWork Step replaces it with repairKeepsWorkInstruction, because
 // redoing such a task would repeat its writes.
@@ -178,7 +182,13 @@ func (s *Scope) step(ctx context.Context, spec StepSpec, repair bool) (result St
 	if repair && spec.RepairKeepsWork {
 		instruction = repairKeepsWorkInstruction
 	}
-	message := fmt.Sprintf("Controller dispatch %s\nRead request JSON: %s\n%s%s output.schema.path, output.envelope.path and resources. Write evidence files into %s and artifact files into %s, creating either directory if absent; each files[] entry pairs a unique id with that file's path relative to the attempt directory. The envelope's data holds the task result. Write the complete envelope with exactly request.identity and output.schema_id to: %s\nWrite only this attempt's candidate; do not modify published inputs.\n", id.DispatchToken, attempt.RequestPath(), feedbackNote, instruction, filepath.Join(attempt.Dir(), "evidence"), filepath.Join(attempt.Dir(), "artifacts"), attempt.CandidatePath())
+	files := fmt.Sprintf("Write evidence files into %s and artifact files into %s, creating either directory if absent; each files[] entry pairs a unique id with that file's path relative to the attempt directory.", filepath.Join(attempt.Dir(), "evidence"), filepath.Join(attempt.Dir(), "artifacts"))
+	if spec.NoFiles {
+		// Live verifiers followed the directory instruction and were refused
+		// for declaring files, although their requirements said none.
+		files = noFilesInstruction
+	}
+	message := fmt.Sprintf("Controller dispatch %s\nRead request JSON: %s\n%s%s output.schema.path, output.envelope.path and resources. %s The envelope's data holds the task result. Write the complete envelope with exactly request.identity and output.schema_id to: %s\nWrite only this attempt's candidate; do not modify published inputs.\n", id.DispatchToken, attempt.RequestPath(), feedbackNote, instruction, files, attempt.CandidatePath())
 	dispatch := runtime.Dispatch{Token: id.DispatchToken, Message: message}
 	if spec.Observe {
 		sink := r.newEntrySink(h.id, id.AttemptID)

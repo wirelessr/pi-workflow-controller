@@ -121,7 +121,7 @@ Gate：各必要 case 的預期行為成立，無 race；實際執行交付 bina
 | 方法／情境 | 必須成立的 gate |
 |---|---|
 | 順序 Ref 交接、不同完成順序的 parallel、schema 修正＋reviewer reject、fresh/reused session、nested retry | 真實 workflow control flow；宣告順序回傳，首次之外的 retry budget 正確，ancestor 未結束前不提前定案 invocation |
-| `StepWithRepair` 的 schema／identity／acceptance repair、不可 repair 的失敗、預算 0／負數／用盡、repair 中取消、repair 無法開始、`RepairKeepsWork` 的派送文字 | 同一 handle 與 `contract-repair-*` 子 scope；repair Feedback 帶診斷並保留原 Refs；未設定 `RepairKeepsWork` 的每個派送都以原「先執行任務」指示開頭，設定者只在 repair 派送改以 repair 指示開頭，首次派送與一般 Step 不變；不建立 Retry activation；不可 repair 的失敗只派送一次；用盡回原始錯誤；被拒的發布仍 committed；identity 不符的 attempt 為 Failed、沒有 Output，repair 的 Feedback 帶 `SourceCode=IdentityMismatch`，診斷逐欄列出收到值並指向應抄的 request 欄位、不含被拒 attempt 的 id |
+| `StepWithRepair` 的 schema／identity／acceptance repair、不可 repair 的失敗、預算 0／負數／用盡、repair 中取消、repair 無法開始、`RepairKeepsWork` 與 `NoFiles` 的派送文字 | 同一 handle 與 `contract-repair-*` 子 scope；repair Feedback 帶診斷並保留原 Refs；未設定 `RepairKeepsWork` 的每個派送都以原「先執行任務」指示開頭，設定者只在 repair 派送改以 repair 指示開頭，首次派送與一般 Step 不變；設定 `NoFiles` 的 Step 每個派送都以不宣告檔案的說明取代 evidence／artifact 目錄指示，triage 的 verifier 派送如此、investigator 派送仍帶目錄指示；不建立 Retry activation；不可 repair 的失敗只派送一次；用盡回原始錯誤；被拒的發布仍 committed；identity 不符的 attempt 為 Failed、沒有 Output，repair 的 Feedback 帶 `SourceCode=IdentityMismatch`，診斷逐欄列出收到值並指向應抄的 request 欄位、不含被拒 attempt 的 id |
 | 重複 names/keys、同 handle lease、Preparing/request/waiting/rejected 等失敗 | Preflight 拒絕不建 attempt；Preparing 起消耗額度，不把未派送次數退還，Busy 不干擾現有 lease |
 | Inputs、feedback refs、Decision、Decode/ReadContract、Retry/Parallel/final Result | 所有入口使用同一 committed resolver；跨 run、偽造 metadata/hash、未提交 published、被改寫來源都拒絕 |
 | Publish 後阻斷 journal 或必要 snapshot | Publish != commit，無 committed Ref，不派送下游，sticky fatal 不能被 callback 吞掉 |

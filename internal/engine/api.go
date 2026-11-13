@@ -68,6 +68,10 @@ type StepSpec struct {
 	// StepWithRepair's repair dispatches then tell the Agent not to add or
 	// repeat any write, only to rewrite the contract. Step ignores it.
 	RepairKeepsWork bool
+	// NoFiles is for a Step whose contract declares no files: its dispatches
+	// say so instead of naming the evidence and artifact directories. The
+	// workflow's acceptance still checks it.
+	NoFiles bool
 }
 
 type StepResult struct {

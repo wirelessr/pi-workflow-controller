@@ -2818,12 +2818,14 @@ func TestEngineStepWithRepairDispatchText(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		keepsWork bool
+		noFiles   bool
 		// instructions opens each dispatch: the first, a schema repair, an
 		// acceptance repair, then a plain Step with feedback.
 		instructions []string
 	}{
 		{name: "default", instructions: []string{execute, execute, execute, execute}},
 		{name: "repair keeps work", keepsWork: true, instructions: []string{execute, rewrite, rewrite, execute}},
+		{name: "no files", noFiles: true, instructions: []string{execute, execute, execute, execute}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &engTestRuntime{execute: func(_ context.Context, call engTestCall) engTestReply {
@@ -2839,7 +2841,7 @@ func TestEngineStepWithRepairDispatchText(t *testing.T) {
 					return Result{}, err
 				}
 				rejections := 0
-				spec := StepSpec{Key: "work", Session: h, Prompt: "task", Output: contract.Spec{SchemaID: engTestSchema}, RepairKeepsWork: tc.keepsWork}
+				spec := StepSpec{Key: "work", Session: h, Prompt: "task", Output: contract.Spec{SchemaID: engTestSchema}, RepairKeepsWork: tc.keepsWork, NoFiles: tc.noFiles}
 				_, stepErr = run.Root().StepWithRepair(ctx, spec, 2, func(context.Context, contract.Ref) error {
 					if rejections++; rejections == 1 {
 						return errors.New("violation")
@@ -2863,6 +2865,10 @@ func TestEngineStepWithRepairDispatchText(t *testing.T) {
 				other := map[string]string{execute: rewrite, rewrite: execute}[tc.instructions[i]]
 				if got := call.Dispatch.Message; !strings.Contains(got, tc.instructions[i]) || strings.Contains(got, other) {
 					t.Errorf("dispatch %d: %q, want it to open with %q", i+1, got, tc.instructions[i])
+				}
+				const directories, none = "Write evidence files into ", "This contract declares no files: its files is [] and the attempt directory holds nothing but the candidate."
+				if got := call.Dispatch.Message; strings.Contains(got, directories) == tc.noFiles || strings.Contains(got, none) != tc.noFiles {
+					t.Errorf("dispatch %d: %q, want the no-files instruction %v", i+1, got, tc.noFiles)
 				}
 			}
 		})

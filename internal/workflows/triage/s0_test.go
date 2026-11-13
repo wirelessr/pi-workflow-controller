@@ -42,6 +42,8 @@ type agentCall struct {
 	Request   contract.Request
 	Task      task
 	Candidate string
+	// Message is the dispatch text.
+	Message string
 }
 
 // writeFiles writes evidence files into the attempt and returns their entries.
@@ -186,7 +188,7 @@ func runHarness(t *testing.T, prompt string, execute engine.Workflow, agent func
 			mu.Lock()
 			roles = append(roles, tk.Role)
 			mu.Unlock()
-			ack := agent(t, agentCall{Role: tk.Role, Request: req, Task: tk, Candidate: e.Message.CandidatePath})
+			ack := agent(t, agentCall{Role: tk.Role, Request: req, Task: tk, Candidate: e.Message.CandidatePath, Message: e.Message.Message})
 			if ack == "" {
 				ack = "settle"
 			}

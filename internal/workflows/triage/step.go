@@ -39,6 +39,9 @@ type TaskStep struct {
 	// calls and receives each attempt's observation, failed ones included,
 	// in dispatch order once the Step's repairs end.
 	Observed func(attemptID string, o *engine.Observation)
+	// NoFiles marks a contract that declares no files; see
+	// engine.StepSpec.NoFiles.
+	NoFiles bool
 }
 
 // repairBudget is how many contract repairs one Step gets on its session:
@@ -100,7 +103,7 @@ func (ts TaskSession) Run(ctx context.Context, r *engine.Run, t TaskStep) (engin
 	if err != nil {
 		return engine.StepResult{}, err
 	}
-	spec := engine.StepSpec{Key: t.Key, Session: h, Prompt: string(prompt), Inputs: t.Inputs, Feedback: t.Feedback, Output: contract.Spec{SchemaID: t.Schema}, Timeout: t.Timeout, Observe: t.Observed != nil}
+	spec := engine.StepSpec{Key: t.Key, Session: h, Prompt: string(prompt), Inputs: t.Inputs, Feedback: t.Feedback, Output: contract.Spec{SchemaID: t.Schema}, Timeout: t.Timeout, Observe: t.Observed != nil, NoFiles: t.NoFiles}
 	attempts, err := t.Scope.StepWithRepair(ctx, spec, repairBudget, t.Validate)
 	var out engine.StepResult
 	var lastPublished contract.Ref

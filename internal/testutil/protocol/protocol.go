@@ -29,7 +29,10 @@ type Control struct {
 	SessionID     string
 	RequestPath   string
 	CandidatePath string
-	Data          json.RawMessage `json:",omitempty"`
+	// Message is a prompt's dispatch text, for tests of what it tells the
+	// Agent.
+	Message string          `json:",omitempty"`
+	Data    json.RawMessage `json:",omitempty"`
 }
 
 // SourceWorkspace checks plumbing only, not an Agent filesystem sandbox.
@@ -240,7 +243,7 @@ func Serve() error {
 			if err != nil {
 				return err
 			}
-			if err = controlOut.Encode(Control{Type: "prompt", RequestPath: requestPath, CandidatePath: candidatePath}); err != nil {
+			if err = controlOut.Encode(Control{Type: "prompt", RequestPath: requestPath, CandidatePath: candidatePath, Message: command.Message}); err != nil {
 				return err
 			}
 			ack := <-acks

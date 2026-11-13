@@ -742,6 +742,9 @@ func TestRounds(t *testing.T) {
 		{name: "verifiers see only the claim and its evidence and a basis outside it is repaired", verdict: allSupported, stewards: "T1 T2a T2b",
 			roles: "intake facts fact-check investigator",
 			agent: func(t *testing.T, c investigatorCall) string {
+				if !strings.Contains(c.Message, "Write evidence files into") || strings.Contains(c.Message, "This contract declares no files") {
+					t.Errorf("investigator dispatch %q, want the file directories", c.Message)
+				}
 				c.round0(t, func(v *Round) {
 					v.Status, v.FactsUpdate, v.Identity = "candidate", []Fact{}, nil
 					v.DeployedBuilds, v.Candidate = deployedBuild(), codeClaim("b1", nil)
@@ -752,6 +755,9 @@ func TestRounds(t *testing.T) {
 				claim := decodeRef[Claim](t, nil, call.citable("claim"))
 				if labels := labelsOf(call.Task); labels != "claim,allowed evidence owner" || len(call.Request.Inputs) != 2 || call.Request.Inputs[0] != call.citable("claim") || call.Request.Inputs[1] != claim.Round || len(call.Task.Skills) != 0 || !strings.Contains(call.Task.Requirements, verifierRequirements) {
 					t.Errorf("verifier sees %s, inputs %v, skills %v; want only the claim and its round", labels, call.Request.Inputs, call.Task.Skills)
+				}
+				if !strings.Contains(call.Message, "This contract declares no files") || strings.Contains(call.Message, "Write evidence files into") {
+					t.Errorf("verifier dispatch %q, want the no-files instruction instead of the file directories", call.Message)
 				}
 				if *claim.Candidate.CodeRefs[0].Evidence[0].Ref != claim.Round {
 					t.Errorf("code excerpt not cited through the round: %+v", claim.Candidate.CodeRefs[0])
