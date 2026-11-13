@@ -578,6 +578,28 @@ func TestStoreCandidateValidation(t *testing.T) {
 	}
 }
 
+// An identity mismatch names each differing meta field with the value
+// received and the value expected, and only those fields.
+func TestStoreIdentityMismatchDiagnostic(t *testing.T) {
+	s := storeTestNew(t, Limits{})
+	a, id := storeTestAttempt(t, s, "")
+	var v map[string]any
+	if err := json.Unmarshal(storeTestCandidate(t, id), &v); err != nil {
+		t.Fatal(err)
+	}
+	meta := v["meta"].(map[string]any)
+	meta["attempt_id"] = "0001-" + id.AttemptID
+	meta["schema_id"] = "other.output.v1"
+	storeTestWrite(t, a.CandidatePath(), storeTestJSON(t, v))
+	_, err := a.Stage(context.Background(), Spec{SchemaID: storeTestSchemaID})
+	storeTestCode(t, err, IdentityMismatch)
+	want := fmt.Sprintf("contract identity/schema differs from request: meta.attempt_id is %q, want %q; meta.schema_id is %q, want %q",
+		"0001-"+id.AttemptID, id.AttemptID, "other.output.v1", storeTestSchemaID)
+	if got := err.(*Error).Message; got != want {
+		t.Fatalf("message = %q, want %q", got, want)
+	}
+}
+
 func TestStoreRejectsNonregularCandidates(t *testing.T) {
 	for _, kind := range []string{"directory", "FIFO", "symlink inside", "symlink outside"} {
 		t.Run(kind, func(t *testing.T) {

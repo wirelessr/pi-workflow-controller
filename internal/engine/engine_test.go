@@ -42,7 +42,10 @@ type engTestReply struct {
 	Data    engTestData
 	Raw     []byte
 	Missing bool
-	Err     error
+	// WrongAttemptID writes the candidate meta with this attempt id instead of
+	// the request's.
+	WrongAttemptID string
+	Err            error
 	// Entries are delivered to the dispatch's entry sink, if it has one,
 	// before the reply, as the runtime delivers session entries.
 	Entries []runtime.EntryBatch
@@ -164,6 +167,10 @@ func (s *engTestSession) Execute(ctx context.Context, dispatch runtime.Dispatch)
 	if !reply.Missing {
 		raw := reply.Raw
 		if raw == nil {
+			identity := request.Identity
+			if reply.WrongAttemptID != "" {
+				identity.AttemptID = reply.WrongAttemptID
+			}
 			var err error
 			raw, err = json.Marshal(struct {
 				Meta struct {
@@ -177,7 +184,7 @@ func (s *engTestSession) Execute(ctx context.Context, dispatch runtime.Dispatch)
 				contract.Identity
 				Version  int    `json:"version"`
 				SchemaID string `json:"schema_id"`
-			}{request.Identity, 1, request.Output.SchemaID}, Data: reply.Data, Files: []any{}})
+			}{identity, 1, request.Output.SchemaID}, Data: reply.Data, Files: []any{}})
 			if err != nil {
 				return runtime.Execution{}, err
 			}
@@ -2625,6 +2632,14 @@ func TestEngineStepWithRepair(t *testing.T) {
 			return engTestReply{Data: engTestData{Value: "valid"}}
 		}
 	}
+	wrongIdentityUntil := func(last int) func(int) engTestReply {
+		return func(n int) engTestReply {
+			if n <= last {
+				return engTestReply{Data: engTestData{Value: "valid"}, WrongAttemptID: strings.Repeat("f", 32)}
+			}
+			return engTestReply{Data: engTestData{Value: "valid"}}
+		}
+	}
 	rejectUntil := func(last int) func(int) error {
 		return func(n int) error {
 			if n <= last {
@@ -2646,6 +2661,8 @@ func TestEngineStepWithRepair(t *testing.T) {
 		is    error
 	}{
 		{name: "a schema failure is repaired with the original refs", repairs: 2, reply: invalidUntil(1), kinds: []string{"schema"}},
+		{name: "an identity mismatch is repaired", repairs: 2, reply: wrongIdentityUntil(1), kinds: []string{"identity"}},
+		{name: "identity repairs exhaust with the last IdentityMismatch", repairs: 2, reply: wrongIdentityUntil(3), kinds: []string{"identity", "identity"}, code: IdentityMismatch},
 		{name: "acceptance rejects twice and the third is accepted", repairs: 2, reply: valid, validate: rejectUntil(2), kinds: []string{"acceptance", "acceptance"}},
 		{name: "schema repairs exhaust with the last ContractInvalid", repairs: 2, reply: invalidUntil(3), kinds: []string{"schema", "schema"}, code: ContractInvalid},
 		{name: "acceptance repairs exhaust with validate's own error", repairs: 2, reply: valid, validate: func(int) error { return rejected }, kinds: []string{"acceptance", "acceptance"}, is: rejected},
@@ -2752,10 +2769,14 @@ func TestEngineStepWithRepair(t *testing.T) {
 				kind := tc.kinds[i-1]
 				var diagnostic string
 				switch kind {
-				case "schema":
+				case "schema", "identity":
+					code := ContractInvalid
+					if kind == "identity" {
+						code = IdentityMismatch
+					}
 					failure := report.Snapshot.Attempts[prev].Failure
-					if failure == nil || failure.Code != ContractInvalid || fb.SourceAttemptID != prev || fb.SourceCode != string(ContractInvalid) {
-						t.Errorf("dispatch %d schema feedback = %+v after %+v", i+1, fb, failure)
+					if failure == nil || failure.Code != code || fb.SourceAttemptID != prev || fb.SourceCode != string(code) {
+						t.Errorf("dispatch %d %s feedback = %+v after %+v", i+1, kind, fb, failure)
 					}
 					if failure != nil {
 						diagnostic = failure.Message

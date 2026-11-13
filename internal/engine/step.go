@@ -274,12 +274,14 @@ func repairMessage(stage, violations string) string {
 }
 
 // StepWithRepair runs spec and, up to repairs times, dispatches it again on
-// the same handle after a ContractInvalid failure or a validate error. A
+// the same handle after a ContractInvalid or IdentityMismatch failure or a
+// validate error. A contract with a mismatched identity is never accepted: its
+// repair is a new attempt with its own identity, checked again by the Store. A
 // repair's Feedback message carries the diagnostic and its Refs are those of
 // spec.Feedback; with spec.RepairKeepsWork its dispatch tells the Agent to
 // only rewrite the contract, without adding or repeating writes. Every other failure returns
-// as is; exhausted repairs return the last ContractInvalid failure or validate
-// error unwrapped. Repairs are not a Retry, and every attempt counts against
+// as is; exhausted repairs return the last ContractInvalid or IdentityMismatch
+// failure or validate error unwrapped. Repairs are not a Retry, and every attempt counts against
 // the run attempt limit.
 //
 // Repair n runs in a child scope of s named "contract-repair-<key>" for n = 1
@@ -336,10 +338,14 @@ func (s *Scope) StepWithRepair(ctx context.Context, spec StepSpec, repairs int, 
 			feedback = &Feedback{Message: repairMessage("acceptance", ve.Error())}
 		} else {
 			var failure *Failure
-			if !errors.As(err, &failure) || failure.Code != ContractInvalid || n >= repairs {
+			if !errors.As(err, &failure) || (failure.Code != ContractInvalid && failure.Code != IdentityMismatch) || n >= repairs {
 				return results, err
 			}
-			feedback = &Feedback{Message: repairMessage("schema", failure.Message), SourceAttemptID: failure.AttemptID, SourceCode: string(failure.Code)}
+			stage := "schema"
+			if failure.Code == IdentityMismatch {
+				stage = "identity"
+			}
+			feedback = &Feedback{Message: repairMessage(stage, failure.Message), SourceAttemptID: failure.AttemptID, SourceCode: string(failure.Code)}
 		}
 		if spec.Feedback != nil {
 			feedback.Refs = spec.Feedback.Refs

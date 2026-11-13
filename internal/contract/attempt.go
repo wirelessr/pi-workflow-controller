@@ -206,7 +206,7 @@ func (s *Store) validate(raw []byte, a *Attempt) (*envelope, error) {
 		return nil, failure(ContractInvalid, "envelope", a.id, err)
 	}
 	if env.Meta.Identity != a.id || env.Meta.SchemaID != a.schemaID {
-		return nil, failure(IdentityMismatch, "identity", a.id, errors.New("contract identity/schema differs from request"))
+		return nil, failure(IdentityMismatch, "identity", a.id, identityMismatch(env.Meta.Identity, env.Meta.SchemaID, a.id, a.schemaID))
 	}
 	if err = s.registry.validateData(a.schemaID, value.(map[string]any)["data"]); err != nil {
 		return nil, failure(ContractInvalid, "schema", a.id, err)
@@ -231,6 +231,24 @@ func (s *Store) validate(raw []byte, a *Attempt) (*envelope, error) {
 		}
 	}
 	return &env, nil
+}
+
+// identityMismatch names each meta field of the envelope that differs from
+// the request, with the value received and the value expected.
+func identityMismatch(got Identity, gotSchema string, want Identity, wantSchema string) error {
+	var diffs []string
+	for _, f := range []struct{ name, got, want string }{
+		{"run_id", got.RunID, want.RunID},
+		{"invocation_id", got.InvocationID, want.InvocationID},
+		{"attempt_id", got.AttemptID, want.AttemptID},
+		{"dispatch_token", got.DispatchToken, want.DispatchToken},
+		{"schema_id", gotSchema, wantSchema},
+	} {
+		if f.got != f.want {
+			diffs = append(diffs, fmt.Sprintf("meta.%s is %q, want %q", f.name, f.got, f.want))
+		}
+	}
+	return errors.New("contract identity/schema differs from request: " + strings.Join(diffs, "; "))
 }
 
 func (a *Attempt) Publish(ctx context.Context, staged *Staged) (Ref, error) {
