@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,12 +52,13 @@ var errPullRequestNotOpen = errors.New("code-change: the pull request is no long
 // convergeReport is the part of a converge contract the Controller checks
 // and the summary copies.
 type convergeReport struct {
-	Snapshot      contract.Ref   `json:"snapshot"`
-	Converged     bool           `json:"converged"`
-	Unconverged   []string       `json:"unconverged"`
-	Items         []itemClaim    `json:"items"`
-	ThreadActions []threadAction `json:"thread_actions"`
-	CIReruns      []ciRerun      `json:"ci_reruns"`
+	Snapshot       contract.Ref   `json:"snapshot"`
+	Converged      bool           `json:"converged"`
+	Unconverged    []string       `json:"unconverged"`
+	Items          []itemClaim    `json:"items"`
+	ThreadActions  []threadAction `json:"thread_actions"`
+	CIReruns       []ciRerun      `json:"ci_reruns"`
+	CommentReplies []commentReply `json:"comment_replies"`
 	pushed
 }
 
@@ -78,6 +80,13 @@ type threadAction struct {
 // ciRerun is the receipt of a rerun of a GitHub Actions workflow run.
 type ciRerun struct {
 	RunID int64 `json:"run_id"`
+}
+
+// commentReply is the receipt of a top-level comment of the pull request
+// that replies to others of its top-level comments: REST issue comment IDs.
+type commentReply struct {
+	CommentID int64   `json:"comment_id"`
+	RepliesTo []int64 `json:"replies_to"`
 }
 
 // admitted reports whether the run deadline, the run's creation plus its
@@ -121,20 +130,21 @@ func reportKey(accepted int) string {
 // shows the pull request closed or merged; expands the private skill afresh
 // from memory for the round; runs the converge Step with runPush in a fresh
 // session with CWD piCWD, its last verified head the previous report's, its
-// thread and rerun receipts checked with verifyWrites after the push
-// receipt; and reads the pull request once more, which ends the rounds with
-// errPullRequestNotOpen too when it shows the pull request closed or merged.
+// thread, rerun and top-level comment reply receipts checked with
+// verifyWrites after the push receipt; and reads the pull request once
+// more, which ends the rounds with errPullRequestNotOpen too when it shows
+// the pull request closed or merged.
 //
 // The rounds converge when a round claimed convergence, pushed nothing,
-// reported no thread action and no rerun, and that read shows its
-// snapshot's head, with a nil error. Rounds that run out end with
-// errNotConverged. Any other failure returns the original error and no
-// further round runs. From a round's dispatch through the HEAD read after
-// its session's close, a failed Step, receipt or identity check included,
-// the round's external objects record is the result's Final while the run
-// can still act. Before the dispatch, and once the session is closed and
-// the receipt verified, it is the last accepted report: the fix contract
-// before any round's, the round's own after its receipt.
+// reported no thread action, no top-level comment reply and no rerun, and
+// that read shows its snapshot's head, with a nil error. Rounds that run
+// out end with errNotConverged. Any other failure returns the original
+// error and no further round runs. From a round's dispatch through the HEAD
+// read after its session's close, a failed Step, receipt or identity check
+// included, the round's external objects record is the result's Final
+// while the run can still act. Before the dispatch, and once the session is
+// closed and the receipt verified, it is the last accepted report: the fix
+// contract before any round's, the round's own after its receipt.
 func (p prepared) converge(ctx context.Context, r *engine.Run, piCWD string, prior engine.Result, sp statePolicy, rp roundPolicy) roundsEnd {
 	outputs := prior.Outputs
 	var d roundsEnd
@@ -158,7 +168,7 @@ func (p prepared) converge(ctx context.Context, r *engine.Run, piCWD string, pri
 	for n := 1; ; n++ {
 		if n > rp.rounds {
 			return stop("rounds-exhausted", p.unconverged(ctx, r, outputs, reportKey(d.accepted), snapshot, "rounds-exhausted",
-				fmt.Sprintf("No round claimed convergence without a push, a thread reply or resolution or a rerun, on an unchanged head, within the round cap of %d", rp.rounds),
+				fmt.Sprintf("No round claimed convergence without a push, a thread reply or resolution, a top-level comment reply or a rerun, on an unchanged head, within the round cap of %d", rp.rounds),
 				fmt.Errorf("%w within the round cap of %d", errNotConverged, rp.rounds)))
 		}
 		if !admitted(r.Snapshot(), rp.now(), rp.reserve) {
@@ -208,8 +218,8 @@ func (p prepared) converge(ctx context.Context, r *engine.Run, piCWD string, pri
 		if after.State != "open" || *after.Merged {
 			return stop("pull_request_not_open", fmt.Errorf("%w: the read after %s shows state %q merged %t", errPullRequestNotOpen, name, after.State, *after.Merged))
 		}
-		if v.Converged && v.Correction == "no_change" && len(v.ThreadActions) == 0 && len(v.CIReruns) == 0 && after.Head.SHA == state.PullRequest.HeadSHA {
-			if err := r.Root().Decision(ctx, "converged", fmt.Sprintf("Round %d claimed convergence without a push, a thread reply or resolution or a rerun, and the pull request head read after its session closed, %s, is its snapshot's head", n, after.Head.SHA), []contract.Ref{outputs[reportKey(n)], snap}); err != nil {
+		if v.Converged && v.Correction == "no_change" && len(v.ThreadActions) == 0 && len(v.CIReruns) == 0 && len(v.CommentReplies) == 0 && after.Head.SHA == state.PullRequest.HeadSHA {
+			if err := r.Root().Decision(ctx, "converged", fmt.Sprintf("Round %d claimed convergence without a push, a thread reply or resolution, a top-level comment reply or a rerun, and the pull request head read after its session closed, %s, is its snapshot's head", n, after.Head.SHA), []contract.Ref{outputs[reportKey(n)], snap}); err != nil {
 				return stop("round_failed", err)
 			}
 			return stop("converged", nil)
@@ -279,18 +289,22 @@ const reviewThreadQuery = `query($id: ID!) {
   }
 }`
 
-// verifyWrites checks once, with read-only reads, the thread actions and
-// reruns that v, a round's accepted contract, reports, in contract order.
-// Each thread, read once however many actions name it, must be a review
-// thread of the record's pull request in the target repository; a reply's
-// comment must be among its last 100 comments and a resolved thread must
-// show as resolved. Each run must be a GitHub Actions run whose head is the
-// record's branch of the target repository, past its first attempt. A
-// mismatch wraps errReceipt; a failed or unreadable read, or a reply that is
-// not among the last 100 comments of a thread with more, errUnverifiable;
-// neither is repaired or retried. A confirmed receipt shows that the state
-// exists, not that this round made it: who wrote a reply, resolved a thread
-// or started an attempt, when, and what any of them is worth, is not checked.
+// verifyWrites checks once, with read-only reads, the thread actions,
+// reruns and top-level comment replies that v, a round's accepted contract,
+// reports, in contract order. Each thread, read once however many actions
+// name it, must be a review thread of the record's pull request in the
+// target repository; a reply's comment must be among its last 100 comments
+// and a resolved thread must show as resolved. Each run must be a GitHub
+// Actions run whose head is the record's branch of the target repository,
+// past its first attempt. Each top-level reply and each comment it replies
+// to, read once however many times the contract names it, must be an issue
+// comment of the record's pull request in the target repository. A
+// mismatch wraps errReceipt; a failed or unreadable read, a 404 included,
+// or a reply that is not among the last 100 comments of a thread with
+// more, errUnverifiable; neither is repaired or retried. A confirmed
+// receipt shows that the state exists, not that this round made it: who
+// wrote a reply, resolved a thread or started an attempt, when, and what
+// any of them is worth, is not checked.
 func (p prepared) verifyWrites(ctx context.Context, dir string, pr pullRequestRecord, v convergeReport) error {
 	threads := map[string]reviewThread{}
 	for i, a := range v.ThreadActions {
@@ -311,7 +325,68 @@ func (p prepared) verifyWrites(ctx context.Context, dir string, pr pullRequestRe
 			return err
 		}
 	}
+	comments := map[int64]issueComment{}
+	confirm := func(field string, id int64) error {
+		c, ok := comments[id]
+		if !ok {
+			var err error
+			if c, err = readIssueComment(ctx, dir, p.repository, id); err != nil {
+				return fmt.Errorf("%w: %s: got %d: %w", errUnverifiable, field, id, err)
+			}
+			comments[id] = c
+		}
+		if !strings.EqualFold(c.repository, p.repository) || c.number != pr.Number {
+			return fmt.Errorf("%w: %s: got %d, a comment of issue or pull request %d in %q; want an issue comment of pull request %d in %s", errReceipt, field, id, c.number, c.repository, pr.Number, p.repository)
+		}
+		return nil
+	}
+	for i, reply := range v.CommentReplies {
+		if err := confirm(fmt.Sprintf("comment_replies[%d].comment_id", i), reply.CommentID); err != nil {
+			return err
+		}
+		for j, id := range reply.RepliesTo {
+			if err := confirm(fmt.Sprintf("comment_replies[%d].replies_to[%d]", i, j), id); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// issueComment is where an issue comment's issue_url places it: the
+// repository and the number of its issue or pull request.
+type issueComment struct {
+	repository string
+	number     int
+}
+
+// issueAPI prefixes the issue_url of an issue comment on github.com, the
+// host every GitHub read uses.
+const issueAPI = "https://api.github.com/repos/"
+
+// readIssueComment reads issue comment id with a REST GET in repository.
+// The request path scopes the ID to repository; issue_url still names the
+// repository and number that GitHub places the comment under.
+func readIssueComment(ctx context.Context, dir, repository string, id int64) (issueComment, error) {
+	raw, err := runtime.GitHubGET(ctx, dir, fmt.Sprintf("repos/%s/issues/comments/%d", repository, id), false)
+	if err != nil {
+		return issueComment{}, fmt.Errorf("issue comment GET: %w", err)
+	}
+	var c struct {
+		IssueURL *string `json:"issue_url"`
+	}
+	if json.Unmarshal(raw, &c) != nil || c.IssueURL == nil {
+		return issueComment{}, errors.New("issue comment GET: not a comment with an issue_url")
+	}
+	if rest, ok := strings.CutPrefix(*c.IssueURL, issueAPI); ok {
+		parts := strings.Split(rest, "/")
+		if len(parts) == 4 && parts[0] != "" && parts[1] != "" && parts[2] == "issues" {
+			if n, err := strconv.Atoi(parts[3]); err == nil && n > 0 && strconv.Itoa(n) == parts[3] {
+				return issueComment{repository: parts[0] + "/" + parts[1], number: n}, nil
+			}
+		}
+	}
+	return issueComment{}, fmt.Errorf("issue comment GET: issue_url %q; want %s<owner>/<name>/issues/<number>", *c.IssueURL, issueAPI)
 }
 
 // reviewThread is a node as reviewThreadQuery reads it; the other fields

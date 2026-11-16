@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pi-workflow-controller.local/schemas/code-change/converge.v1.json",
-  "description": "A converger's report of one round on the pull request: what it checked and found, whether it claims convergence, the change and the head it pushed, and the thread replies, resolutions and reruns it made",
+  "description": "A converger's report of one round on the pull request: what it checked and found, whether it claims convergence, the change and the head it pushed, and the thread replies, resolutions, issue comment replies and reruns it made",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -11,7 +11,8 @@
     "correction",
     "head",
     "thread_actions",
-    "ci_reruns"
+    "ci_reruns",
+    "comment_replies"
   ],
   "properties": {
     "snapshot": {
@@ -75,6 +76,13 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/ciRerun"
+      }
+    },
+    "comment_replies": {
+      "description": "Every issue comment of the pull request, a comment in its conversation, that this round created as a reply to existing issue comments of the same pull request, one entry each; empty when there was none",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/commentReply"
       }
     }
   },
@@ -224,6 +232,30 @@
           "description": "The ID of the GitHub Actions workflow run, not of one of its check runs or jobs",
           "type": "integer",
           "minimum": 1
+        }
+      }
+    },
+    "commentReply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "comment_id",
+        "replies_to"
+      ],
+      "properties": {
+        "comment_id": {
+          "description": "The REST ID of the new issue comment of the pull request, a comment in its conversation, not of a review, a review comment or the description",
+          "type": "integer",
+          "minimum": 1
+        },
+        "replies_to": {
+          "description": "The REST IDs of the existing issue comments of the pull request that it replies to, comments in its conversation, not of a review, a review comment or the description",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       }
     },

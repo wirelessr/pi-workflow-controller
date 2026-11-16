@@ -28,7 +28,7 @@ import (
 // real subprocess that accepts only a REST GET of the target repository, its
 // pull requests, a compare, its branch refs, a branch's pull request list or,
 // paginated, a pull request's comments, which are always none, a commit's
-// check runs or combined status, a GitHub Actions run, and the review
+// check runs or combined status, a GitHub Actions run, an issue comment, and the review
 // threads GraphQL query of pull request 1 and the review thread query of a
 // node. Pull requests
 // are the records the fake Agent wrote under prs/, with the base and head SHAs
@@ -52,7 +52,8 @@ import (
 // gh-block. The review thread query of a node ID answers the node in
 // thread-<ID>.json, the ID path-escaped, and fails like GitHub's error for
 // a node it cannot resolve without it; gh-body-thread replaces its body. A
-// GitHub Actions run GET answers run-<ID>.json and fails without it.
+// GitHub Actions run GET answers run-<ID>.json and fails without it, and an
+// issue comment GET answers issue-comment-<ID>.json and fails without it.
 func TestGHHelper(t *testing.T) {
 	dir := os.Getenv("PWC_CC_GH")
 	if dir == "" {
@@ -150,8 +151,8 @@ func TestGHHelper(t *testing.T) {
 	switch kind {
 	case "comments":
 		out = []any{[]any{}}
-	case "run":
-		raw, err := os.ReadFile(filepath.Join(dir, "run-"+arg+".json"))
+	case "run", "issue-comment":
+		raw, err := os.ReadFile(filepath.Join(dir, kind+"-"+arg+".json"))
 		if err != nil {
 			os.Exit(1)
 		}
@@ -363,6 +364,8 @@ func ghKind(endpoint string) (string, string) {
 		return "statuses", strings.TrimSuffix(strings.TrimPrefix(rest, "/commits/"), "/status?per_page=100")
 	case strings.HasPrefix(rest, "/actions/runs/"):
 		return "run", strings.TrimPrefix(rest, "/actions/runs/")
+	case strings.HasPrefix(rest, "/issues/comments/"):
+		return "issue-comment", strings.TrimPrefix(rest, "/issues/comments/")
 	case strings.HasPrefix(rest, "/compare/"):
 		return "compare", strings.TrimPrefix(rest, "/compare/")
 	case strings.HasPrefix(rest, "/git/matching-refs/heads/"):
