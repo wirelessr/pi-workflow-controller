@@ -251,7 +251,7 @@ func TestConvergeTermination(t *testing.T) {
 					t.Fatalf("round %d session closed at %v, started at %d", k, at, started[attempt.HandleID])
 				}
 				previous = attempt.HandleID
-				if !reflect.DeepEqual(c.task, task{Role: "converger", Requirements: baselineRequirements + "\n\n" + convergeRequirements, Worktree: a.worktree(), Skills: []string{roundSkill(a, k)}, Round: k}) {
+				if !reflect.DeepEqual(c.task, task{Role: "converger", Requirements: baselineRequirements + "\n\n" + fmt.Sprintf(convergeRequirements, convergeTimeout), Worktree: a.worktree(), Skills: []string{roundSkill(a, k)}, Round: k}) {
 					t.Fatalf("round %d task %+v", k, c.task)
 				}
 				previousReport := "fix"
@@ -1236,4 +1236,14 @@ func TestConvergeLimits(t *testing.T) {
 		}
 	}
 	a.requireExitsConfirmed(t)
+}
+
+// TestConvergeRequirementsStateTimeLimit pins the round's time limit the
+// converger reads to the converge Step's timeout: a converger that did not
+// know its limit spent its round on unbounded commands.
+func TestConvergeRequirementsStateTimeLimit(t *testing.T) {
+	got := fmt.Sprintf(convergeRequirements, convergeTimeout)
+	if strings.Contains(got, "%!") || !strings.Contains(got, "time limit of 30m0s from its dispatch") {
+		t.Fatalf("converge requirements do not state the 30m0s limit once: %q", got)
+	}
 }

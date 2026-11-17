@@ -197,7 +197,7 @@ func (p prepared) converge(ctx context.Context, r *engine.Run, piCWD string, pri
 		if err != nil {
 			return stop("round_failed", err)
 		}
-		prompt, err := json.Marshal(task{Role: "converger", Requirements: baselineRequirements + "\n\n" + convergeRequirements, Worktree: p.worktree.repo.Worktree(), Skills: []string{skill}, Round: n})
+		prompt, err := json.Marshal(task{Role: "converger", Requirements: baselineRequirements + "\n\n" + fmt.Sprintf(convergeRequirements, convergeTimeout), Worktree: p.worktree.repo.Worktree(), Skills: []string{skill}, Round: n})
 		if err != nil {
 			return stop("round_failed", err)
 		}
