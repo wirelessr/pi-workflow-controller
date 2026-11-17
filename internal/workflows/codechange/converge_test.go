@@ -1238,12 +1238,12 @@ func TestConvergeLimits(t *testing.T) {
 	a.requireExitsConfirmed(t)
 }
 
-// TestConvergeRequirementsStateTimeLimit pins the round's time limit the
-// converger reads to the converge Step's timeout: a converger that did not
-// know its limit spent its round on unbounded commands.
+// TestConvergeRequirementsStateTimeLimit pins the time limit the converger
+// reads to convergeTimeout, formatted without a stray verb: a converger that
+// did not know its limit spent its round on unbounded commands.
 func TestConvergeRequirementsStateTimeLimit(t *testing.T) {
 	got := fmt.Sprintf(convergeRequirements, convergeTimeout)
-	if strings.Contains(got, "%!") || !strings.Contains(got, "time limit of 30m0s from its dispatch") {
-		t.Fatalf("converge requirements do not state the 30m0s limit once: %q", got)
+	if strings.Contains(got, "%!") || strings.Count(got, "30m0s") != 1 || !strings.Contains(got, "time limit of 30m0s from this dispatch") {
+		t.Fatalf("converge requirements do not state the 30m0s limit exactly once: %q", got)
 	}
 }
