@@ -173,7 +173,8 @@ func (w *worktree) cleanup(ctx context.Context) error {
 // floor is the published head, or before any the base. Work is a commit
 // that the floor lacks on HEAD or on any ref but the remote-tracking ones
 // (other branches, tags, including fetched ones, the stash), another
-// worktree of the repository, a submodule's repository, an index entry
+// worktree of the repository, a submodule's repository, under the
+// registration's modules directory or inside the checkout, an index entry
 // marked assume-unchanged or skip-worktree, a change to a tracked file, or
 // an untracked file that is not ignored; the ignore rules are the Agent's to
 // change. A published floor counts only while GitHub still shows it as the
@@ -217,13 +218,29 @@ func (w *worktree) holdsWork(ctx context.Context) (bool, error) {
 			}
 		}
 	}
-	index, err := w.read(ctx, "--work-tree="+w.repo.Worktree(), "ls-files", "-v")
+	index, err := w.read(ctx, "--work-tree="+w.repo.Worktree(), "ls-files", "-v", "-s", "-z")
 	if err != nil {
 		return false, fmt.Errorf("worktree index: %w", err)
 	}
-	for _, line := range strings.Split(index, "\n") {
-		if line != "" && (line[0] == 'S' || ('a' <= line[0] && line[0] <= 'z')) {
+	// Each entry is "<tag> <mode> <object> <stage>\t<path>".
+	for _, entry := range strings.Split(index, "\x00") {
+		if entry == "" {
+			continue
+		}
+		if entry[0] == 'S' || ('a' <= entry[0] && entry[0] <= 'z') {
 			return true, nil
+		}
+		meta, path, ok := strings.Cut(entry, "\t")
+		if fields := strings.Fields(meta); !ok || len(fields) != 4 {
+			return false, fmt.Errorf("worktree index: entry %q", entry)
+		} else if fields[1] != "160000" {
+			continue
+		}
+		// A gitlink whose checkout has a repository may hold its commits.
+		if _, err := os.Lstat(filepath.Join(w.repo.Worktree(), path, ".git")); err == nil {
+			return true, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("worktree submodule %q: %w", path, err)
 		}
 	}
 	status, err := w.read(ctx, "-c", "core.untrackedCache=false", "-c", "core.ignoreStat=false", "--no-optional-locks", "--work-tree="+w.repo.Worktree(),

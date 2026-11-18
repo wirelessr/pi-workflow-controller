@@ -1564,6 +1564,52 @@ func (f *fixture) hostile() string {
 	return path
 }
 
+// A submodule whose repository is inside the checkout, recorded as a gitlink
+// at the floor, is kept while its own commits are the only work: the
+// superproject's reads do not enter it. The floor is set to the commit that
+// added it, standing for a base that already has the submodule.
+func TestEmbeddedSubmoduleKept(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kept bool
+	}{{"with-repository", true}, {"without-repository", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			r, report := f.execute(f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
+				p, err := prepare(ctx, r, in, f.piCWD, f.skills, f.fileSource())
+				if err != nil {
+					return engine.Result{}, err
+				}
+				checkout := p.worktree.repo.Worktree()
+				embedded := filepath.Join(checkout, "embedded")
+				f.gitIn(checkout, "clone", "-q", f.source, embedded)
+				f.gitIn(checkout, "add", "embedded")
+				f.gitIn(checkout, "commit", "-qm", "embedded")
+				p.worktree.base = f.gitIn(checkout, "rev-parse", "HEAD")
+				if tc.kept {
+					f.commit(f.t, embedded, "only in the submodule\n")
+				} else {
+					// An uninitialized submodule: the gitlink without its
+					// repository.
+					if err := os.RemoveAll(embedded); err != nil {
+						return engine.Result{}, err
+					}
+					f.mkdir(embedded)
+				}
+				return engine.Result{Outputs: map[string]contract.Ref{"input": p.input}, Final: &engine.FinalSelection{Output: "input"}}, nil
+			}), prompt)
+			if report.Outcome != engine.Succeeded || len(report.CleanupErrors) != 0 {
+				t.Fatalf("outcome %s %v cleanup %v", report.Outcome, report.Failure, report.CleanupErrors)
+			}
+			if tc.kept {
+				requireKept(t, r)
+			} else {
+				requireRemoved(t, r)
+			}
+		})
+	}
+}
+
 // A worktree the cleanup cannot read is kept, with the read's error reported.
 func TestUnreadableWorktreeKept(t *testing.T) {
 	f := newFixture(t)
