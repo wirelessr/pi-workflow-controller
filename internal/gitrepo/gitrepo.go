@@ -69,7 +69,7 @@ func (r *Repo) Dir() string { return r.dir }
 
 // Worktree is the reserved worktree path. Create the worktree only at this path,
 // so Git registers it under the name checkout; Cleanup removes exactly this
-// path and that registration.
+// path and the repository it is registered in.
 func (r *Repo) Worktree() string { return r.worktree }
 
 // WorktreeGitDir is Git's registration for the reserved worktree.
@@ -151,8 +151,8 @@ func (r *Repo) FetchBranch(ctx context.Context, git Runner, remote, branch, ref 
 	return sha, nil
 }
 
-// Cleanup removes only the originally reserved worktree and its registration.
-// The repository objects and other files under root remain as history.
+// Cleanup removes only the originally reserved worktree and then the bare
+// repository, its registration included. Other files under root remain.
 // Init, AddRemote, FetchPinned and FetchBranch are not synchronized with
 // Cleanup; call it only after every Runner call has joined.
 func (r *Repo) Cleanup(ctx context.Context) error {
@@ -184,15 +184,14 @@ func (r *Repo) Cleanup(ctx context.Context) error {
 			return errors.New("acquisition cleanup ownership mismatch")
 		}
 	}
-	// The fresh bare repo has exactly this reserved worktree name. Rooted
-	// removal neither follows a modified .git link nor prunes other worktrees.
+	// Rooted removal does not follow a modified .git link out of root.
 	if err = root.RemoveAll("checkout"); err != nil {
 		return err
 	}
 	if ctx.Err() != nil {
 		return context.Cause(ctx)
 	}
-	if err = root.RemoveAll("repository.git/worktrees/checkout"); err != nil {
+	if err = root.RemoveAll("repository.git"); err != nil {
 		return err
 	}
 	r.cleaned = true

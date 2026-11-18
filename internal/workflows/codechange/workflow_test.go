@@ -611,6 +611,13 @@ func newFixture(t *testing.T) *fixture {
 	return f
 }
 
+func (f *fixture) mkdir(path string) {
+	f.t.Helper()
+	if err := os.MkdirAll(path, 0700); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
 func (f *fixture) write(path, data string) {
 	f.t.Helper()
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
@@ -1082,12 +1089,17 @@ func (f *fixture) requirePolicy(t *testing.T, repoDir string, extra []string) {
 		t.Fatalf("Controller git calls %q, want the capability check and more", calls)
 	}
 	want := append(controllerPolicy(repoDir), extra...)
+	// The cleanup reads the worktree's registration under the same policy.
+	read := append(append(controllerPolicy(filepath.Join(repoDir, "worktrees", "checkout")), extra...), "--no-lazy-fetch", "--no-replace-objects")
 	for n, call := range calls {
+		i := slices.Index(call.Args, "--no-pager")
 		if n == 0 {
 			if !slices.Equal(call.Args[len(call.Args)-2:], []string{"--no-lazy-fetch", "version"}) || subcommand(call.Args) != "version" {
 				t.Fatalf("first git call %q, want the --no-lazy-fetch capability check", call.Args)
 			}
-		} else if i := slices.Index(call.Args, "--no-pager"); i < 0 || len(call.Args) <= i+len(want) || !reflect.DeepEqual(call.Args[i:i+len(want)], want) || call.Args[i+len(want)] == "-c" {
+		} else if i >= 0 && len(call.Args) > i+len(read) && reflect.DeepEqual(call.Args[i:i+len(read)], read) {
+			continue
+		} else if i < 0 || len(call.Args) <= i+len(want) || !reflect.DeepEqual(call.Args[i:i+len(want)], want) || call.Args[i+len(want)] == "-c" {
 			t.Fatalf("git call %q, want the policy %q then the subcommand", call.Args, want)
 		}
 		for _, env := range []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1"} {
@@ -1107,6 +1119,9 @@ func TestSuccessRecordsInputAndKeepsWorktree(t *testing.T) {
 		if err != nil {
 			return result, err
 		}
+		// An untracked file is work, which keeps the worktree for the
+		// checks below.
+		f.write(filepath.Join(r.Dir(), worktreeDir, "checkout", "untracked.txt"), "work\n")
 		ref := result.Outputs["input"]
 		raw, err := engine.ReadContract(ctx, r, ref)
 		if err != nil {
@@ -1146,6 +1161,7 @@ func TestSuccessRecordsInputAndKeepsWorktree(t *testing.T) {
 			t.Fatalf("attempt: %+v", attempt)
 		}
 	}
+	requireKept(t, r)
 	// Kept: detached at the recorded base, with a normal clone's tracking
 	// configuration.
 	if got := f.gitIn(checkout, "rev-parse", "HEAD"); got != record.Data.BaseSHA {
@@ -1190,8 +1206,10 @@ func TestProductionGitPolicy(t *testing.T) {
 	requireFailure(t, report, commandFailure(report, `git fetch "main": `))
 	repoDir := filepath.Join(r.Dir(), worktreeDir, "repository.git")
 	f.requirePolicy(t, repoDir, nil)
-	if got := f.gitIn(f.dir, "--git-dir="+repoDir, "config", "--get", "remote.origin.url"); got != "https://github.com/owner/repo.git" {
-		t.Fatalf("remote url: %s", got)
+	if !slices.ContainsFunc(f.gitCalls(), func(c gitCall) bool {
+		return slices.Equal(c.Args[len(c.Args)-3:], []string{"config", "remote.origin.url", "https://github.com/owner/repo.git"})
+	}) {
+		t.Fatalf("no remote url https://github.com/owner/repo.git in %q", f.gitCalls())
 	}
 }
 
@@ -1217,16 +1235,26 @@ func TestGlobalGitConfigurationIgnored(t *testing.T) {
 	}
 	f.write(filepath.Join(f.dir, "xdg", "git", "config"), global)
 	f.write(filepath.Join(f.dir, "xdg", "git", "attributes"), "* filter=hostile eol=crlf\n")
-	r, report := f.execute(f.definition(f.prepareOnly), prompt)
+	var checkout []byte
+	r, report := f.execute(f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
+		result, err := f.prepareOnly(ctx, r, in)
+		if err == nil {
+			checkout, err = os.ReadFile(filepath.Join(r.Dir(), worktreeDir, "checkout", "tracked.txt"))
+		}
+		return result, err
+	}), prompt)
 	if report.Outcome != engine.Succeeded {
 		t.Fatalf("outcome %s: %v", report.Outcome, report.Failure)
 	}
+	// Also through the cleanup's status read, which then removes the
+	// worktree holding no work.
 	if _, err := os.Stat(sentinel); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("global hook or filter ran: %v", err)
 	}
-	if raw, err := os.ReadFile(filepath.Join(r.Dir(), worktreeDir, "checkout", "tracked.txt")); err != nil || string(raw) != "base\n" {
-		t.Fatalf("checkout content: %q %v", raw, err)
+	if string(checkout) != "base\n" {
+		t.Fatalf("checkout content: %q", checkout)
 	}
+	requireRemoved(t, r)
 }
 
 // writeAttributes commits files whose checkout bytes a .gitattributes in the
@@ -1257,20 +1285,36 @@ func requireBytes(t *testing.T, dir string, files map[string]string) {
 
 // A .gitattributes in the fetched tree does not change the bytes the
 // Controller checks out: no line ending or encoding conversion and no ident
-// expansion.
+// expansion. Nor does it make the cleanup's status read see a change in
+// those bytes, so the worktree holding no work is removed.
 func TestRepositoryAttributesIgnored(t *testing.T) {
 	f := newFixture(t)
 	files := f.writeAttributes(t, f.source)
 	f.gitIn(f.origin, "fetch", "-q", f.source, "main:main")
-	r, report := f.execute(f.definition(f.prepareOnly), prompt)
-	if report.Outcome != engine.Succeeded {
-		t.Fatalf("outcome %s: %v", report.Outcome, report.Failure)
+	got := map[string]string{}
+	r, report := f.execute(f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
+		result, err := f.prepareOnly(ctx, r, in)
+		for name := range files {
+			if err != nil {
+				break
+			}
+			var raw []byte
+			raw, err = os.ReadFile(filepath.Join(r.Dir(), worktreeDir, "checkout", name))
+			got[name] = string(raw)
+		}
+		return result, err
+	}), prompt)
+	if report.Outcome != engine.Succeeded || len(report.CleanupErrors) != 0 {
+		t.Fatalf("outcome %s: %v cleanup %v", report.Outcome, report.Failure, report.CleanupErrors)
 	}
-	requireBytes(t, filepath.Join(r.Dir(), worktreeDir, "checkout"), files)
+	if !reflect.DeepEqual(got, files) {
+		t.Fatalf("checked out %q, want the committed %q", got, files)
+	}
+	requireRemoved(t, r)
 }
 
 // Before the worktree is registered no Agent has seen it, so a failure
-// removes the partial worktree and keeps the repository history.
+// removes the partial worktree and its repository.
 func TestPartialWorktreeFailureRemovesCheckout(t *testing.T) {
 	for _, tc := range []struct {
 		name, branch, fail, want string
@@ -1301,12 +1345,7 @@ func TestPartialWorktreeFailureRemovesCheckout(t *testing.T) {
 				want = "acquisition process group cleanup failed"
 			}
 			requireFailure(t, report, want)
-			root := filepath.Join(r.Dir(), worktreeDir)
-			requireMissing(t, filepath.Join(root, "checkout"))
-			requireMissing(t, filepath.Join(root, "repository.git", "worktrees", "checkout"))
-			if info, err := os.Stat(filepath.Join(root, "repository.git")); err != nil || !info.IsDir() {
-				t.Fatalf("repository history removed: %v", err)
-			}
+			requireRemoved(t, r)
 			calls := f.gitCalls()
 			if len(calls) == 0 || subcommand(calls[len(calls)-1].Args) != tc.lastCall {
 				t.Fatalf("git stopped after %q, want %s", calls, tc.lastCall)
@@ -1362,6 +1401,15 @@ func TestCleanupRegistrationFailureRemovesCheckout(t *testing.T) {
 	}
 }
 
+// requireRemoved checks the run removed the worktree's checkout and its
+// repository, which held no work the published head or the base lacks.
+func requireRemoved(t *testing.T, r *engine.Run) {
+	t.Helper()
+	root := filepath.Join(r.Dir(), worktreeDir)
+	requireMissing(t, filepath.Join(root, "checkout"))
+	requireMissing(t, filepath.Join(root, "repository.git"))
+}
+
 // requireKept checks the run kept the worktree's checkout and registration.
 func requireKept(t *testing.T, r *engine.Run) {
 	t.Helper()
@@ -1374,65 +1422,119 @@ func requireKept(t *testing.T, r *engine.Run) {
 	}
 }
 
-// After registration the worktree is kept however the run ends, unless the
-// workflow set remove.
-func TestRegisteredWorktreeKeptUnlessRemoveSet(t *testing.T) {
-	t.Run("failure-after-registration", func(t *testing.T) {
-		f := newFixture(t)
-		r, report := f.execute(f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-			// Taking the key makes the input Attach fail after registration.
-			if _, err := r.Root().Attach(ctx, engine.AttachSpec{Key: "input", Output: contract.Spec{SchemaID: InputSchema},
-				Data: inputRecord{Repository: "owner/repo", DefaultBranch: "main", BaseSHA: strings.Repeat("a", 40), Worktree: "/w", DesignDoc: designDocRecord{Path: "p", Resolved: "/p"}}}); err != nil {
-				return engine.Result{}, err
+// After registration a run that did not set remove keeps the worktree and
+// its repository exactly while the worktree may hold work no remote has: a
+// commit past the base, a change to a tracked file, an untracked file that
+// is not ignored, or a repository attributes file the status read does not
+// apply; an ignored file is not work. A filesystem monitor or a filter the
+// Agent configured in the repository never runs. Remove, set on success,
+// removes them with any work, and either way the run's other files stay.
+func TestRegisteredWorktreeKeptWhileItHoldsWork(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// work changes the worktree after prepare, like the Agent.
+		work         func(f *fixture, checkout, repository string)
+		cancel, kept bool
+		remove       bool
+	}{
+		{"no-work", nil, false, false, false},
+		{"no-work-cancelled", nil, true, false, false},
+		{"commit", func(f *fixture, checkout, _ string) { f.commit(f.t, checkout, "unpushed\n") }, false, true, false},
+		{"tracked-change", func(f *fixture, checkout, _ string) {
+			f.write(filepath.Join(checkout, "tracked.txt"), "changed\n")
+		}, false, true, false},
+		{"untracked-file-cancelled", func(f *fixture, checkout, _ string) {
+			f.write(filepath.Join(checkout, "new.txt"), "new\n")
+		}, true, true, false},
+		{"ignored-file", func(f *fixture, checkout, repository string) {
+			f.mkdir(filepath.Join(repository, "info"))
+			f.write(filepath.Join(repository, "info", "exclude"), "build/\n")
+			f.mkdir(filepath.Join(checkout, "build"))
+			f.write(filepath.Join(checkout, "build", "out"), "artifact\n")
+		}, false, false, false},
+		{"repository-attributes", func(f *fixture, _, repository string) {
+			f.mkdir(filepath.Join(repository, "info"))
+			f.write(filepath.Join(repository, "info", "attributes"), "* text\n")
+		}, false, true, false},
+		{"repository-fsmonitor", func(f *fixture, _, repository string) {
+			f.gitIn(f.dir, "--git-dir="+repository, "config", "core.fsmonitor", f.hostile())
+		}, false, false, false},
+		{"repository-filter", func(f *fixture, checkout, repository string) {
+			f.gitIn(f.dir, "--git-dir="+repository, "config", "filter.hostile.clean", f.hostile())
+			f.write(filepath.Join(checkout, ".gitattributes"), "* filter=hostile\n")
+			// The same size, so status has to hash the file to see the change.
+			f.write(filepath.Join(checkout, "tracked.txt"), "BASE\n")
+		}, false, true, false},
+		{"remove-set", func(f *fixture, checkout, _ string) { f.commit(f.t, checkout, "unpushed\n") }, false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			var input contract.Ref
+			r, report := f.execute(f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
+				p, err := prepare(ctx, r, in, f.piCWD, f.skills, f.fileSource())
+				if err != nil {
+					return engine.Result{}, err
+				}
+				input = p.input
+				if tc.work != nil {
+					tc.work(f, p.worktree.repo.Worktree(), p.worktree.repo.Dir())
+				}
+				result := engine.Result{Outputs: map[string]contract.Ref{"input": p.input}, Final: &engine.FinalSelection{Output: "input"}}
+				if tc.cancel {
+					r.Cancel(engine.OriginControllerUser)
+					return result, context.Cause(ctx)
+				}
+				p.worktree.remove.Store(tc.remove)
+				return result, nil
+			}), prompt)
+			want := engine.Succeeded
+			if tc.cancel {
+				want = engine.CancelledState
 			}
-			return f.prepareOnly(ctx, r, in)
-		}), prompt)
-		requireFailure(t, report, "invalid key or schema")
-		if len(report.CleanupErrors) != 0 {
-			t.Fatal(report.CleanupErrors)
-		}
-		requireKept(t, r)
-	})
-	t.Run("cancelled-after-registration", func(t *testing.T) {
-		f := newFixture(t)
-		r, report := f.execute(f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-			result, err := f.prepareOnly(ctx, r, in)
-			if err != nil {
-				return result, err
+			if report.Outcome != want || len(report.CleanupErrors) != 0 {
+				t.Fatalf("outcome %s %v cleanup %v", report.Outcome, report.Failure, report.CleanupErrors)
 			}
-			r.Cancel(engine.OriginControllerUser)
-			return result, context.Cause(ctx)
-		}), prompt)
-		if report.Outcome != engine.CancelledState || len(report.CleanupErrors) != 0 {
-			t.Fatalf("outcome %s cleanup %v", report.Outcome, report.CleanupErrors)
-		}
-		requireKept(t, r)
-	})
-	t.Run("remove-set", func(t *testing.T) {
-		f := newFixture(t)
-		var input contract.Ref
-		r, report := f.execute(f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
-			p, err := prepare(ctx, r, in, f.piCWD, f.skills, f.fileSource())
-			if err != nil {
-				return engine.Result{}, err
+			if tc.kept {
+				requireKept(t, r)
+			} else {
+				requireRemoved(t, r)
 			}
-			p.worktree.remove.Store(true)
-			input = p.input
-			return engine.Result{Outputs: map[string]contract.Ref{"input": p.input}, Final: &engine.FinalSelection{Output: "input"}}, nil
-		}), prompt)
-		if report.Outcome != engine.Succeeded || len(report.CleanupErrors) != 0 {
-			t.Fatalf("outcome %s %v cleanup %v", report.Outcome, report.Failure, report.CleanupErrors)
+			if _, err := os.Stat(input.Path); err != nil {
+				t.Fatalf("input record removed: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(f.dir, "hostile-ran")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("a command from the repository configuration ran: %v", err)
+			}
+		})
+	}
+}
+
+// hostile is a command that records it ran.
+func (f *fixture) hostile() string {
+	f.t.Helper()
+	path := filepath.Join(f.dir, "hostile")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf ran > '"+filepath.Join(f.dir, "hostile-ran")+"'\ncat\n"), 0700); err != nil {
+		f.t.Fatal(err)
+	}
+	return path
+}
+
+// A worktree the cleanup cannot read is kept, with the read's error reported.
+func TestUnreadableWorktreeKept(t *testing.T) {
+	f := newFixture(t)
+	r, report := f.execute(f.definition(func(ctx context.Context, r *engine.Run, in engine.Input) (engine.Result, error) {
+		p, err := prepare(ctx, r, in, f.piCWD, f.skills, f.fileSource())
+		if err != nil {
+			return engine.Result{}, err
 		}
-		root := filepath.Join(r.Dir(), worktreeDir)
-		requireMissing(t, filepath.Join(root, "checkout"))
-		requireMissing(t, filepath.Join(root, "repository.git", "worktrees", "checkout"))
-		if got := f.gitIn(root, "--git-dir="+filepath.Join(root, "repository.git"), "rev-parse", "refs/remotes/origin/main"); got != f.head {
-			t.Fatalf("repository history lost: %s", got)
-		}
-		if _, err := os.Stat(input.Path); err != nil {
-			t.Fatalf("input record removed: %v", err)
-		}
-	})
+		f.write(filepath.Join(f.dir, "git-fail"), "status")
+		return engine.Result{Outputs: map[string]contract.Ref{"input": p.input}, Final: &engine.FinalSelection{Output: "input"}}, nil
+	}), prompt)
+	var failure *engine.Failure
+	if report.Outcome != engine.Succeeded || len(report.CleanupErrors) != 1 || !errors.As(report.CleanupErrors[0], &failure) || failure.Cause == nil || !strings.Contains(failure.Cause.Error(), "worktree kept: worktree status: ") {
+		t.Fatalf("outcome %s cleanup %v, want the worktree kept with the status error", report.Outcome, report.CleanupErrors)
+	}
+	requireKept(t, r)
 }
 
 func waitBlocked(t *testing.T, path string, done <-chan engine.Report) {

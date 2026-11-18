@@ -310,9 +310,9 @@ func (c *Checkout) snapshot(key, extension string, data []byte) error {
 	return nil
 }
 
-// Cleanup removes only the originally reserved worktree and its registration.
-// Public fields are descriptive: changing Worktree never changes deletion scope.
-// The private repository and snapshots remain available as acquisition history.
+// Cleanup removes only the originally reserved worktree and the private
+// repository. Public fields are descriptive: changing Worktree never changes
+// deletion scope. The snapshots remain available as acquisition history.
 func (c *Checkout) Cleanup(ctx context.Context) error {
 	if c.repo == nil {
 		return nil

@@ -42,7 +42,7 @@ Runtime／contract 不依賴 engine／TUI，所有核心 package 不依賴終端
 - **錯誤與資源：** Storage/Journal/run-limit sticky fatal；最外層已分類 boundary、root/collateral provenance、本次 dispatch acceptance 與 fatal ingress latch 必須保留。關閉未確認的 process 不釋 slot；partial startup 仍屬本 run ownership。
 - **收尾：** Outcome 鎖定後立即啟動獨立 cleanup，不等 journal I/O。Resource callback 等 workflow join/Pi exit，acquisition/註冊失敗仍由 caller 清理。所有 cleanup/finalization/close errors 可見，StatePersisted=false 不假冒 committed state，取消 exit precedence 不被覆蓋。
 - **Terminal：** Writer error interception 與獨立 input cancellation 不依賴 Tea renderer/event loop。單一 UV reader、bounded presentation queue、scanner/consumer/sender join、restore 及最終 Report 不可被簡化掉。
-- **交付／保留：** FinalSelection 明確選 output key/artifact ID，FinalDelivery 由 producer attempt/runtime metadata 產生；無合法 final 就 unavailable。History、contracts、evidence/report/private Git objects 保留，不把 cleanup 當資料刪除。
+- **交付／保留：** FinalSelection 明確選 output key/artifact ID，FinalDelivery 由 producer attempt/runtime metadata 產生；無合法 final 就 unavailable。History、contracts、evidence/report 保留，不把 cleanup 當資料刪除；自有 Git repository 是遠端內容的工作副本，不是 history，cleanup 連同 checkout 移除（code-change 的 worktree 在可能留有未推送成果時保留，見 [CODE-CHANGE](docs/CODE-CHANGE.md)）。
 - **共享環境：** 啟動 persisted Pi 前核對 parent pid／recovering；preflight 非鎖，task 非 discovery 隔離。不得清理他人 session。
 
 ## 4. 驗收組別與常駐 tests

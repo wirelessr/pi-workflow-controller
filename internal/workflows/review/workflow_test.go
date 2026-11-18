@@ -661,12 +661,12 @@ func (f *workflowFixture) ownedCleanup(report engine.Report) {
 		}
 	}
 	root := filepath.Join(f.run.Dir(), f.name)
-	for _, path := range []string{"checkout", "repository.git/worktrees/checkout"} {
+	for _, path := range []string{"checkout", "repository.git"} {
 		if _, err := os.Stat(filepath.Join(root, path)); !errors.Is(err, os.ErrNotExist) {
 			f.t.Fatalf("checkout cleanup: %s: %v", path, err)
 		}
 	}
-	for _, path := range []string{"snapshots/metadata.json", "snapshots/diff.diff", "repository.git/objects"} {
+	for _, path := range []string{"snapshots/metadata.json", "snapshots/diff.diff"} {
 		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
 			f.t.Fatalf("acquisition history deleted: %s: %v", path, err)
 		}

@@ -31,14 +31,16 @@ type gitSource struct {
 	allowFile bool
 }
 
-// worktree is the Controller-owned checkout the Agent works in. It is kept
-// when the run ends unless remove was set, because until its commits are
-// pushed it holds the only copy of the Agent's work.
+// worktree is the Controller-owned checkout the Agent works in. When the
+// run ends it is kept only while it may hold the only copy of the Agent's
+// work, unless remove was set; published is the last head verified on the
+// pull request.
 type worktree struct {
 	repo      *gitrepo.Repo
 	base      string
 	allowFile bool
 	remove    atomic.Bool
+	published atomic.Pointer[string]
 }
 
 // emptyTree is git's well-known empty tree, which git knows without the
@@ -136,12 +138,57 @@ func (w *worktree) branch(ctx context.Context) (string, error) {
 	return branch, nil
 }
 
-// cleanup runs only after the workflow joined and Pi exit was confirmed.
+// cleanup runs only after the workflow joined and Pi exit was confirmed. It
+// removes the worktree and its repository when remove was set or they hold
+// no work, and keeps both otherwise, including when that cannot be read.
 func (w *worktree) cleanup(ctx context.Context) error {
 	if !w.remove.Load() {
-		return nil
+		held, err := w.holdsWork(ctx)
+		if err != nil {
+			return fmt.Errorf("worktree kept: %w", err)
+		}
+		if held {
+			return nil
+		}
 	}
 	return w.repo.Cleanup(ctx)
+}
+
+// holdsWork reports whether the worktree may hold work no remote has: a
+// HEAD with commits that the published head, or before any the base, lacks;
+// a change to a tracked file; or an untracked file that is not ignored. The
+// status read also runs on the Agent's repository configuration, so an
+// attributes file in the repository, from which it could apply filters,
+// counts as work instead of being read; runtime.Git already turns the
+// filesystem monitor off. It compares raw bytes, so content an Agent's
+// filter rewrote counts as a change.
+func (w *worktree) holdsWork(ctx context.Context) (bool, error) {
+	floor := w.base
+	if published := w.published.Load(); published != nil {
+		floor = *published
+	}
+	head, err := w.head(ctx)
+	if err != nil {
+		return false, err
+	}
+	if ahead, err := w.isNew(ctx, floor, head); err != nil || ahead {
+		return ahead, err
+	}
+	for _, dir := range []string{w.repo.Dir(), w.repo.WorktreeGitDir()} {
+		_, err := os.Lstat(filepath.Join(dir, "info", "attributes"))
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("worktree attributes: %w", err)
+		}
+	}
+	out, err := w.read(ctx, "-c", "core.untrackedCache=false", "--no-optional-locks", "--work-tree="+w.repo.Worktree(),
+		"status", "--porcelain", "--no-renames", "--untracked-files=normal", "--ignore-submodules=all")
+	if err != nil {
+		return false, fmt.Errorf("worktree status: %w", err)
+	}
+	return out != "", nil
 }
 
 // createWorktree fetches the default branch tip and checks it out detached, so

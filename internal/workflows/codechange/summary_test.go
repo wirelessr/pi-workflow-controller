@@ -3,6 +3,7 @@ package codechange
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -123,7 +124,7 @@ func TestSummaryHeads(t *testing.T) {
 		t.Fatalf("summary\n%+v\nwant\n%+v", got, want)
 	}
 	a.requireExitsConfirmed(t)
-	requireKept(t, a.run)
+	requireRemoved(t, a.run)
 }
 
 // A round that fails after its dispatch, here with its repairs exhausted,
@@ -199,7 +200,12 @@ func TestSummaryAfterRoundFailure(t *testing.T) {
 			if tc.confirmed {
 				a.requireExitsConfirmed(t)
 			}
-			requireKept(t, a.run)
+			// The round's push no receipt verified is kept.
+			if tc.pushed {
+				requireKept(t, a.run)
+			} else {
+				requireRemoved(t, a.run)
+			}
 		})
 	}
 }
@@ -245,16 +251,17 @@ func TestSummaryOverLimit(t *testing.T) {
 		t.Fatalf("outputs %+v", outputs)
 	}
 	a.requireExitsConfirmed(t)
-	requireKept(t, a.run)
+	requireRemoved(t, a.run)
 }
 
 // A cancellation that arrives once the rounds converged, before the final
 // snapshot, ends the run Cancelled with no final snapshot, no summary and
 // no Final, and finish returns an error although the rounds have none, so
-// the worktree is kept. Execute calls finish right after the rounds with
-// nothing in between to cancel from, so the test runs the same rounds and
-// finish from throughFix, cancels between them, and sets the removal the
-// way execute does after finish returns no error.
+// the removal is not set and a worktree holding work, here an untracked
+// file, is kept. Execute calls finish right after the rounds with nothing in
+// between to cancel from, so the test runs the same rounds and finish from
+// throughFix, cancels between them, and sets the removal the way execute
+// does after finish returns no error.
 func TestSummaryCancelledAfterConverged(t *testing.T) {
 	f := newFixture(t)
 	var d roundsEnd
@@ -266,6 +273,7 @@ func TestSummaryCancelledAfterConverged(t *testing.T) {
 			return result, err
 		}
 		d = p.converge(ctx, r, f.piCWD, result, testState, rounds)
+		f.write(filepath.Join(p.worktree.repo.Worktree(), "untracked.txt"), "work\n")
 		r.Cancel(engine.OriginControllerUser)
 		if result, finished = p.finish(ctx, r, d, testState); finished != nil {
 			return result, finished

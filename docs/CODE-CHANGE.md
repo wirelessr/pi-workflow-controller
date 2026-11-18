@@ -17,7 +17,7 @@ Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，�
 | 項目 | 決定 |
 |---|---|
 | 入口 | 已核可的 design doc；單一入口，不分任務型態。單行 Prompt 為 `<owner/name> <design doc 檔案路徑>`：第一個 token 是目標 repo，其餘是路徑 |
-| 工作區 | Controller 建立並擁有 worktree，註冊 cleanup；Agent 只在其中做 git 操作。未成功結束時保留：cleanup callback 讀取 workflow 設定的旗標，旗標預設為保留，僅在 workflow 確定成功後才設為移除，不改 engine。workflow 返回之後的 finalization 失敗仍可能使 worktree 被移除而終態為 Failed，這是承認的殘餘窗口：成功時移除前已核對：session 嚴格關閉後重讀的 HEAD 等於 PR 上已核對的 head；未 commit 與 untracked 的檔案以及該 worktree 的 reflog 會隨移除消失，bare repository（本機 branch 與 objects）保留；脫離 process group 的 Agent 子孫不在保證內。run 目錄的報告保留 |
+| 工作區 | Controller 建立並擁有 worktree，註冊 cleanup；Agent 只在其中做 git 操作。cleanup callback 讀取 workflow 設定的移除旗標，僅在 workflow 確定成功後才設定，不改 engine；設定時移除 checkout 與整個 bare repository。workflow 返回之後的 finalization 失敗仍可能使 worktree 被移除而終態為 Failed，這是承認的殘餘窗口：成功時移除前已核對：session 嚴格關閉後重讀的 HEAD 等於 PR 上已核對的 head；未 commit 與 untracked 的檔案、其他本機 branch、stash 與 reflog 會隨移除消失；脫離 process group 的 Agent 子孫不在保證內。未設定旗標時，worktree 可能留有遠端沒有的成果才保留 checkout 與 bare repository，否則同樣移除：HEAD 有上次核對通過的 head（尚未核對過時為 base）所沒有的 commit、tracked 檔案有改動（含 staged），或有未被 ignore 的 untracked 檔案。判定經 registration 讀取（見下方寫入型 worktree 政策的 status 例外）；比對原始 bytes，被 Agent 的 filter 改寫的內容算作改動；只看 HEAD 與工作目錄，其他本機 branch 與 stash 不納入；讀取失敗時保留並回報 cleanup 錯誤；保留與否不另做記錄。run 目錄的報告保留 |
 | Session | 預設每個 Step 都是 fresh session；只有「更正」（帶 Feedback 回到原角色）才沿用同一 handle |
 | 模型 | 重 `fireworks` GLM-5p3、中 GLM-5p3-flash、輕 deepseek flash。code-review 預設模型改為 GLM-5p3／GLM-5p3-flash（第 7 節） |
 | PR | 不開 draft。發 PR 前先有一個審閱 Step：基本 code review 與 design 對照 code 的一致性檢查，各由獨立 Agent 執行 |
@@ -140,7 +140,7 @@ Prompt 格式：
 
 - Remote 名稱 `origin`，URL 為目標 repo 的 https 位址，不含憑證；bare repository 加 `blob:none` 的 promisor partial fetch，與 review 的做法一致。fetch 的對象是 default branch tip（review 只 fetch 指定 SHA，這是政策差異，列入 R7 矩陣）。
 - Controller 自己的 git 呼叫停用 system／global config 與 attributes、`core.hooksPath=/dev/null`，並帶與 review 相同的傳輸與 checkout 保護（不跟隨 redirect、protocol 白名單、不遞迴 submodule、不 sparse、不轉換行尾），所以使用者的 hooks、URL 改寫與 filters 不在 Controller 建立 worktree 時執行；共用的隔離環境來自 runtime。Controller 不寫入任何 git config 的 credential、url、hooks 或 identity 設定，也不把 credential helper 寫入 config，它自己的 git 呼叫經 `runtime.Git` 逐次以 `-c` 帶入 gh 的 helper，不落地。Agent 的 git 照常使用使用者的全域 git config（含 identity），push 與開 PR 使用 Agent 既有的認證。
-- Controller 設定 `origin` 的一般 tracking refspec 與 `origin/HEAD`，使 bare＋worktree 對 Agent 的 git 流程與一般 clone 相同；worktree 以 detached 方式建立於 fetch 當下的 default branch tip（記錄於 input 的 `base_sha`）。交給 Agent 之後，repository 的 config 由 Agent 寫入，Controller 之後對該 repository 的 git 只執行不讀可執行 config 的 plumbing；唯一的例外是 A2 的 snapshot：Controller 另建全新的自有 bare repository（config 由 Controller 控制、沒有 remote），以 alternates 借用 A1 repository 的 objects，再 detached checkout 已核對的 head，且之後不再對它執行 git。objects 經 alternates 讀取，來源是 Agent 可寫的目錄，讀取時不驗證雜湊，與 receipt 同屬同一使用者權限可偽造的範圍，snapshot 只保證 base 與 head 的內容（base 之前的 blob 因 blob-less 取得可能不在）；審閱者的唯讀範圍只靠 requirements，Controller 在審閱後核對 worktree HEAD 仍為已核對的 head，但不核對其他變動（`rev-parse`、`rev-list`、`for-each-ref`、`cat-file`），且讀 worktree 狀態只經 `WorktreeGitDir()`，不經 Agent 可改寫的 `checkout/.git`。
+- Controller 設定 `origin` 的一般 tracking refspec 與 `origin/HEAD`，使 bare＋worktree 對 Agent 的 git 流程與一般 clone 相同；worktree 以 detached 方式建立於 fetch 當下的 default branch tip（記錄於 input 的 `base_sha`）。交給 Agent 之後，repository 的 config 由 Agent 寫入，Controller 之後對該 repository 的 git 只執行不讀可執行 config 的 plumbing，有兩個例外。一是未設定移除旗標時 cleanup 的 `status`：它讀 Agent 可改的 repository config，所以經 registration、停用 lazy fetch、replace refs、untracked cache 與 optional locks（fsmonitor 由 runtime 的固定參數停用），attributes 取自空 tree，repository 有 `info/attributes` 時不讀而直接保留，使 Agent 設定的 filter 與 fsmonitor 不執行；其他 config（例如使改動不被看見的設定）仍可能影響判定，只影響保留與否。另一是 A2 的 snapshot：Controller 另建全新的自有 bare repository（config 由 Controller 控制、沒有 remote），以 alternates 借用 A1 repository 的 objects，再 detached checkout 已核對的 head，且之後不再對它執行 git。objects 經 alternates 讀取，來源是 Agent 可寫的目錄，讀取時不驗證雜湊，與 receipt 同屬同一使用者權限可偽造的範圍，snapshot 只保證 base 與 head 的內容（base 之前的 blob 因 blob-less 取得可能不在）；審閱者的唯讀範圍只靠 requirements，Controller 在審閱後核對 worktree HEAD 仍為已核對的 head，但不核對其他變動（`rev-parse`、`rev-list`、`for-each-ref`、`cat-file`），且讀 worktree 狀態只經 `WorktreeGitDir()`，不經 Agent 可改寫的 `checkout/.git`。
 - Branch 與 upstream tracking 由 Agent 依 git 流程 skill 建立，Controller 不預設。
 
 ### Step requirements 常數
@@ -179,7 +179,7 @@ Prompt 格式：
 | gh／git 命令執行 | `runtime.GitHubGET`、`runtime.Git`（R7 已抽出） | 直接重用；PR 狀態 adapter 的 REST 查詢走 `GitHubGET`，GraphQL 於 C4 新增固定入口 |
 | bare repository 保留、init／remote／pinned fetch、SameFile cleanup | `internal/gitrepo`（R7 已抽出） | 直接重用；可寫 worktree 的 default branch fetch 已於 C1a 以 `Repo.FetchBranch` 加入（review 不呼叫） |
 | GitHub PR 狀態讀取（check runs、commit statuses、review threads） | `internal/workflows/codechange`（`prstate.go`，C4a） | REST 經 `GitHubGET`、threads 經 `GitHubGraphQL`；分頁驗收與終態判定留在 code-change（review 的分頁形狀不同，不共用） |
-| 可寫 worktree | `internal/workflows/codechange`（`createWorktree`） | C1a 已實作：run 內 bare repository 加 `FetchBranch`、detached worktree；註冊前失敗自行移除，註冊後預設保留，只有 workflow 設定移除旗標時才清理（C2b 起設定）；憑證由 Agent 既有 gh／git 認證處理，Controller 不寫入憑證相關 config |
+| 可寫 worktree | `internal/workflows/codechange`（`createWorktree`） | C1a 已實作：run 內 bare repository 加 `FetchBranch`、detached worktree；註冊前失敗自行移除（含 bare repository），註冊後 workflow 設定移除旗標時清理（C2b 起設定），未設定時依第 2 節「工作區」的保留規則；憑證由 Agent 既有 gh／git 認證處理，Controller 不寫入憑證相關 config |
 | 測試 host transport | `testutil/protocol`；gh／git 的 PATH wrapper 為 `testutil/pathexec`（runtime、review、code-change 共用） | 直接重用 |
 | Contract repair 迴圈 | `engine.Scope.StepWithRepair`（`engine/step.go`，R9 已抽出；triage 經 `TaskSession.Run` 呼叫，`repairBudget = 2` 留在 triage） | 已抽成 `engine.Scope.StepWithRepair`（R9），triage 已遷移；本 workflow 的寫入型 Step 直接使用，不複製。Feedback 的 Refs 在 repair 時保留 |
 | Capacity handoff | triage package | 不需要：D 每輪 fresh session，context 以輪切分 |
@@ -272,7 +272,7 @@ R6 之前，`review.execute` 是單一函式，且包含以下綁定，直接呼
 - **未經 live 驗證的 Agent 行為。** repair 派送的新開頭句、A1 常數與 schema 的遵循度、`--no-lazy-fetch` 對 lazy fetch 的實際效果。
 - **只模擬或單元測試無法證明的事：** 模型能否遵循 schema、私有 skill 的單輪版能否在無人狀態下完成、品質掃描 skip 的實際行為、bot 靜置窗口、Agent 在 CWD 之外操作 worktree 時，各工具（git、build、test、專案內的相對路徑設定）的實際行為。皆列為 live 缺口。
 - **公開 repo。** Repo 內的 requirements 與文件只用通用描述；私有 skill 路徑與內容留在 repo 外。
-- **Prepare 的耗時與磁碟。** Controller 前置（GET、fetch、worktree add）各有 20 分鐘 deadline，最壞約一小時以上，不在准入範圍。每個 run 在 run 目錄永久保留含 default branch tip 全部 blob 的 bare repository，非成功路徑還保留整個 worktree，沒有大小上限也沒有磁碟 preflight。成功路徑移除大型 worktree 與 session 關閉共用 cleanup 預算（code-change 為 2 分鐘，其餘 15 秒），逾時會被記為 cleanup failure；設定移除旗標的單元（C2）須決定處理方式，不默默改 engine 的 timeout。移除旗標只在 workflow 確定成功的最終返回處設定；之後 engine 仍可能因取消或 run deadline 判為 Cancelled／TimedOut 並移除 worktree，這是承認的殘餘窗口。 2 分鐘的 `CleanupTimeout` 是 deadline 而不是移除的上限：`RemoveAll` 無法中斷，超時或權限錯誤時 checkout 可能部分或全部已刪、registration 殘留，結果是 Succeeded 但 exit 1。A3 若被 run deadline 截斷，已發生的外部寫入不會有記錄。A1 與 A3 共用 handle，A3 的 context 容量未經 live 驗證。
+- **Prepare 的耗時與磁碟。** Controller 前置（GET、fetch、worktree add）各有 20 分鐘 deadline，最壞約一小時以上，不在准入範圍。每個 run 在執行期間於 run 目錄持有含 default branch tip 全部 blob 的 bare repository 與整個 worktree，沒有大小上限也沒有磁碟 preflight；結束後只在 worktree 可能留有未推送成果時保留。移除大型 worktree 與 bare repository 與 session 關閉共用 cleanup 預算（code-change 為 2 分鐘，其餘 15 秒），逾時會被記為 cleanup failure；設定移除旗標的單元（C2）須決定處理方式，不默默改 engine 的 timeout。移除旗標只在 workflow 確定成功的最終返回處設定；之後 engine 仍可能因取消或 run deadline 判為 Cancelled／TimedOut 並移除 worktree，這是承認的殘餘窗口。 2 分鐘的 `CleanupTimeout` 是 deadline 而不是移除的上限：`RemoveAll` 無法中斷，超時或權限錯誤時 checkout 可能部分或全部已刪、bare repository 殘留，結果是 Succeeded 但 exit 1。A3 若被 run deadline 截斷，已發生的外部寫入不會有記錄。A1 與 A3 共用 handle，A3 的 context 容量未經 live 驗證。
 
 ## 11. 初值與待核對
 
@@ -301,7 +301,7 @@ C4 決定（初值，待 live 調整）：
 | 時間准入 | 靜置含在等待上限內；單輪 80 分鐘（含輪後讀取 10）、尾段 70 分鐘（等待 30、最後快照 10、summary 10、餘量 20）；剩餘不到 150 分鐘不開新一輪；receipt 讀取、repair 與嚴格關閉只靠餘量；`DisableRunTimeout` 為真時不做時間准入（同 triage）；sessions／attempts 的最壞值以 `TestConvergeLimits` 釘住（完整流程、真實限額），不做執行期額度准入 |
 | PR 在 D 期間不再 open | 以 `errPullRequestNotOpen` 結束 D，summary 為 Final |
 | D 身分或 receipt 不符 | `external-objects` 為 Final，不做最後快照與 summary |
-| 未收斂 | 交付 summary 為 Final，以 `errNotConverged` 結束（Failed、exit 1），輪數用盡與時間准入不足共用；worktree 保留 |
+| 未收斂 | 交付 summary 為 Final，以 `errNotConverged` 結束（Failed、exit 1），輪數用盡與時間准入不足共用；worktree 依第 2 節「工作區」的保留規則處理 |
 | 品質掃描 | schema 要求 `quality-scan` 恰好一項；`skipped` 只允許預先列舉的 id 且必有 reason，不得算作通過 |
 | thread receipt | GraphQL node ID；核對屬於該 PR、`isResolved`、reply 出現在 thread 的留言中 |
 | CI rerun | 只授權 GitHub Actions run 的 rerun；核對 run 屬於目標 repo、`head_branch` 為記錄的 branch、`run_attempt >= 2` |

@@ -397,12 +397,12 @@ func TestFixReceiptRejected(t *testing.T) {
 				fix: func(t *testing.T, c agentCall) string {
 					data := tc.fix(t, f, c, s)
 					reported = data["head"].(string)
+					s.head = f.gitIn(c.task.Worktree, "rev-parse", "HEAD")
 					writeCandidate(t, c, data)
 					return ""
 				},
 			})
 			report := a.report
-			s.head = f.gitIn(a.worktree(), "rev-parse", "HEAD")
 			want := tc.want(f, s)
 			if report.Outcome != engine.Failed || report.ExitCode != 1 || !errors.Is(report.Failure, errReceipt) || !strings.Contains(report.Failure.Error(), want) {
 				t.Fatalf("outcome %s exit %d failure %v, want %q", report.Outcome, report.ExitCode, report.Failure, want)
@@ -419,7 +419,13 @@ func TestFixReceiptRejected(t *testing.T) {
 			if got := a.decisions(t); slices.ContainsFunc(got, func(d decision) bool { return d.Name == "fix-verified" }) {
 				t.Fatalf("decisions %+v", got)
 			}
-			requireKept(t, a.run)
+			// A fixer's commit no receipt verified is kept; without one the
+			// worktree holds nothing the implementation's verified head lacks.
+			if s.head != s.implemented {
+				requireKept(t, a.run)
+			} else {
+				requireRemoved(t, a.run)
+			}
 			// The record shows the head the contract reported on the record's
 			// branch.
 			if record := output[externalObjectsRecord](t, a, "external-objects"); record.Step != "fix" || record.Reported == nil || record.Reported.Branch != workBranch || record.Reported.Head != reported {
@@ -489,10 +495,9 @@ func TestFixFailureRecordsExternalObjects(t *testing.T) {
 }
 
 // Every failure after the fix receipt check passed records the external
-// objects as the Final with its own error and keeps the worktree, because
-// the removal is set only on the workflow's successful return: the
-// fix-verified Decision failing and a close of the fixer's session the run
-// cannot confirm. A HEAD moved after the close is the correction Step's
+// objects as the Final with its own error and removes the worktree, whose
+// HEAD is the head the check verified: the fix-verified Decision failing
+// and a close of the fixer's session the run cannot confirm. A HEAD moved after the close is the correction Step's
 // shared check (TestPublishTailFailure).
 func TestFixTailFailure(t *testing.T) {
 	for _, tc := range []struct {
@@ -546,7 +551,7 @@ func TestFixTailFailure(t *testing.T) {
 			if tc.confirmed {
 				a.requireExitsConfirmed(t)
 			}
-			requireKept(t, a.run)
+			requireRemoved(t, a.run)
 		})
 	}
 }
@@ -645,7 +650,7 @@ func TestFixLimits(t *testing.T) {
 					t.Fatalf("outputs %+v", report.Result.Outputs)
 				}
 			}
-			requireKept(t, a.run)
+			requireRemoved(t, a.run)
 		})
 	}
 }

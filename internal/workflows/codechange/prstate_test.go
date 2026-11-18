@@ -645,15 +645,18 @@ func TestStateSnapshotOverLimit(t *testing.T) {
 }
 
 // In the full flow, a read failure of the final snapshot after a converged
-// round fails the run with errStateRead and keeps the
-// worktree: the removal is set only after the final snapshot. The summary
-// is the Final, the final snapshot in it unavailable with the read's error.
+// round fails the run with errStateRead and keeps a worktree holding work,
+// here an untracked file: the removal is set only after the final snapshot.
+// The summary is the Final, the final snapshot in it unavailable with the
+// read's error.
 func TestStateFinalReadFailureKeepsWorktree(t *testing.T) {
 	f := newFixture(t)
 	// The first query is the round's snapshot, the second the final one.
 	f.write(filepath.Join(f.dir, "gh-fail-threads"), "2")
 	var implemented string
-	a := f.run(t, agents{implement: f.implementReady(&implemented)})
+	a := f.run(t, agents{implement: f.implementReady(&implemented), returned: func(r *engine.Run) {
+		f.write(filepath.Join(r.Dir(), worktreeDir, "checkout", "untracked.txt"), "work\n")
+	}})
 	report := a.report
 	requireFailure(t, report, commandFailure(report, "code-change cannot read the pull request state: review threads query: "))
 	if !errors.Is(report.Failure, errStateRead) || report.Final == nil || report.Final.Output != "summary" || report.Final.Ref != report.Result.Outputs["summary"] {

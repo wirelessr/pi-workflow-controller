@@ -55,11 +55,11 @@ Schema 唯一來源是 `internal/workflows/review/schemas/`，embed 後由 Go re
 
 ## 資源、安全與保留
 
-`review/` 保存 private repository.git、snapshots 與 temporary checkout。Store 建立時將可信 BaseDir 正規化為 canonical path，使 symlink WIP／平台 temp alias 下的 request、Ref 與 renderer 路徑一致；原始 LaunchCWD 不改，attempt／artifact 內的 no-follow 防護保留。Git 使用固定 argv、禁用 global/system git config、hooks、external diff/textconv、submodule recursion；credential helper 僅用既有 gh 認證。Partial fetch 使用 blob filter，checkout 保留 head 的 tracked files/gitlinks，不靜默做 sparse review。GitHub transport／gh/git 有 20 分鐘 command deadline（仍受 run deadline 約束）、64 MiB stdout 上限，stderr drain 不落地，避免 transport 印出 credential。Submodule gitlinks 保存為來源快照，但不執行其外部 transport；內容缺失以 `submodule-content` 明列，不能宣稱全面覆蓋。不下載 LFS 外部物件，其 pointer 不等同外部物件內容。
+`review/` 在 run 期間保存 private repository.git、snapshots 與 temporary checkout，結束後只留 snapshots。Store 建立時將可信 BaseDir 正規化為 canonical path，使 symlink WIP／平台 temp alias 下的 request、Ref 與 renderer 路徑一致；原始 LaunchCWD 不改，attempt／artifact 內的 no-follow 防護保留。Git 使用固定 argv、禁用 global/system git config、hooks、external diff/textconv、submodule recursion；credential helper 僅用既有 gh 認證。Partial fetch 使用 blob filter，checkout 保留 head 的 tracked files/gitlinks，不靜默做 sparse review。GitHub transport／gh/git 有 20 分鐘 command deadline（仍受 run deadline 約束）、64 MiB stdout 上限，stderr drain 不落地，避免 transport 印出 credential。Submodule gitlinks 保存為來源快照，但不執行其外部 transport；內容缺失以 `submodule-content` 明列，不能宣稱全面覆蓋。不下載 LFS 外部物件，其 pointer 不等同外部物件內容。
 
 每階段邊界核對 HEAD、tracked/untracked changes 及 Controller snapshot digests。不修改被審 code，不執行其 tests/build/compile/deploy 或 repository scripts，不自動 GitHub/Jira/Confluence 寫入。發 comments 必須 workflow 結束後另取得批准。這是受信任 agent 的操作規則，不是 OS sandbox，不能抵抗同 UID 惡意檔案篡改。
 
-`Run.AddCleanup` 只登記自有 resource callback，不是 command executor。資源暴露給 Pi 前須註冊；acquisition 部分失敗或註冊失敗仍由 caller 負責 bounded cleanup。Cleanup 先停止自有 Pi，等待 workflow 返回與確認 process exit，再移除原始 ownership 匹配的 checkout 及其 worktree registration。未確認退出則保留資源並回報錯誤。Private git objects、snapshots、contracts、report、embedded skill copy、Pi history 均保留。
+`Run.AddCleanup` 只登記自有 resource callback，不是 command executor。資源暴露給 Pi 前須註冊；acquisition 部分失敗或註冊失敗仍由 caller 負責 bounded cleanup。Cleanup 先停止自有 Pi，等待 workflow 返回與確認 process exit，再移除原始 ownership 匹配的 checkout 及其 private repository（worktree registration 在其中）。未確認退出則保留資源並回報錯誤。Snapshots、contracts、report、embedded skill copy、Pi history 均保留；private repository 只是 PR 內容的工作副本，不保留。
 
 新 skills 位於 `internal/workflows/review/skills/`，`go:embed` 展開到 `run/review-skills/`，保留相對 references；每個 Pi 明確讀對應 absolute SKILL.md 及 references。無 installer/plugin manager，不改舊 definitions/settings，新舊規則不自動同步。
 

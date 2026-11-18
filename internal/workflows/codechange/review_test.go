@@ -44,15 +44,12 @@ func (a a1Run) snapshotRepo() string {
 	return filepath.Join(a.run.Dir(), snapshotDir, "repository.git")
 }
 
-// requireSnapshotRemoved checks the snapshot's checkout and registration are
-// gone, while its repository, which holds no work, stays.
+// requireSnapshotRemoved checks the snapshot's checkout and its repository,
+// which holds no work, are gone.
 func (a a1Run) requireSnapshotRemoved(t *testing.T) {
 	t.Helper()
 	requireMissing(t, filepath.Join(a.run.Dir(), snapshotDir, "checkout"))
-	requireMissing(t, filepath.Join(a.snapshotRepo(), "worktrees", "checkout"))
-	if info, err := os.Stat(a.snapshotRepo()); err != nil || !info.IsDir() {
-		t.Fatalf("snapshot repository: %v", err)
-	}
+	requireMissing(t, a.snapshotRepo())
 }
 
 // reviewCalls are the reviewers' dispatches by role, in dispatch order.
@@ -245,6 +242,11 @@ func TestPrePRReviewSnapshotPinned(t *testing.T) {
 					return ""
 				},
 				review: func(t *testing.T, c agentCall) string {
+					// Moved once, by the receipt's history read; the cleanup's
+					// read must not move it again.
+					if err := os.Remove(filepath.Join(f.dir, "git-move-head")); err != nil && !errors.Is(err, os.ErrNotExist) {
+						t.Fatal(err)
+					}
 					if got := f.gitIn(c.task.Checkout, "rev-parse", "HEAD"); got != head || c.task.Head != head {
 						t.Fatalf("snapshot HEAD %s task head %s, want the verified head %s", got, c.task.Head, head)
 					}

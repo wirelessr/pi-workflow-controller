@@ -212,7 +212,8 @@ func checkCoverage[K comparable](got, want []K, name func(K) string, unknown str
 // default branch the input recorded; its head is the receipt's branch of the
 // target repository; and head is the pull request's head or one of its
 // ancestors. A mismatch wraps errReceipt and a failed or unreadable GitHub
-// read errUnverifiable; neither is repaired or retried.
+// read errUnverifiable; neither is repaired or retried. A passed check
+// records head as the worktree's published head.
 func (p prepared) verifyPullRequest(ctx context.Context, r *engine.Run, last string, rc receipt) (pullRequestRecord, error) {
 	w := p.worktree
 	current, err := w.head(ctx)
@@ -274,6 +275,7 @@ func (p prepared) verifyPullRequest(ctx context.Context, r *engine.Run, last str
 	if !ancestor {
 		return pullRequestRecord{}, fmt.Errorf("%w: head: got %s, which is not the pull request head %s or one of its ancestors (compare status %s)", errReceipt, rc.head, pr.Head.SHA, status)
 	}
+	w.published.Store(&rc.head)
 	return pullRequestRecord{URL: pr.HTMLURL, Number: pr.Number, Branch: pr.Head.Ref, HeadSHA: pr.Head.SHA, ReportedHead: rc.head, CompareStatus: status}, nil
 }
 

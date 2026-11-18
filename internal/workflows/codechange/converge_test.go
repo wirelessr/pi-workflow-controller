@@ -397,7 +397,7 @@ func TestConvergeRoundsEnd(t *testing.T) {
 				t.Fatalf("outputs %+v", outputs)
 			}
 			a.requireExitsConfirmed(t)
-			requireKept(t, a.run)
+			requireRemoved(t, a.run)
 		})
 	}
 }

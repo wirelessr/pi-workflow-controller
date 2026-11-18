@@ -453,18 +453,15 @@ func TestAcquirePinnedForkSnapshotAndOwnedCleanup(t *testing.T) {
 	if err := c.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{originalWorktree, filepath.Join(f.root, "repository.git", "worktrees", "checkout")} {
+	for _, path := range []string{originalWorktree, filepath.Join(f.root, "repository.git")} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("worktree retained: %s: %v", path, err)
+			t.Fatalf("checkout or repository retained: %s: %v", path, err)
 		}
 	}
-	for _, path := range []string{filepath.Join(outside, "sentinel"), c.Snapshots["metadata"], filepath.Join(f.root, "repository.git", "objects")} {
+	for _, path := range []string{filepath.Join(outside, "sentinel"), c.Snapshots["metadata"]} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("history/foreign path removed: %s: %v", path, err)
 		}
-	}
-	if got := fixtureGit(t, f.root, "--git-dir="+filepath.Join(f.root, "repository.git"), "rev-parse", "refs/review/base"); got != f.base {
-		t.Fatalf("base history lost: %s", got)
 	}
 }
 
@@ -554,8 +551,8 @@ func TestAcquireMetadataValidationAndPartialCleanup(t *testing.T) {
 			if _, err := os.Lstat(filepath.Join(f.root, "checkout")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("partial checkout retained: %v", err)
 			}
-			if _, err := os.Stat(filepath.Join(f.root, "repository.git")); err != nil {
-				t.Fatalf("private repository removed: %v", err)
+			if _, err := os.Lstat(filepath.Join(f.root, "repository.git")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("partial repository retained: %v", err)
 			}
 		})
 	}

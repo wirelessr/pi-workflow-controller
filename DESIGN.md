@@ -711,7 +711,7 @@ Pi 0.84.3 的內建 bash 在 Unix 使用 `detached: true`，bash process group �
 
 Root stop／outcome lock 後的 Pi cleanup 不等待 workflow callback 或 journal 返回；resource callback 則等待 workflow join 及自有 Pi 確認 exit。等待超出 cleanup budget 或 process exit unconfirmed 時保留資源並回報，不刪仍在使用的 workspace。未確認退出的 handle 仍占 live slot，不能靠 Close 已呼叫或 deadline 過期釋放容量。
 
-Checkout cleanup 只能刪原始 ownership 匹配的自有 checkout／worktree registration；private Git objects、snapshots、contracts、artifacts、embedded resources 與 history 保留。確認 `ProcessExited && WaitCompleted` 後，formatter 才顯示可在安全預檢後 resume；history 路徑仍只是 runtime metadata，不新增存在或 durability 保證。
+Checkout cleanup 只能刪原始 ownership 匹配的自有 checkout 與其 private Git repository（worktree registration 在其中）；snapshots、contracts、artifacts、embedded resources 與 history 保留。code-change 的 worktree 是否進行 cleanup 另依其保留規則（[CODE-CHANGE](docs/CODE-CHANGE.md)）。確認 `ProcessExited && WaitCompleted` 後，formatter 才顯示可在安全預檢後 resume；history 路徑仍只是 runtime metadata，不新增存在或 durability 保證。
 
 ## 10. 事件、持久化與 TUI
 

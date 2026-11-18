@@ -353,7 +353,8 @@ func TestDeepReviewPinnedToReportedHead(t *testing.T) {
 
 // An incomplete report, a required deep reviewer having failed, is an
 // execution failure: the report is the Final with the reviewer's error, the
-// pull request and worktree stay, and nothing runs after it.
+// pull request stays, the worktree, holding nothing the verified head lacks,
+// is removed, and nothing runs after it.
 func TestDeepReviewIncomplete(t *testing.T) {
 	f := newFixture(t)
 	var implemented string
@@ -378,7 +379,7 @@ func TestDeepReviewIncomplete(t *testing.T) {
 		t.Fatalf("outputs %+v", outputs)
 	}
 	a.requireSessionsClosed(t, 8)
-	requireKept(t, a.run)
+	requireRemoved(t, a.run)
 	if f.pulls(t) != 1 || f.originTip(workBranch) != implemented {
 		t.Fatalf("pulls %d branch %s", f.pulls(t), f.originTip(workBranch))
 	}
@@ -386,7 +387,8 @@ func TestDeepReviewIncomplete(t *testing.T) {
 
 // A deep review that ends without a report fails the run with the review's
 // error and the verified pull request record as the Final, with no further
-// Attach or session; the pull request and worktree stay. A head the branch
+// Attach or session; the pull request stays and the worktree, holding
+// nothing the verified head lacks, is removed. A head the branch
 // no longer contains, after a force push once the receipt check passed,
 // fails acquisition before any review session; a rejected Prepare contract
 // fails after one.
@@ -442,7 +444,7 @@ func TestDeepReviewWithoutReport(t *testing.T) {
 			// No session after the review's, and no Attach after the record.
 			a.requireSessionsClosed(t, 3+tc.sessions)
 			a.requireAttempts(t, 4+tc.sessions, "input", "skills", "pull-request")
-			requireKept(t, a.run)
+			requireRemoved(t, a.run)
 			requireMissing(t, filepath.Join(a.run.Dir(), deepReviewName, "checkout"))
 			if f.pulls(t) != 1 {
 				t.Fatalf("pulls %d", f.pulls(t))
@@ -452,7 +454,8 @@ func TestDeepReviewWithoutReport(t *testing.T) {
 }
 
 // Cancelling during the deep review ends the run Cancelled with no Final
-// once every session's exit is confirmed; the pull request and worktree stay.
+// once every session's exit is confirmed; the pull request stays and the
+// worktree, holding nothing the verified head lacks, is removed.
 func TestDeepReviewCancelled(t *testing.T) {
 	f := newFixture(t)
 	var implemented string
@@ -468,7 +471,7 @@ func TestDeepReviewCancelled(t *testing.T) {
 		t.Fatalf("outputs %+v deep review calls %d", report.Result.Outputs, len(a.deepReviewCalls()))
 	}
 	a.requireSessionsClosed(t, 4)
-	requireKept(t, a.run)
+	requireRemoved(t, a.run)
 	if f.pulls(t) != 1 || f.originTip(workBranch) != implemented {
 		t.Fatalf("pulls %d branch %s", f.pulls(t), f.originTip(workBranch))
 	}
@@ -477,8 +480,8 @@ func TestDeepReviewCancelled(t *testing.T) {
 // One session or attempt less than the run needs through the deep review,
 // eight sessions and eleven attempts, stops the run with a run-scope
 // LimitExceeded and no Final at the deep review's validation session or
-// Step, after its other four stages were dispatched. The pull request and
-// worktree stay.
+// Step, after its other four stages were dispatched. The pull request stays
+// and the worktree, holding nothing the verified head lacks, is removed.
 func TestDeepReviewLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
@@ -509,7 +512,7 @@ func TestDeepReviewLimits(t *testing.T) {
 				t.Fatalf("final %+v", report.Final)
 			}
 			a.requireExitsConfirmed(t)
-			requireKept(t, a.run)
+			requireRemoved(t, a.run)
 			if f.pulls(t) != 1 {
 				t.Fatalf("pulls %d", f.pulls(t))
 			}

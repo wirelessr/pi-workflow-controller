@@ -234,11 +234,7 @@ func TestPublishSucceeds(t *testing.T) {
 			if checkoutAtReturn != nil {
 				t.Fatalf("worktree at the workflow's return: %v", checkoutAtReturn)
 			}
-			requireMissing(t, a.worktree())
-			requireMissing(t, filepath.Join(a.run.Dir(), worktreeDir, "repository.git", "worktrees", "checkout"))
-			if info, err := os.Stat(filepath.Join(a.run.Dir(), worktreeDir, "repository.git")); err != nil || !info.IsDir() {
-				t.Fatalf("repository removed: %v", err)
-			}
+			requireRemoved(t, a.run)
 			if f.originTip(workBranch) != pushed || f.originTip("main") != f.head || f.pulls(t) != 1 {
 				t.Fatalf("origin %s %s, pulls %d", f.originTip(workBranch), f.originTip("main"), f.pulls(t))
 			}
@@ -749,11 +745,11 @@ func TestPublishCancelled(t *testing.T) {
 }
 
 // Every failure after the receipt check passed records the external objects
-// as the Final with its own error and the verified receipt, and keeps the
-// worktree, because the removal is set only on the workflow's successful
-// return: the pull request record or its Decision failing, a close of the
-// implementer's session the run cannot confirm, and a HEAD that moved after
-// the receipt check, found by reading it again after the close.
+// as the Final with its own error and the verified receipt: the pull request
+// record or its Decision failing, a close of the implementer's session the
+// run cannot confirm, and a HEAD that moved after the receipt check, found by
+// reading it again after the close. The worktree is removed, its HEAD being
+// the verified head, except after the move, whose commit it keeps.
 func TestPublishTailFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -838,7 +834,11 @@ func TestPublishTailFailure(t *testing.T) {
 			if tc.confirmed {
 				a.requireSessionsClosed(t, 3)
 			}
-			requireKept(t, a.run)
+			if tc.name == "head-moved" {
+				requireKept(t, a.run)
+			} else {
+				requireRemoved(t, a.run)
+			}
 		})
 	}
 }
@@ -846,8 +846,9 @@ func TestPublishTailFailure(t *testing.T) {
 // One attempt less than the correction Step or the pull request record needs
 // stops the run with a run-scope LimitExceeded: before the correction Step is
 // dispatched, or after it pushed and opened the pull request, when the record
-// cannot be attached. The run is stopped, so there
-// is no external objects record; the worktree is kept.
+// cannot be attached. The run is stopped, so there is no external objects
+// record; the worktree is kept before the push, with the implementer's
+// commit, and removed after it, holding nothing the verified head lacks.
 func TestPublishLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -875,7 +876,11 @@ func TestPublishLimits(t *testing.T) {
 				t.Fatalf("pull requests %d publisher dispatches %d", f.pulls(t), len(a.publishCalls()))
 			}
 			a.requireExitsConfirmed(t)
-			requireKept(t, a.run)
+			if tc.pushed {
+				requireRemoved(t, a.run)
+			} else {
+				requireKept(t, a.run)
+			}
 		})
 	}
 }

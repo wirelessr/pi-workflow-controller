@@ -608,14 +608,14 @@ func TestImplementGapsDeliverFinal(t *testing.T) {
 	a.requireAttempts(t, 1)
 	a.requireDecision(t, "design-gaps-reported")
 	a.requireNoSnapshot(t)
-	if got := f.gitIn(a.worktree(), "rev-parse", "HEAD"); got != f.head {
-		t.Fatalf("worktree HEAD %s, want base %s", got, f.head)
-	}
+	requireRemoved(t, a.run)
 }
 
 // A receipt the worktree does not confirm, or cannot be read, fails the run
-// once the contract was accepted: no repair, no Decision, no Final, the
-// committed contracts and the worktree kept.
+// once the contract was accepted: no repair, no Decision, no Final and the
+// committed contracts kept. The worktree is kept while it holds a commit
+// or a change the base lacks, and when the cleanup cannot read it, with that
+// error reported; otherwise it is removed.
 func TestImplementReceiptRejected(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -697,11 +697,22 @@ func TestImplementReceiptRejected(t *testing.T) {
 			if got := a.decisions(t); len(got) != 0 {
 				t.Fatalf("decisions recorded: %+v", got)
 			}
-			a.requireSessionsClosed(t, 1)
 			a.requireAttempts(t, 1)
 			a.requireNoSnapshot(t)
-			if info, err := os.Stat(filepath.Join(a.run.Dir(), worktreeDir, "repository.git", "worktrees", "checkout")); err != nil || !info.IsDir() {
-				t.Fatalf("worktree registration not kept: %v", err)
+			if tc.unreadable {
+				var failure *engine.Failure
+				if len(a.report.CleanupErrors) != 1 || !errors.As(a.report.CleanupErrors[0], &failure) || failure.Cause == nil || !strings.Contains(failure.Cause.Error(), "worktree kept: "+tc.want) {
+					t.Fatalf("cleanup errors %v, want the worktree kept with %q", a.report.CleanupErrors, tc.want)
+				}
+				requireKept(t, a.run)
+				return
+			}
+			a.requireSessionsClosed(t, 1)
+			// A soft reset leaves the base's change staged, which is kept.
+			if tc.name == "base-reported" {
+				requireRemoved(t, a.run)
+			} else {
+				requireKept(t, a.run)
 			}
 		})
 	}

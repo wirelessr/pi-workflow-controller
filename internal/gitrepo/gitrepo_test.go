@@ -362,16 +362,8 @@ func newCheckoutFixture(t *testing.T) checkoutFixture {
 	return f
 }
 
-func (f checkoutFixture) requireHistory(t *testing.T) {
-	t.Helper()
-	raw, err := f.git(context.Background(), "rev-parse", "refs/pin/head")
-	if err != nil || strings.TrimSpace(string(raw)) != f.sha {
-		t.Fatalf("repository history lost: %q %v", raw, err)
-	}
-}
-
 // errAfterFirst reports cancellation only after Cleanup's first check, so
-// the stop lands between removing the checkout and its registration.
+// the stop lands between removing the checkout and the repository.
 type errAfterFirst struct {
 	context.Context
 	calls int
@@ -396,7 +388,7 @@ func TestRepoCleanup(t *testing.T) {
 		requireMissing(t, f.repo.Worktree())
 		requireMissing(t, f.repo.WorktreeGitDir())
 		requireFile(t, filepath.Join(f.repo.Root(), "history"), "keep")
-		f.requireHistory(t)
+		requireMissing(t, f.repo.Dir())
 		writeFile(t, filepath.Join(f.repo.Root(), "checkout"), "later foreign file")
 		if err := f.repo.Cleanup(context.Background()); err != nil {
 			t.Fatal(err)
@@ -412,7 +404,7 @@ func TestRepoCleanup(t *testing.T) {
 			t.Fatal(err)
 		}
 		requireMissing(t, f.repo.WorktreeGitDir())
-		f.requireHistory(t)
+		requireMissing(t, f.repo.Dir())
 	})
 	for _, target := range []string{"root", "repository", "checkout", "checkout-symlink"} {
 		t.Run("replaced-"+target, func(t *testing.T) {
@@ -460,7 +452,7 @@ func TestRepoCleanup(t *testing.T) {
 			}
 			requireMissing(t, f.repo.Worktree())
 			requireMissing(t, f.repo.WorktreeGitDir())
-			f.requireHistory(t)
+			requireMissing(t, f.repo.Dir())
 		})
 	}
 	t.Run("cancelled-between-removals", func(t *testing.T) {
@@ -477,7 +469,7 @@ func TestRepoCleanup(t *testing.T) {
 			t.Fatal(err)
 		}
 		requireMissing(t, f.repo.WorktreeGitDir())
-		f.requireHistory(t)
+		requireMissing(t, f.repo.Dir())
 	})
 }
 
