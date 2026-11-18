@@ -419,9 +419,10 @@ func TestFixReceiptRejected(t *testing.T) {
 			if got := a.decisions(t); slices.ContainsFunc(got, func(d decision) bool { return d.Name == "fix-verified" }) {
 				t.Fatalf("decisions %+v", got)
 			}
-			// A fixer's commit no receipt verified is kept; without one the
-			// worktree holds nothing the implementation's verified head lacks.
-			if s.head != s.implemented {
+			// A fixer's commit no receipt verified is kept, and so is a
+			// verified head GitHub no longer shows on the pull request; else
+			// the worktree holds nothing the verified head lacks.
+			if s.head != s.implemented || tc.name == "head-not-an-ancestor" {
 				requireKept(t, a.run)
 			} else {
 				requireRemoved(t, a.run)

@@ -52,7 +52,7 @@ Runtime／contract 不依賴 engine／TUI，所有核心 package 不依賴終端
 | 組別 | Tests 入口 | 核對重點 |
 |---|---|---|
 | Runtime／transport | [runtime_test.go](internal/runtime/runtime_test.go)、[transport_test.go](internal/runtime/transport_test.go)、[codec_test.go](internal/runtime/codec_test.go)、[command_test.go](internal/runtime/command_test.go) | Ack/token/settled、sticky retry/compaction、typed causes、增量 cursor/backlog、framing、readiness、ownership/Wait、gh／git 命令的 env/argv/endpoint 拒絕/限額/取消 |
-| Git repository | [gitrepo_test.go](internal/gitrepo/gitrepo_test.go) | 路徑保留、pinned fetch 與 branch fetch 的輸入拒絕、argv 與錯誤原樣回傳、真 git 的 branch tip 與 ref-name 判定、替換拒絕、取消與冪等 cleanup、歷史保留 |
+| Git repository | [gitrepo_test.go](internal/gitrepo/gitrepo_test.go) | 路徑保留、pinned fetch 與 branch fetch 的輸入拒絕、argv 與錯誤原樣回傳、真 git 的 branch tip 與 ref-name 判定、替換拒絕、取消與冪等 cleanup（repository 一併移除、不跟隨 symlink、root 下其他檔案保留） |
 | GitHub 讀取 | [github_test.go](internal/github/github_test.go) | 相等不查詢、ahead／behind／diverged 與 merge base、壞回應與 gh 失敗、SHA 前置拒絕不啟動 gh、取消 |
 | Store／schema | [contract_test.go](internal/contract/contract_test.go)、[schema_test.go](internal/contract/schema_test.go)、[json_test.go](internal/contract/json_test.go) | 真 temp filesystem、strict JSON、numeric guards、offline refs、snapshot/tamper/identity/limits、exclusive publication |
 | Engine／persistence | [engine_test.go](internal/engine/engine_test.go)、[persistence_test.go](internal/engine/persistence_test.go)、[deadline_test.go](internal/engine/deadline_test.go)、[protocol_test.go](internal/engine/protocol_test.go)、[resource_test.go](internal/engine/resource_test.go) | 順序/parallel/retry、全部 Ref 入口、provenance/fatal、blocked journal、outcome lock、slot、FinalDelivery、AddCleanup |

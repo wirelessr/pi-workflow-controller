@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"pi-workflow-controller/internal/engine"
+	"pi-workflow-controller/internal/github"
 	"pi-workflow-controller/internal/gitrepo"
 	"pi-workflow-controller/internal/runtime"
 )
@@ -32,15 +33,23 @@ type gitSource struct {
 }
 
 // worktree is the Controller-owned checkout the Agent works in. When the
-// run ends it is kept only while it may hold the only copy of the Agent's
-// work, unless remove was set; published is the last head verified on the
-// pull request.
+// run ends it is kept while it may hold work no remote has, unless remove
+// was set; published is the last head verified on the pull request.
+// repository and runDir are where the cleanup reads GitHub.
 type worktree struct {
-	repo      *gitrepo.Repo
-	base      string
-	allowFile bool
-	remove    atomic.Bool
-	published atomic.Pointer[string]
+	repo               *gitrepo.Repo
+	base               string
+	allowFile          bool
+	repository, runDir string
+	remove             atomic.Bool
+	published          atomic.Pointer[publishedHead]
+}
+
+// publishedHead is a head verified as the head of pull request pull or one
+// of its ancestors.
+type publishedHead struct {
+	head string
+	pull int
 }
 
 // emptyTree is git's well-known empty tree, which git knows without the
@@ -61,6 +70,11 @@ func (w *worktree) git(ctx context.Context, args ...string) ([]byte, error) {
 
 // gitAt is git with the same policy on another git directory of the repository.
 func (w *worktree) gitAt(ctx context.Context, gitDir string, args ...string) ([]byte, error) {
+	return w.gitEnv(ctx, gitDir, nil, args...)
+}
+
+// gitEnv is gitAt with env added to the configuration isolation.
+func (w *worktree) gitEnv(ctx context.Context, gitDir string, env []string, args ...string) ([]byte, error) {
 	fixed := []string{
 		"--no-pager", "--git-dir=" + gitDir, "--attr-source=" + emptyTree,
 		"-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null",
@@ -72,7 +86,7 @@ func (w *worktree) gitAt(ctx context.Context, gitDir string, args ...string) ([]
 	if w.allowFile {
 		fixed = append(fixed, "-c", "protocol.file.allow=always")
 	}
-	return runtime.Git(ctx, w.repo.Root(), runtime.GitConfigIsolation(), append(fixed, args...)...)
+	return runtime.Git(ctx, w.repo.Root(), append(runtime.GitConfigIsolation(), env...), append(fixed, args...)...)
 }
 
 // errGitNoLazyFetch is a git without the option the receipt reads rely on.
@@ -90,12 +104,13 @@ func checkGit(ctx context.Context, dir string) error {
 }
 
 // read runs plumbing on the worktree's registration after the Agent had the
-// repository. It never uses the checkout's .git file, which the Agent may
-// point elsewhere. It disables lazy fetches, so no remote, helper or command
-// from a configuration the Agent may have changed runs, and replace refs,
-// which would substitute the history it reads.
+// repository. It never uses the checkout's .git file, or the registration's
+// commondir file, which the Agent may point elsewhere: the common directory
+// is the worktree repository's. It disables lazy fetches, so no remote,
+// helper or command from a configuration the Agent may have changed runs,
+// and replace refs, which would substitute the history it reads.
 func (w *worktree) read(ctx context.Context, args ...string) (string, error) {
-	out, err := w.gitAt(ctx, w.repo.WorktreeGitDir(), append([]string{"--no-lazy-fetch", "--no-replace-objects"}, args...)...)
+	out, err := w.gitEnv(ctx, w.repo.WorktreeGitDir(), []string{"GIT_COMMON_DIR=" + w.repo.Dir()}, append([]string{"--no-lazy-fetch", "--no-replace-objects"}, args...)...)
 	return strings.TrimSpace(string(out)), err
 }
 
@@ -154,25 +169,39 @@ func (w *worktree) cleanup(ctx context.Context) error {
 	return w.repo.Cleanup(ctx)
 }
 
-// holdsWork reports whether the worktree may hold work no remote has: a
-// HEAD with commits that the published head, or before any the base, lacks;
-// a change to a tracked file; or an untracked file that is not ignored. The
-// status read also runs on the Agent's repository configuration, so an
+// holdsWork reports whether the worktree may hold work no remote has. The
+// floor is the published head, or before any the base. Work is a commit
+// that the floor lacks on HEAD or on any ref but the remote-tracking ones
+// (other branches, tags, the stash), another worktree of the repository, an
+// index entry marked assume-unchanged or skip-worktree, a change to a
+// tracked file, or an untracked file that is not ignored; the ignore rules
+// are the Agent's to change. A published floor counts only while GitHub
+// still shows it as the pull request's head or one of its ancestors.
+//
+// The status read also runs on the Agent's repository configuration, so an
 // attributes file in the repository, from which it could apply filters,
 // counts as work instead of being read; runtime.Git already turns the
 // filesystem monitor off. It compares raw bytes, so content an Agent's
-// filter rewrote counts as a change.
+// filter rewrote counts as a change. Commits only in a reflog are not work.
 func (w *worktree) holdsWork(ctx context.Context) (bool, error) {
 	floor := w.base
-	if published := w.published.Load(); published != nil {
-		floor = *published
+	published := w.published.Load()
+	if published != nil {
+		floor = published.head
 	}
-	head, err := w.head(ctx)
+	ahead, err := w.read(ctx, "rev-list", "--count", "--exclude=refs/remotes/*", "--all", "--not", "--end-of-options", floor)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("worktree history: %w", err)
 	}
-	if ahead, err := w.isNew(ctx, floor, head); err != nil || ahead {
-		return ahead, err
+	if ahead != "0" {
+		return true, nil
+	}
+	worktrees, err := os.ReadDir(filepath.Join(w.repo.Dir(), "worktrees"))
+	if err != nil {
+		return false, fmt.Errorf("worktree registrations: %w", err)
+	}
+	if len(worktrees) != 1 {
+		return true, nil
 	}
 	for _, dir := range []string{w.repo.Dir(), w.repo.WorktreeGitDir()} {
 		_, err := os.Lstat(filepath.Join(dir, "info", "attributes"))
@@ -183,12 +212,32 @@ func (w *worktree) holdsWork(ctx context.Context) (bool, error) {
 			return false, fmt.Errorf("worktree attributes: %w", err)
 		}
 	}
-	out, err := w.read(ctx, "-c", "core.untrackedCache=false", "--no-optional-locks", "--work-tree="+w.repo.Worktree(),
+	index, err := w.read(ctx, "--work-tree="+w.repo.Worktree(), "ls-files", "-v")
+	if err != nil {
+		return false, fmt.Errorf("worktree index: %w", err)
+	}
+	for _, line := range strings.Split(index, "\n") {
+		if line != "" && (line[0] == 'S' || ('a' <= line[0] && line[0] <= 'z')) {
+			return true, nil
+		}
+	}
+	status, err := w.read(ctx, "-c", "core.untrackedCache=false", "-c", "core.ignoreStat=false", "--no-optional-locks", "--work-tree="+w.repo.Worktree(),
 		"status", "--porcelain", "--no-renames", "--untracked-files=normal", "--ignore-submodules=all")
 	if err != nil {
 		return false, fmt.Errorf("worktree status: %w", err)
 	}
-	return out != "", nil
+	if status != "" || published == nil {
+		return status != "", nil
+	}
+	pr, err := getPullRequest(ctx, w.runDir, w.repository, published.pull)
+	if err != nil {
+		return false, err
+	}
+	on, _, err := github.Ancestor(ctx, w.runDir, w.repository, published.head, pr.Head.SHA)
+	if err != nil {
+		return false, err
+	}
+	return !on, nil
 }
 
 // createWorktree fetches the default branch tip and checks it out detached, so
@@ -204,7 +253,7 @@ func createWorktree(ctx context.Context, r *engine.Run, source gitSource, reposi
 	if err != nil {
 		return nil, err
 	}
-	w := &worktree{repo: repo, allowFile: source.allowFile}
+	w := &worktree{repo: repo, allowFile: source.allowFile, repository: repository, runDir: r.Dir()}
 	defer removeUnregistered(repo, "worktree cleanup", &err)
 	if err = repo.Init(ctx, w.git); err != nil {
 		return nil, fmt.Errorf("git init: %w", err)

@@ -395,6 +395,19 @@ func TestRepoCleanup(t *testing.T) {
 		}
 		requireFile(t, filepath.Join(f.repo.Root(), "checkout"), "later foreign file")
 	})
+	t.Run("symlink-in-repository", func(t *testing.T) {
+		f := newCheckoutFixture(t)
+		outside := privateDir(t)
+		writeFile(t, filepath.Join(outside, "foreign"), "keep")
+		if err := os.Symlink(outside, filepath.Join(f.repo.Dir(), "link")); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.repo.Cleanup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		requireMissing(t, f.repo.Dir())
+		requireFile(t, filepath.Join(outside, "foreign"), "keep")
+	})
 	t.Run("missing-checkout", func(t *testing.T) {
 		f := newCheckoutFixture(t)
 		if err := os.RemoveAll(f.repo.Worktree()); err != nil {

@@ -275,7 +275,7 @@ func (p prepared) verifyPullRequest(ctx context.Context, r *engine.Run, last str
 	if !ancestor {
 		return pullRequestRecord{}, fmt.Errorf("%w: head: got %s, which is not the pull request head %s or one of its ancestors (compare status %s)", errReceipt, rc.head, pr.Head.SHA, status)
 	}
-	w.published.Store(&rc.head)
+	w.published.Store(&publishedHead{head: rc.head, pull: pr.Number})
 	return pullRequestRecord{URL: pr.HTMLURL, Number: pr.Number, Branch: pr.Head.Ref, HeadSHA: pr.Head.SHA, ReportedHead: rc.head, CompareStatus: status}, nil
 }
 

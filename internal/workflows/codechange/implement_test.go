@@ -342,15 +342,30 @@ func writeCandidate(t *testing.T, c agentCall, data any) {
 // one's process exit before returning, without cleanup errors.
 func (a a1Run) requireSessionsClosed(t *testing.T, n int) {
 	t.Helper()
+	a.requireSessions(t, n)
+	a.requireExitsConfirmed(t)
+}
+
+func (a a1Run) requireSessions(t *testing.T, n int) {
+	t.Helper()
 	if len(a.report.Snapshot.Sessions) != n || len(a.hellos) != n || len(a.runtime.specs) != n {
 		t.Fatalf("sessions %d hellos %d starts %d, want %d", len(a.report.Snapshot.Sessions), len(a.hellos), len(a.runtime.specs), n)
 	}
-	a.requireExitsConfirmed(t)
 }
 
 // requireExitsConfirmed checks the run confirmed the process exit of every
 // session it started before returning, without cleanup errors.
 func (a a1Run) requireExitsConfirmed(t *testing.T) {
+	t.Helper()
+	a.requireExitsOnly(t)
+	if len(a.report.CleanupErrors) != 0 {
+		t.Fatalf("cleanup errors: %v", a.report.CleanupErrors)
+	}
+}
+
+// requireExitsOnly checks the run confirmed the process exit of every
+// session it started before returning.
+func (a a1Run) requireExitsOnly(t *testing.T) {
 	t.Helper()
 	// The run's cleanup reports every handle, also those the workflow closed.
 	for _, hello := range a.hellos {
@@ -361,9 +376,6 @@ func (a a1Run) requireExitsConfirmed(t *testing.T) {
 		if !confirmed {
 			t.Fatalf("session %s exit not confirmed: %+v", hello.SessionID, a.report.Cleanup)
 		}
-	}
-	if len(a.report.CleanupErrors) != 0 {
-		t.Fatalf("cleanup errors: %v", a.report.CleanupErrors)
 	}
 }
 
@@ -700,9 +712,11 @@ func TestImplementReceiptRejected(t *testing.T) {
 			a.requireAttempts(t, 1)
 			a.requireNoSnapshot(t)
 			if tc.unreadable {
+				a.requireSessions(t, 1)
+				a.requireExitsOnly(t)
 				var failure *engine.Failure
-				if len(a.report.CleanupErrors) != 1 || !errors.As(a.report.CleanupErrors[0], &failure) || failure.Cause == nil || !strings.Contains(failure.Cause.Error(), "worktree kept: "+tc.want) {
-					t.Fatalf("cleanup errors %v, want the worktree kept with %q", a.report.CleanupErrors, tc.want)
+				if len(a.report.CleanupErrors) != 1 || !errors.As(a.report.CleanupErrors[0], &failure) || failure.Cause == nil || !strings.Contains(failure.Cause.Error(), "worktree kept: worktree history: ") {
+					t.Fatalf("cleanup errors %v, want the worktree kept with its history read's error", a.report.CleanupErrors)
 				}
 				requireKept(t, a.run)
 				return

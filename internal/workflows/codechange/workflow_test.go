@@ -1098,7 +1098,9 @@ func (f *fixture) requirePolicy(t *testing.T, repoDir string, extra []string) {
 				t.Fatalf("first git call %q, want the --no-lazy-fetch capability check", call.Args)
 			}
 		} else if i >= 0 && len(call.Args) > i+len(read) && reflect.DeepEqual(call.Args[i:i+len(read)], read) {
-			continue
+			if !slices.Contains(call.Env, "GIT_COMMON_DIR="+repoDir) {
+				t.Fatalf("registration read %q without the repository as its common directory: %q", call.Args, call.Env)
+			}
 		} else if i < 0 || len(call.Args) <= i+len(want) || !reflect.DeepEqual(call.Args[i:i+len(want)], want) || call.Args[i+len(want)] == "-c" {
 			t.Fatalf("git call %q, want the policy %q then the subcommand", call.Args, want)
 		}
@@ -1425,9 +1427,12 @@ func requireKept(t *testing.T, r *engine.Run) {
 // After registration a run that did not set remove keeps the worktree and
 // its repository exactly while the worktree may hold work no remote has: a
 // commit past the base, a change to a tracked file, an untracked file that
-// is not ignored, or a repository attributes file the status read does not
-// apply; an ignored file is not work. A filesystem monitor or a filter the
-// Agent configured in the repository never runs. Remove, set on success,
+// is not ignored, a commit on another branch or in the stash, an index
+// entry marked skip-worktree, another worktree of the repository, or a
+// repository attributes file the status read does not apply; an ignored file
+// is not work. A filesystem monitor or a filter the Agent configured in the
+// repository, or in a repository the registration's commondir names, never
+// runs. Remove, set on success,
 // removes them with any work, and either way the run's other files stay.
 func TestRegisteredWorktreeKeptWhileItHoldsWork(t *testing.T) {
 	for _, tc := range []struct {
@@ -1463,6 +1468,33 @@ func TestRegisteredWorktreeKeptWhileItHoldsWork(t *testing.T) {
 			f.gitIn(f.dir, "--git-dir="+repository, "config", "filter.hostile.clean", f.hostile())
 			f.write(filepath.Join(checkout, ".gitattributes"), "* filter=hostile\n")
 			// The same size, so status has to hash the file to see the change.
+			f.write(filepath.Join(checkout, "tracked.txt"), "BASE\n")
+		}, false, true, false},
+		{"other-branch", func(f *fixture, checkout, _ string) {
+			f.gitIn(checkout, "switch", "-q", "-c", "side")
+			f.commit(f.t, checkout, "on a branch\n")
+			f.gitIn(checkout, "switch", "-q", "--detach", f.head)
+		}, false, true, false},
+		{"stash", func(f *fixture, checkout, _ string) {
+			f.write(filepath.Join(checkout, "tracked.txt"), "stashed\n")
+			f.gitIn(checkout, "stash", "-q")
+		}, false, true, false},
+		{"skip-worktree", func(f *fixture, checkout, _ string) {
+			f.gitIn(checkout, "update-index", "--skip-worktree", "tracked.txt")
+			f.write(filepath.Join(checkout, "tracked.txt"), "hidden\n")
+		}, false, true, false},
+		{"other-worktree", func(f *fixture, checkout, _ string) {
+			f.gitIn(checkout, "worktree", "add", "-q", "--detach", filepath.Join(f.dir, "second"), f.head)
+		}, false, true, false},
+		// The registration's commondir points at a repository whose filter
+		// would run if the status read used it.
+		{"commondir-redirected", func(f *fixture, checkout, repository string) {
+			other := filepath.Join(f.dir, "other.git")
+			f.gitIn(f.dir, "init", "-q", "--bare", "--template=", other)
+			f.gitIn(f.dir, "--git-dir="+other, "config", "filter.hostile.clean", f.hostile())
+			f.mkdir(filepath.Join(other, "info"))
+			f.write(filepath.Join(other, "info", "attributes"), "* filter=hostile\n")
+			f.write(filepath.Join(repository, "worktrees", "checkout", "commondir"), other+"\n")
 			f.write(filepath.Join(checkout, "tracked.txt"), "BASE\n")
 		}, false, true, false},
 		{"remove-set", func(f *fixture, checkout, _ string) { f.commit(f.t, checkout, "unpushed\n") }, false, false, true},

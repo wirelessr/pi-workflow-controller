@@ -46,7 +46,7 @@ Engine 在 Store 關閉前建立定位資訊，寫入 `result.json.final`，並�
 - Root cancellation/deadline/fatal 或 callback fatal 不額外解析 final metadata；若取消或持久化錯誤發生在解析之後，已有 metadata 仍只表示先前驗證點，不覆蓋失敗 outcome。
 - Outcome 鎖定後立即啟動獨立 cleanup，不等 journal I/O；failed/cancelled 結果清單只 best-effort 寫入。所有 cleanup/finalization/close errors、`StatePersisted=false` 與取消 exit precedence 保留，無法落地的事件不得假稱已持久化。
 - Formatter 只有在相同 handle 的 cleanup `ProcessExited && WaitCompleted` 都確認時顯示 Closed；否則顯示 unconfirmed 並提醒不要 resume，所有原有 warnings 仍列出。
-- `Run.AddCleanup` 的 workspace callback 等 workflow join／Pi 確認 exit，未確認時保留資源；acquisition 部分失敗或註冊失敗仍由 caller 負責 bounded cleanup。Contracts、artifacts、private Git objects 與 Pi history 不因 process cleanup 被刪除。
+- `Run.AddCleanup` 的 workspace callback 等 workflow join／Pi 確認 exit，未確認時保留資源；acquisition 部分失敗或註冊失敗仍由 caller 負責 bounded cleanup。Contracts、artifacts 與 Pi history 不因 process cleanup 被刪除；自有 Git repository 是遠端內容的工作副本，連同 checkout 移除（code-change 的 worktree 另依其保留規則）。
 
 ## 4. 收取與 resume 邊界
 

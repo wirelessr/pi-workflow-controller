@@ -387,11 +387,12 @@ func TestDeepReviewIncomplete(t *testing.T) {
 
 // A deep review that ends without a report fails the run with the review's
 // error and the verified pull request record as the Final, with no further
-// Attach or session; the pull request stays and the worktree, holding
-// nothing the verified head lacks, is removed. A head the branch
-// no longer contains, after a force push once the receipt check passed,
-// fails acquisition before any review session; a rejected Prepare contract
-// fails after one.
+// Attach or session; the pull request stays. A head the branch no longer
+// contains, after a force push once the receipt check passed, fails
+// acquisition before any review session, and the worktree, whose verified
+// head GitHub no longer shows on the pull request, is kept; a rejected
+// Prepare contract fails after one, and the worktree, holding nothing the
+// verified head lacks, is removed.
 func TestDeepReviewWithoutReport(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -444,7 +445,11 @@ func TestDeepReviewWithoutReport(t *testing.T) {
 			// No session after the review's, and no Attach after the record.
 			a.requireSessionsClosed(t, 3+tc.sessions)
 			a.requireAttempts(t, 4+tc.sessions, "input", "skills", "pull-request")
-			requireRemoved(t, a.run)
+			if tc.name == "head-not-an-ancestor" {
+				requireKept(t, a.run)
+			} else {
+				requireRemoved(t, a.run)
+			}
 			requireMissing(t, filepath.Join(a.run.Dir(), deepReviewName, "checkout"))
 			if f.pulls(t) != 1 {
 				t.Fatalf("pulls %d", f.pulls(t))
