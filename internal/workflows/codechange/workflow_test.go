@@ -1428,8 +1428,9 @@ func requireKept(t *testing.T, r *engine.Run) {
 // its repository exactly while the worktree may hold work no remote has: a
 // commit past the base, a change to a tracked file, an untracked file that
 // is not ignored, a commit on another branch or in the stash, an index
-// entry marked skip-worktree, another worktree of the repository, or a
-// repository attributes file the status read does not apply; an ignored file
+// entry marked assume-unchanged or skip-worktree, another worktree of the
+// repository, a submodule's repository, or a repository attributes file the
+// status read does not apply; an ignored file
 // is not work. A filesystem monitor or a filter the Agent configured in the
 // repository, or in a repository the registration's commondir names, never
 // runs. Remove, set on success,
@@ -1479,6 +1480,14 @@ func TestRegisteredWorktreeKeptWhileItHoldsWork(t *testing.T) {
 			f.write(filepath.Join(checkout, "tracked.txt"), "stashed\n")
 			f.gitIn(checkout, "stash", "-q")
 		}, false, true, false},
+		{"assume-unchanged", func(f *fixture, checkout, _ string) {
+			f.gitIn(checkout, "update-index", "--assume-unchanged", "tracked.txt")
+			f.write(filepath.Join(checkout, "tracked.txt"), "hidden\n")
+		}, false, true, false},
+		// Where git keeps the repository of a submodule the Agent added.
+		{"submodule", func(f *fixture, _, repository string) {
+			f.mkdir(filepath.Join(repository, "worktrees", "checkout", "modules", "sub"))
+		}, false, true, false},
 		{"skip-worktree", func(f *fixture, checkout, _ string) {
 			f.gitIn(checkout, "update-index", "--skip-worktree", "tracked.txt")
 			f.write(filepath.Join(checkout, "tracked.txt"), "hidden\n")
@@ -1492,6 +1501,10 @@ func TestRegisteredWorktreeKeptWhileItHoldsWork(t *testing.T) {
 			other := filepath.Join(f.dir, "other.git")
 			f.gitIn(f.dir, "init", "-q", "--bare", "--template=", other)
 			f.gitIn(f.dir, "--git-dir="+other, "config", "filter.hostile.clean", f.hostile())
+			// Its objects are the worktree repository's, so reads through it
+			// succeed and reach the status read.
+			f.mkdir(filepath.Join(other, "objects", "info"))
+			f.write(filepath.Join(other, "objects", "info", "alternates"), filepath.Join(repository, "objects")+"\n")
 			f.mkdir(filepath.Join(other, "info"))
 			f.write(filepath.Join(other, "info", "attributes"), "* filter=hostile\n")
 			f.write(filepath.Join(repository, "worktrees", "checkout", "commondir"), other+"\n")

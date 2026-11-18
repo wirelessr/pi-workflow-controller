@@ -356,6 +356,13 @@ func TestConvergeRoundsEnd(t *testing.T) {
 				},
 				policy: func(p *engine.RunPolicy) { p.DisableRunTimeout = tc.disable },
 			})
+			// Work left at the return keeps the worktree of an unconverged
+			// run, which does not set the removal.
+			if tc.name == "round-cap" {
+				as.returned = func(r *engine.Run) {
+					f.write(filepath.Join(r.Dir(), worktreeDir, "checkout", "untracked.txt"), "work\n")
+				}
+			}
 			a := f.run(t, as)
 			report := a.report
 			outputs := report.Result.Outputs
@@ -397,7 +404,11 @@ func TestConvergeRoundsEnd(t *testing.T) {
 				t.Fatalf("outputs %+v", outputs)
 			}
 			a.requireExitsConfirmed(t)
-			requireRemoved(t, a.run)
+			if tc.name == "round-cap" {
+				requireKept(t, a.run)
+			} else {
+				requireRemoved(t, a.run)
+			}
 		})
 	}
 }

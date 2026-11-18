@@ -385,6 +385,32 @@ func TestDeepReviewIncomplete(t *testing.T) {
 	}
 }
 
+// A worktree whose only floor is the published head is kept when the
+// cleanup cannot read the pull request to confirm GitHub still shows that
+// head, with the read's error reported.
+func TestPublishedHeadUnreadableKept(t *testing.T) {
+	f := newFixture(t)
+	var implemented string
+	a := f.run(t, agents{
+		implement: f.implementReady(&implemented),
+		deepReview: func(t *testing.T, c agentCall) string {
+			if c.review.Stage == "code" {
+				return "provider-error"
+			}
+			return acceptDeepReview(t, c)
+		},
+		returned: func(*engine.Run) { f.write(filepath.Join(f.dir, "gh-fail-pull"), "") },
+	})
+	report := a.report
+	var failure *engine.Failure
+	if report.Outcome != engine.Failed || len(report.CleanupErrors) != 1 || !errors.As(report.CleanupErrors[0], &failure) || failure.Cause == nil || !strings.Contains(failure.Cause.Error(), "worktree kept: worktree published head: pull request GET: ") {
+		t.Fatalf("outcome %s cleanup %v, want the worktree kept with the pull request read's error", report.Outcome, report.CleanupErrors)
+	}
+	a.requireSessions(t, 8)
+	a.requireExitsOnly(t)
+	requireKept(t, a.run)
+}
+
 // A deep review that ends without a report fails the run with the review's
 // error and the verified pull request record as the Final, with no further
 // Attach or session; the pull request stays. A head the branch no longer

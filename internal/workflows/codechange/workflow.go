@@ -22,8 +22,8 @@ func Definition(piCWD, skillsDir string) engine.Definition {
 	p.MaxLiveSessions, p.MaxTotalSessions, p.MaxTotalAttempts = 3, 22, 80
 	// The deadline, shared with closing sessions, for the run's cleanup to
 	// remove the deep review's checkout and repository, and to read the
-	// worktree, when the removal is not set, and remove it with its
-	// repository; a removal under way is not interrupted. The value awaits
+	// worktree and GitHub, when the removal is not set, and remove it with
+	// its repository; a removal under way is not interrupted. The value awaits
 	// live data.
 	p.Runtime.CleanupTimeout = 2 * time.Minute
 	return engine.Definition{Name: "code-change", Description: "Implement an approved design doc as local commits in a Controller-owned worktree, have two reviewers check them, correct the work, push one branch and open a pull request, deep-review the pull request at the verified head with the code-review flow, then have a fresh fixer triage the deep review's findings, fix them and push to the same branch, then run convergence rounds, each waiting for the pull request's checks and statuses to settle, recording a snapshot of its state and having a fresh converger do one round of the private skill and the comment cleanup, until a round claims convergence without any write on an unchanged head or the rounds end unconverged, then take a final snapshot of the pull request state, and deliver a final summary that sets the reports beside what the Controller observed, judging none of them", Version: "1", Policy: p,

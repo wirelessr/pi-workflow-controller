@@ -172,11 +172,12 @@ func (w *worktree) cleanup(ctx context.Context) error {
 // holdsWork reports whether the worktree may hold work no remote has. The
 // floor is the published head, or before any the base. Work is a commit
 // that the floor lacks on HEAD or on any ref but the remote-tracking ones
-// (other branches, tags, the stash), another worktree of the repository, an
-// index entry marked assume-unchanged or skip-worktree, a change to a
-// tracked file, or an untracked file that is not ignored; the ignore rules
-// are the Agent's to change. A published floor counts only while GitHub
-// still shows it as the pull request's head or one of its ancestors.
+// (other branches, tags, including fetched ones, the stash), another
+// worktree of the repository, a submodule's repository, an index entry
+// marked assume-unchanged or skip-worktree, a change to a tracked file, or
+// an untracked file that is not ignored; the ignore rules are the Agent's to
+// change. A published floor counts only while GitHub still shows it as the
+// pull request's head or one of its ancestors.
 //
 // The status read also runs on the Agent's repository configuration, so an
 // attributes file in the repository, from which it could apply filters,
@@ -203,13 +204,17 @@ func (w *worktree) holdsWork(ctx context.Context) (bool, error) {
 	if len(worktrees) != 1 {
 		return true, nil
 	}
-	for _, dir := range []string{w.repo.Dir(), w.repo.WorktreeGitDir()} {
-		_, err := os.Lstat(filepath.Join(dir, "info", "attributes"))
-		if err == nil {
-			return true, nil
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return false, fmt.Errorf("worktree attributes: %w", err)
+	// A submodule's commits are invisible to the reads below, which do not
+	// enter submodules.
+	for _, path := range []string{filepath.Join("info", "attributes"), "modules"} {
+		for _, dir := range []string{w.repo.Dir(), w.repo.WorktreeGitDir()} {
+			_, err := os.Lstat(filepath.Join(dir, path))
+			if err == nil {
+				return true, nil
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				return false, fmt.Errorf("worktree %s: %w", path, err)
+			}
 		}
 	}
 	index, err := w.read(ctx, "--work-tree="+w.repo.Worktree(), "ls-files", "-v")
@@ -231,11 +236,11 @@ func (w *worktree) holdsWork(ctx context.Context) (bool, error) {
 	}
 	pr, err := getPullRequest(ctx, w.runDir, w.repository, published.pull)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("worktree published head: %w", err)
 	}
 	on, _, err := github.Ancestor(ctx, w.runDir, w.repository, published.head, pr.Head.SHA)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("worktree published head: %w", err)
 	}
 	return !on, nil
 }
