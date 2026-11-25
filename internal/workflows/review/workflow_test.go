@@ -61,6 +61,9 @@ type workflowSession struct {
 
 func (w *workflowRuntime) Start(ctx context.Context, spec runtime.SessionSpec) (runtime.Session, error) {
 	w.mu.Lock()
+	if spec.AppendPrompt != roleRules {
+		w.violations = append(w.violations, fmt.Errorf("%s started without the role rules", spec.Name))
+	}
 	if spec.Name != "review-prepare" {
 		if p := w.sessions["review-prepare"]; p == nil || !p.exited {
 			w.violations = append(w.violations, errors.New("reviewer started before prepare exit"))
