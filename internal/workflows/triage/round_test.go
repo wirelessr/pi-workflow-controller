@@ -23,7 +23,7 @@ func ptr[T any](v T) *T { return &v }
 // roundFiles are a round's own evidence: two identity lookups and a query.
 func roundFiles() map[string][]byte {
 	return map[string][]byte{
-		"lookup-a": []byte(`[{"tenant_id":"17","orgkey":"org-17","ui_hostname":"acme.example.invalid"}]`),
+		"lookup-a": []byte(`[{"tenant_id":"17","tenant_key":"org-17","tenant_hostname":"acme.example.invalid"}]`),
 		"lookup-b": []byte(`[]`),
 		"query-1":  []byte("3 errors between 22:00 and 23:00\n"),
 		"excerpt":  []byte("svc@abc123 main.go:10-12\nif !flag { return errFailed }\n"),
@@ -36,19 +36,19 @@ func baseRound(intake contract.Ref) Round {
 	whole := ""
 	own := func(id string) Evidence { return Evidence{FileID: id, Locator: &Locator{Pointer: &whole}} }
 	return Round{Status: "continue", Summary: "Identity searched on both stacks; one query ran.",
-		FactsUpdate: []Fact{{ID: "host", Kind: "ui_hostname", Value: "acme.example.invalid", Evidence: []Evidence{cite(intake, "page-1")}}},
+		FactsUpdate: []Fact{{ID: "host", Kind: "tenant_hostname", Value: "acme.example.invalid", Evidence: []Evidence{cite(intake, "page-1")}}},
 		TimeAnchors: []TimeAnchor{},
 		Identity: &Identity{
 			Lookups: []Lookup{
-				{ID: "l-a", Stack: "pop-a", Kubeconfig: ptr("kc-a"), Context: ptr("ctx-a"), Status: "ok", Rows: []Row{{TenantID: ptr("17"), Orgkey: ptr("org-17"), UIHostname: ptr("acme.example.invalid")}}, Evidence: []Evidence{own("lookup-a")}},
-				{ID: "l-b", Stack: "pop-b", Kubeconfig: ptr("kc-b"), Context: ptr("ctx-b"), Status: "ok", Rows: []Row{}, Evidence: []Evidence{own("lookup-b")}},
+				{ID: "l-a", Stack: "stack-a", Kubeconfig: ptr("kc-a"), Context: ptr("ctx-a"), Status: "ok", Rows: []Row{{TenantID: ptr("17"), TenantKey: ptr("org-17"), TenantHostname: ptr("acme.example.invalid")}}, Evidence: []Evidence{own("lookup-a")}},
+				{ID: "l-b", Stack: "stack-b", Kubeconfig: ptr("kc-b"), Context: ptr("ctx-b"), Status: "ok", Rows: []Row{}, Evidence: []Evidence{own("lookup-b")}},
 			},
 			Decisions: []Decision{
-				{ID: "d-pop", Fact: "home_pop", Value: ptr("pop-a"), Status: "confirmed", Lookup: ptr("l-a"), Row: ptr(0), Identifiers: []string{"tenant_id", "orgkey"}, Reason: "only stack whose row matches two identifiers"},
-				{ID: "d-tenant", Fact: "tenant_id", Value: ptr("17"), Status: "confirmed", Lookup: ptr("l-a"), Row: ptr(0), Identifiers: []string{"orgkey"}, Reason: "row matches the orgkey"},
+				{ID: "d-stack", Fact: "home_stack", Value: ptr("stack-a"), Status: "confirmed", Lookup: ptr("l-a"), Row: ptr(0), Identifiers: []string{"tenant_id", "tenant_key"}, Reason: "only stack whose row matches two identifiers"},
+				{ID: "d-tenant", Fact: "tenant_id", Value: ptr("17"), Status: "confirmed", Lookup: ptr("l-a"), Row: ptr(0), Identifiers: []string{"tenant_key"}, Reason: "row matches the tenant_key"},
 			},
 		},
-		Receipts: []Receipt{{ID: "q1", Target: "pop-a", Source: "logs", Condition: "level=error", Kind: "window", From: ptr("2025-01-01T22:00:00Z"), To: ptr("2025-01-01T23:00:00Z"),
+		Receipts: []Receipt{{ID: "q1", Target: "stack-a", Source: "logs", Condition: "level=error", Kind: "window", From: ptr("2025-01-01T22:00:00Z"), To: ptr("2025-01-01T23:00:00Z"),
 			TimeBasis: []Evidence{cite(intake, "page-0")}, Status: "ok", Outcome: "3 errors", Evidence: []Evidence{{FileID: "query-1"}}}},
 		DeployedBuilds:  []Build{},
 		VisionRequests:  []VisionRequest{},
@@ -58,14 +58,14 @@ func baseRound(intake contract.Ref) Round {
 }
 
 func deployedBuild() []Build {
-	return []Build{{ID: "b1", Stack: "pop-a", Component: "svc", Build: "1.2.3", Evidence: []Evidence{{FileID: "query-1", Locator: &Locator{Offset: ptr(int64(0)), Length: ptr(int64(8))}}}}}
+	return []Build{{ID: "b1", Stack: "stack-a", Component: "svc", Build: "1.2.3", Evidence: []Evidence{{FileID: "query-1", Locator: &Locator{Offset: ptr(int64(0)), Length: ptr(int64(8))}}}}}
 }
 
 // codeClaim is a candidate that read deployed code of build id in this
 // round (nil owner) or in owner.
 func codeClaim(id string, owner *contract.Ref) *Candidate {
 	excerpt := Evidence{FileID: "excerpt"}
-	return &Candidate{Statement: "svc returns the error when the flag is off", Premises: []string{"the flag is off on pop-a"},
+	return &Candidate{Statement: "svc returns the error when the flag is off", Premises: []string{"the flag is off on stack-a"},
 		AllowedEvidence: []Evidence{{FileID: "query-1"}, excerpt},
 		CodeRefs:        []CodeRef{{Repo: "svc", Ref: "abc123", Path: "main.go", Relation: "deployed", Basis: &BuildRef{Ref: owner, ID: id}, Evidence: []Evidence{excerpt}}},
 		Verification:    "runtime-verified"}
@@ -83,8 +83,8 @@ func TestCheckRound(t *testing.T) {
 		schema bool
 	}{
 		{name: "valid", change: func(*Round, refs) {}},
-		{name: "confirmed stack differs from the lookup", change: func(v *Round, _ refs) { v.Identity.Decisions[0].Value = ptr("pop-b") },
-			want: `identity.decisions[0].value: got "pop-b"; want "pop-a", the stack of lookup "l-a" row 0`},
+		{name: "confirmed stack differs from the lookup", change: func(v *Round, _ refs) { v.Identity.Decisions[0].Value = ptr("stack-b") },
+			want: `identity.decisions[0].value: got "stack-b"; want "stack-a", the stack of lookup "l-a" row 0`},
 		{name: "confirmed tenant differs from the row", change: func(v *Round, _ refs) { v.Identity.Decisions[1].Value = ptr("71") },
 			want: `identity.decisions[1].value: got "71"; want "17", the tenant_id of lookup "l-a" row 0`},
 		{name: "row outside the lookup", change: func(v *Round, _ refs) { v.Identity.Decisions[0].Row = ptr(1) }, want: `identity.decisions[0].row: got 1; lookup "l-a" has 1 rows`},
@@ -95,14 +95,14 @@ func TestCheckRound(t *testing.T) {
 			d := v.Identity.Decisions[0]
 			d.ID = "d-pop-2"
 			v.Identity.Decisions = append(v.Identity.Decisions, d)
-		}, want: "home_pop is already confirmed at identity.decisions[0]"},
+		}, want: "home_stack is already confirmed at identity.decisions[0]"},
 		{name: "unconfirmed decision needs no row", change: func(v *Round, _ refs) {
-			v.Identity.Decisions[0] = Decision{ID: "d-pop", Fact: "home_pop", Status: "unconfirmed", Identifiers: []string{}, Reason: "same row on two stacks"}
+			v.Identity.Decisions[0] = Decision{ID: "d-stack", Fact: "home_stack", Status: "unconfirmed", Identifiers: []string{}, Reason: "same row on two stacks"}
 		}},
 		{name: "confirmed decision without a row", change: func(v *Round, _ refs) { v.Identity.Decisions[0].Row = nil }, schema: true},
 		{name: "ok lookup without evidence", change: func(v *Round, _ refs) { v.Identity.Lookups[1].Evidence = []Evidence{} }, schema: true},
 		{name: "unavailable stack without a kubeconfig", change: func(v *Round, _ refs) {
-			v.Identity.Lookups[1] = Lookup{ID: "l-b", Stack: "pop-b", Status: "unavailable", Rows: []Row{}, Evidence: []Evidence{}, Note: "no kubeconfig"}
+			v.Identity.Lookups[1] = Lookup{ID: "l-b", Stack: "stack-b", Status: "unavailable", Rows: []Row{}, Evidence: []Evidence{}, Note: "no kubeconfig"}
 		}},
 		{name: "duplicate id across sections", change: func(v *Round, _ refs) { v.Receipts[0].ID = "host" }, want: `receipts[0].id: "host" is already used at facts_update[0]`},
 		{name: "receipt window reversed", change: func(v *Round, _ refs) { v.Receipts[0].From, v.Receipts[0].To = v.Receipts[0].To, v.Receipts[0].From }, want: "receipts[0]: from \"2025-01-01T23:00:00Z\" is not strictly before"},
@@ -180,15 +180,15 @@ func TestCheckRound(t *testing.T) {
 			v.GapDispositions = []GapDisposition{{Gap: GapRef{Ref: in.status, ID: "g9"}, Disposition: "resolved", Reason: "x", Evidence: []Evidence{}}}
 		}, want: `gap_dispositions[0].gap.id: attempt`},
 		{name: "unconfirmed decision is never recorded absent", change: func(v *Round, _ refs) {
-			v.Identity.Decisions[0] = Decision{ID: "d-pop", Fact: "home_pop", Status: "unconfirmed", Identifiers: []string{}, Reason: "same row on two stacks"}
-		}, absent: map[string]string{"identity:home_pop=pop-a": "not-accepted-r1-d-pop"}},
+			v.Identity.Decisions[0] = Decision{ID: "d-stack", Fact: "home_stack", Status: "unconfirmed", Identifiers: []string{}, Reason: "same row on two stacks"}
+		}, absent: map[string]string{"identity:home_stack=stack-a": "not-accepted-r1-d-stack"}},
 		{name: "disposition naming a contract outside the inputs", change: func(v *Round, in refs) {
 			v.GapDispositions = []GapDisposition{{Gap: GapRef{Ref: in.other, ID: "g1"}, Disposition: "not-applicable", Reason: "x", Evidence: []Evidence{}}}
 		}, want: "gap_dispositions[0].gap.ref"},
-		{name: "fact recorded absent declared again", change: func(*Round, refs) {}, absent: map[string]string{"fact:ui_hostname=acme.example.invalid": "not-accepted-r1-host"},
-			want: `facts_update[0]: ui_hostname "acme.example.invalid" was not accepted too often`},
-		{name: "decision recorded absent declared again", change: func(*Round, refs) {}, absent: map[string]string{"identity:home_pop=pop-a": "not-accepted-r1-d-pop"},
-			want: `identity.decisions[0]: confirming home_pop "pop-a" was not accepted too often`},
+		{name: "fact recorded absent declared again", change: func(*Round, refs) {}, absent: map[string]string{"fact:tenant_hostname=acme.example.invalid": "not-accepted-r1-host"},
+			want: `facts_update[0]: tenant_hostname "acme.example.invalid" was not accepted too often`},
+		{name: "decision recorded absent declared again", change: func(*Round, refs) {}, absent: map[string]string{"identity:home_stack=stack-a": "not-accepted-r1-d-stack"},
+			want: `identity.decisions[0]: confirming home_stack "stack-a" was not accepted too often`},
 		{name: "anchor recorded absent declared again", change: func(v *Round, in refs) {
 			v.TimeAnchors = []TimeAnchor{{ID: "event", Event: "reported failure", Original: "2025-01-02T00:30:00+02:00", Format: "rfc3339", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: cite(in.intake, "page-0")}}
 		}, absent: map[string]string{"anchor:reported failure@2025-01-01T22:30:00Z": "g"}, want: "time_anchors[0]: the anchor at 2025-01-01T22:30:00Z was not accepted too often"},

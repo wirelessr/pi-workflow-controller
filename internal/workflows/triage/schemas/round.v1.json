@@ -114,11 +114,11 @@
                       "additionalProperties": false,
                       "required": [
                         "tenant_id",
-                        "orgkey",
-                        "ui_hostname",
+                        "tenant_key",
+                        "tenant_hostname",
                         "name"
                       ],
-                      "description": "One identity row as the lookup returned it; null for a column it did not return",
+                      "description": "One identity row: each value as the lookup returned it, under these column names; null for a column it did not return",
                       "properties": {
                         "tenant_id": {
                           "type": [
@@ -127,19 +127,21 @@
                           ],
                           "pattern": "\\S"
                         },
-                        "orgkey": {
+                        "tenant_key": {
                           "type": [
                             "string",
                             "null"
                           ],
-                          "pattern": "\\S"
+                          "pattern": "\\S",
+                          "description": "The tenant's key, an identifier other than the tenant ID"
                         },
-                        "ui_hostname": {
+                        "tenant_hostname": {
                           "type": [
                             "string",
                             "null"
                           ],
-                          "pattern": "\\S"
+                          "pattern": "\\S",
+                          "description": "The tenant's hostname"
                         },
                         "name": {
                           "type": [
@@ -213,9 +215,10 @@
                   "fact": {
                     "enum": [
                       "tenant_id",
-                      "orgkey",
-                      "home_pop"
-                    ]
+                      "tenant_key",
+                      "home_stack"
+                    ],
+                    "description": "What the decision identifies; home_stack is the stack that holds the tenant"
                   },
                   "value": {
                     "type": [
@@ -256,8 +259,8 @@
                     "items": {
                       "enum": [
                         "tenant_id",
-                        "orgkey",
-                        "ui_hostname",
+                        "tenant_key",
+                        "tenant_hostname",
                         "name"
                       ]
                     },

@@ -540,7 +540,7 @@ func updateHome(book *ledger, round Round, supported map[string]bool) {
 	confirmed, other := "", false
 	for _, d := range round.Identity.Decisions {
 		switch {
-		case d.Fact != "home_pop":
+		case d.Fact != "home_stack":
 		case d.Status == "confirmed" && supported[d.ID]:
 			confirmed = *d.Value
 		case d.Status != "confirmed":

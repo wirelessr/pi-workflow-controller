@@ -84,7 +84,7 @@ func TestRounds(t *testing.T) {
 				if !strings.Contains(first.Requirements, identityOnlyRequirements) || len(first.Skills) != 2 || !strings.HasSuffix(first.Skills[0], "identity/SKILL.md") || first.Round != 1 {
 					t.Errorf("identity round task = skills %v round %d", first.Skills, first.Round)
 				}
-				if strings.Contains(second.Requirements, identityOnlyRequirements) || !strings.Contains(second.Requirements, `home stack "pop-a"`) || !strings.HasSuffix(second.Skills[0], "investigator/SKILL.md") || second.Round != 2 {
+				if strings.Contains(second.Requirements, identityOnlyRequirements) || !strings.Contains(second.Requirements, `home stack "stack-a"`) || !strings.HasSuffix(second.Skills[0], "investigator/SKILL.md") || second.Round != 2 {
 					t.Errorf("second round task = skills %v round %d", second.Skills, second.Round)
 				}
 				var labels []string
@@ -97,7 +97,7 @@ func TestRounds(t *testing.T) {
 				if calls[1].Request.Feedback != nil {
 					t.Errorf("second round feedback = %+v, want none", calls[1].Request.Feedback)
 				}
-				if out.HomeStack != "pop-a" || len(out.Records) != 2 || out.Records[1].Check != (contract.Ref{}) || out.Last.Status != "candidate" || out.Limit != "" {
+				if out.HomeStack != "stack-a" || len(out.Records) != 2 || out.Records[1].Check != (contract.Ref{}) || out.Last.Status != "candidate" || out.Limit != "" {
 					t.Errorf("rounds = %+v", out)
 				}
 				if len(handles) != 2 || handles[0] != handles[1] {
@@ -119,7 +119,7 @@ func TestRounds(t *testing.T) {
 				}
 			}},
 		{name: "a rejected home stack keeps runtime closed until it is recorded absent", verdict: func(id string) string {
-			if id == "d-pop" {
+			if id == "d-stack" {
 				return "unsupported"
 			}
 			return "supported"
@@ -134,7 +134,7 @@ func TestRounds(t *testing.T) {
 			agent: func(t *testing.T, c investigatorCall) string {
 				switch {
 				case c.round == 3 && c.repair:
-					if !strings.Contains(c.Request.Feedback.Message, `confirming home_pop "pop-a" was not accepted too often`) {
+					if !strings.Contains(c.Request.Feedback.Message, `confirming home_stack "stack-a" was not accepted too often`) {
 						t.Errorf("repair feedback = %q", c.Request.Feedback.Message)
 					}
 					c.round0(t, func(v *Round) {
@@ -153,7 +153,7 @@ func TestRounds(t *testing.T) {
 						t.Errorf("round %d is not identity-only", c.round)
 					}
 				}
-				if fb := calls[1].Request.Feedback; fb == nil || !strings.Contains(fb.Message, "d-pop (unsupported)") || len(fb.Refs) != 3 || fb.Refs[0] != out.Records[0].Round || fb.Refs[1] != out.Records[0].Check {
+				if fb := calls[1].Request.Feedback; fb == nil || !strings.Contains(fb.Message, "d-stack (unsupported)") || len(fb.Refs) != 3 || fb.Refs[0] != out.Records[0].Round || fb.Refs[1] != out.Records[0].Check {
 					t.Errorf("round 2 feedback = %+v", fb)
 				}
 				if fb := calls[2].Request.Feedback; fb == nil || !strings.Contains(fb.Message, "recorded absent in the round 2 fact status") {
@@ -163,7 +163,7 @@ func TestRounds(t *testing.T) {
 					t.Errorf("round 3 repair feedback = %+v, want the refs of %+v", repair, first)
 				}
 				status := decodeRef[FactStatus](t, nil, out.Records[1].Status)
-				if len(status.Gaps) != 1 || status.Gaps[0].ID != "not-accepted-r2-d-pop" || !strings.Contains(status.Gaps[0].Text, "2 times") {
+				if len(status.Gaps) != 1 || status.Gaps[0].ID != "not-accepted-r2-d-stack" || !strings.Contains(status.Gaps[0].Text, "2 times") {
 					t.Errorf("round 2 status gaps = %+v", status.Gaps)
 				}
 				if first := decodeRef[FactStatus](t, nil, out.Records[0].Status); len(first.Gaps) != 0 || first.Facts != out.Records[0].Round {
@@ -181,7 +181,7 @@ func TestRounds(t *testing.T) {
 		},
 			roles: "intake facts fact-check investigator fact-check investigator fact-check investigator",
 			agent: func(t *testing.T, c investigatorCall) string {
-				conflict := Decision{ID: "d-note", Fact: "home_pop", Value: ptr("pop-b"), Status: "conflict", Identifiers: []string{}, Reason: "the ticket says pop-b; the DB wins"}
+				conflict := Decision{ID: "d-note", Fact: "home_stack", Value: ptr("stack-b"), Status: "conflict", Identifiers: []string{}, Reason: "the ticket says stack-b; the DB wins"}
 				c.round0(t, func(v *Round) {
 					switch c.round {
 					case 1:
@@ -197,8 +197,8 @@ func TestRounds(t *testing.T) {
 			},
 			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
 				for _, c := range calls[1:] {
-					if !strings.Contains(c.Task.Requirements, `home stack "pop-a"`) {
-						t.Errorf("round %d runtime is not open for pop-a", c.round)
+					if !strings.Contains(c.Task.Requirements, `home stack "stack-a"`) {
+						t.Errorf("round %d runtime is not open for stack-a", c.round)
 					}
 					if c.Request.Feedback != nil {
 						t.Errorf("round %d feedback = %q; the unconfirmed note must not be judged", c.round, c.Request.Feedback.Message)
@@ -267,7 +267,7 @@ func TestRounds(t *testing.T) {
 				c.round0(t, func(v *Round) {
 					switch c.round {
 					case 2:
-						v.Identity.Decisions[0] = Decision{ID: "d-pop", Fact: "home_pop", Status: "unconfirmed", Identifiers: []string{}, Reason: "a second stack now has the same row"}
+						v.Identity.Decisions[0] = Decision{ID: "d-stack", Fact: "home_stack", Status: "unconfirmed", Identifiers: []string{}, Reason: "a second stack now has the same row"}
 					case 3:
 						ends(v)
 						v.Identity, v.FactsUpdate = nil, []Fact{}
@@ -276,12 +276,12 @@ func TestRounds(t *testing.T) {
 				return ""
 			},
 			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
-				if !strings.Contains(calls[1].Task.Requirements, `home stack "pop-a"`) || !strings.Contains(calls[2].Task.Requirements, identityOnlyRequirements) || out.HomeStack != "" {
+				if !strings.Contains(calls[1].Task.Requirements, `home stack "stack-a"`) || !strings.Contains(calls[2].Task.Requirements, identityOnlyRequirements) || out.HomeStack != "" {
 					t.Errorf("runtime did not close after the unconfirmed decision: home %q", out.HomeStack)
 				}
 			}},
 		{name: "a rejected confirmation keeps the earlier home stack", verdict: func(id string) string {
-			if id == "d-pop-b" {
+			if id == "d-stack-b" {
 				return "unsupported"
 			}
 			return "supported"
@@ -290,8 +290,8 @@ func TestRounds(t *testing.T) {
 				c.round0(t, func(v *Round) {
 					switch c.round {
 					case 2:
-						v.Identity.Lookups[1].Rows = []Row{{TenantID: ptr("17"), Orgkey: ptr("org-17")}}
-						v.Identity.Decisions[0] = Decision{ID: "d-pop-b", Fact: "home_pop", Value: ptr("pop-b"), Status: "confirmed", Lookup: ptr("l-b"), Row: ptr(0), Identifiers: []string{"orgkey"}, Reason: "row on pop-b"}
+						v.Identity.Lookups[1].Rows = []Row{{TenantID: ptr("17"), TenantKey: ptr("org-17")}}
+						v.Identity.Decisions[0] = Decision{ID: "d-stack-b", Fact: "home_stack", Value: ptr("stack-b"), Status: "confirmed", Lookup: ptr("l-b"), Row: ptr(0), Identifiers: []string{"tenant_key"}, Reason: "row on stack-b"}
 					case 3:
 						ends(v)
 						v.Identity, v.FactsUpdate = nil, []Fact{}
@@ -300,7 +300,7 @@ func TestRounds(t *testing.T) {
 				return ""
 			},
 			check: func(t *testing.T, out Rounds, calls []investigatorCall, _ []string) {
-				if !strings.Contains(calls[2].Task.Requirements, `home stack "pop-a"`) || out.HomeStack != "pop-a" {
+				if !strings.Contains(calls[2].Task.Requirements, `home stack "stack-a"`) || out.HomeStack != "stack-a" {
 					t.Errorf("home = %q after a rejected confirmation of another stack", out.HomeStack)
 				}
 			}},
@@ -613,8 +613,8 @@ func TestRounds(t *testing.T) {
 					}
 					finding.Entry, finding.Receipt = nil, ptr("q1")
 				}
-				// Round 1 ran identity-only even though it confirmed pop-a.
-				want := map[int]string{1: "The round ran with the confirmed home stack none", 2: `The round ran with the confirmed home stack "pop-a"`}[call.Task.Round]
+				// Round 1 ran identity-only even though it confirmed stack-a.
+				want := map[int]string{1: "The round ran with the confirmed home stack none", 2: `The round ran with the confirmed home stack "stack-a"`}[call.Task.Round]
 				if !strings.Contains(call.Task.Requirements, want) {
 					t.Errorf("round %d audit requirements do not say %q", call.Task.Round, want)
 				}
@@ -977,17 +977,17 @@ func TestRounds(t *testing.T) {
 			roles: "intake facts fact-check investigator investigator fact-check",
 			agent: func(t *testing.T, c investigatorCall) string {
 				if !c.repair {
-					c.round0(t, func(v *Round) { ends(v); v.Identity.Decisions[0].Value = ptr("pop-b") })
+					c.round0(t, func(v *Round) { ends(v); v.Identity.Decisions[0].Value = ptr("stack-b") })
 					return ""
 				}
-				if !strings.Contains(c.Request.Feedback.Message, `want "pop-a", the stack of lookup "l-a" row 0`) {
+				if !strings.Contains(c.Request.Feedback.Message, `want "stack-a", the stack of lookup "l-a" row 0`) {
 					t.Errorf("repair feedback = %q", c.Request.Feedback.Message)
 				}
 				c.round0(t, ends)
 				return ""
 			},
 			check: func(t *testing.T, out Rounds, _ []investigatorCall, handles []string) {
-				if len(handles) != 2 || handles[0] != handles[1] || out.HomeStack != "pop-a" {
+				if len(handles) != 2 || handles[0] != handles[1] || out.HomeStack != "stack-a" {
 					t.Errorf("handles = %v home = %q", handles, out.HomeStack)
 				}
 				record := decodeRef[ObservationRecord](t, nil, out.Records[0].Observation)
@@ -1017,7 +1017,7 @@ func TestRounds(t *testing.T) {
 			started := time.Now()
 			harnessPolicy = tc.run
 			defer func() { harnessPolicy = nil }()
-			res := runHarness(t, "CASE-17 pop=pop-a", func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
+			res := runHarness(t, "CASE-17 pop=stack-a", func(ctx context.Context, r *engine.Run, _ engine.Input) (engine.Result, error) {
 				sk, err := PrepareSkills(ctx, r, r.Root(), skills.source)
 				if err != nil {
 					return engine.Result{}, err
@@ -1444,7 +1444,7 @@ func verdictFor(call agentCall, change func(*Verification)) Verification {
 	v := call.Task.Verify
 	out := Verification{Claim: v.Claim, Role: v.Role, AllowedEvidence: v.AllowedEvidence, Assessment: VerificationAssessment{
 		Support: "supported", Reason: "the query result shows it", Basis: []Evidence{v.AllowedEvidence[0]}, RuntimeBasis: []Evidence{},
-		Measurement: "valid", Window: "unavailable", Filter: "unavailable", Environment: "pop-a", Release: "unavailable", Counterexamples: []VerificationIssue{}, Gaps: []string{}}}
+		Measurement: "valid", Window: "unavailable", Filter: "unavailable", Environment: "stack-a", Release: "unavailable", Counterexamples: []VerificationIssue{}, Gaps: []string{}}}
 	if change != nil {
 		change(&out)
 	}

@@ -44,14 +44,14 @@ type Lookup struct {
 }
 
 type Row struct {
-	TenantID   *string `json:"tenant_id"`
-	Orgkey     *string `json:"orgkey"`
-	UIHostname *string `json:"ui_hostname"`
-	Name       *string `json:"name"`
+	TenantID       *string `json:"tenant_id"`
+	TenantKey      *string `json:"tenant_key"`
+	TenantHostname *string `json:"tenant_hostname"`
+	Name           *string `json:"name"`
 }
 
 func (r Row) column(name string) *string {
-	return map[string]*string{"tenant_id": r.TenantID, "orgkey": r.Orgkey, "ui_hostname": r.UIHostname, "name": r.Name}[name]
+	return map[string]*string{"tenant_id": r.TenantID, "tenant_key": r.TenantKey, "tenant_hostname": r.TenantHostname, "name": r.Name}[name]
 }
 
 type Decision struct {
@@ -233,7 +233,7 @@ func citeErrs(cite func(string, Evidence) error, field string, evidence []Eviden
 }
 
 // checkIdentity keeps the approved receipt echo: a confirmed value equals
-// the cited row's column (home_pop equals the lookup's stack), and the
+// the cited row's column (home_stack equals the lookup's stack), and the
 // identifiers it rests on are present in that row. Which rows to trust and
 // whether the identifiers suffice stay the Agent's and validator's call.
 func checkIdentity(ids idSet, cite func(string, Evidence) error, v Identity, absent map[string]string) error {
@@ -276,7 +276,7 @@ func checkIdentity(ids idSet, cite func(string, Evidence) error, v Identity, abs
 		}
 		row := l.Rows[*d.Row]
 		want, column := l.Stack, "stack"
-		if d.Fact != "home_pop" {
+		if d.Fact != "home_stack" {
 			got := row.column(d.Fact)
 			if got == nil {
 				return fmt.Errorf("%s.value: lookup %q row %d has no %s; a confirmed value must equal the row", field, l.ID, *d.Row, d.Fact)

@@ -204,8 +204,8 @@ func runHarness(t *testing.T, prompt string, execute engine.Workflow, agent func
 func intakeFiles() (Intake, map[string][]byte) {
 	files := map[string][]byte{
 		"fields": []byte(`[{"id":"customfield_1","name":"Ambiguous"},{"id":"description","name":"Description"}]`),
-		"page-0": []byte(`{"startAt":0,"total":2,"comments":[{"id":"c1","body":"Tenant 17 (orgkey org-17) reports failures at 2025-01-02T00:30:00+02:00"}]}`),
-		"page-1": []byte(`{"startAt":1,"total":2,"comments":[{"id":"c2","body":"Host acme.example.invalid, possibly on pop-a"}]}`),
+		"page-0": []byte(`{"startAt":0,"total":2,"comments":[{"id":"c1","body":"Tenant 17 (tenant_key org-17) reports failures at 2025-01-02T00:30:00+02:00"}]}`),
+		"page-1": []byte(`{"startAt":1,"total":2,"comments":[{"id":"c2","body":"Host acme.example.invalid, possibly on stack-a"}]}`),
 		"linked": []byte(`{"key":"CASE-18","fields":{"summary":"Same incident"}}`),
 		"bundle": []byte("event=sample at 2025-01-02T00:30:00+02:00\n"),
 		"unpack": []byte("extracted bundle listing\n"),
@@ -241,8 +241,8 @@ func factsFor(call agentCall) Facts {
 	return Facts{Intake: intake, Prompt: prompt,
 		Facts: []Fact{
 			{ID: "tenant", Kind: "tenant_id", Value: "17", Evidence: []Evidence{cite(intake, "page-0")}},
-			{ID: "orgkey", Kind: "orgkey", Value: "org-17", Evidence: []Evidence{cite(intake, "page-0")}},
-			{ID: "pop", Kind: "home_pop", Value: "pop-a", Evidence: []Evidence{cite(intake, "page-1")}},
+			{ID: "tenant_key", Kind: "tenant_key", Value: "org-17", Evidence: []Evidence{cite(intake, "page-0")}},
+			{ID: "pop", Kind: "home_stack", Value: "stack-a", Evidence: []Evidence{cite(intake, "page-1")}},
 		},
 		TimeAnchors:    []TimeAnchor{{ID: "event", Event: "reported failure", Original: "2025-01-02T00:30:00+02:00", Format: "rfc3339", SourceTZ: "+02:00", UTC: "2025-01-01T22:30:00Z", OffsetSeconds: 7200, Evidence: cite(intake, "page-0")}},
 		VisionRequests: []VisionRequest{},
@@ -335,11 +335,11 @@ func TestS0(t *testing.T) {
 			}},
 		{name: "a fact still rejected after the retries is absent with a gap", retries: 1, verdict: inferredPop, roles: "intake facts fact-check facts fact-check", gaps: "not-accepted-pop:Item pop was judged unsupported "},
 		{name: "an undecidable fact is absent with a gap", retries: 0, verdict: func(id string) string {
-			if id == "orgkey" {
+			if id == "tenant_key" {
 				return "insufficient"
 			}
 			return "supported"
-		}, roles: "intake facts fact-check", gaps: "not-accepted-orgkey:Item orgkey was judged insuffici"},
+		}, roles: "intake facts fact-check", gaps: "not-accepted-tenant_key:Item tenant_key was judged insuf"},
 		{name: "missing identity and time are gaps, not failures", retries: 0, verdict: allSupported, roles: "intake facts fact-check",
 			agent: func(t *testing.T, call agentCall, round int) bool {
 				if call.Role != "facts" {
@@ -379,7 +379,7 @@ func TestS0(t *testing.T) {
 			rounds := map[string]int{}
 			sessions := map[string][]string{}
 			defer func() { firstRound.facts = contract.Ref{} }()
-			res := runHarness(t, "CASE-17 pop=pop-a please check", s0Workflow(t, skills.source, &out, tc.retries), func(t *testing.T, call agentCall) string {
+			res := runHarness(t, "CASE-17 pop=stack-a please check", s0Workflow(t, skills.source, &out, tc.retries), func(t *testing.T, call agentCall) string {
 				repair := call.Request.Feedback != nil && strings.HasPrefix(call.Request.Feedback.Message, "Previous contract")
 				if !repair {
 					rounds[call.Role]++
@@ -456,7 +456,7 @@ func TestS0(t *testing.T) {
 				}
 			}
 			prompt := decodeRef[CallerPrompt](t, res.Run, out.Prompt)
-			if prompt.Ticket != "CASE-17" || prompt.Hints != "pop=pop-a please check" {
+			if prompt.Ticket != "CASE-17" || prompt.Hints != "pop=stack-a please check" {
 				t.Fatalf("caller prompt record = %+v", prompt)
 			}
 		})

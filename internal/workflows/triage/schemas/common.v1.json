@@ -334,14 +334,14 @@
         "kind": {
           "enum": [
             "tenant_id",
-            "orgkey",
-            "ui_hostname",
-            "home_pop",
+            "tenant_key",
+            "tenant_hostname",
+            "home_stack",
             "customer_name",
             "user",
             "other"
           ],
-          "description": "What the value identifies"
+          "description": "What the value identifies; tenant_key is a tenant identifier other than the tenant ID, home_stack is the stack that holds the tenant"
         },
         "value": {
           "type": "string",
