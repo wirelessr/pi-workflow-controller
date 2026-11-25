@@ -1157,7 +1157,7 @@ func TestConvergeSkillsExpanded(t *testing.T) {
 // constant they share with other Steps shows up here and is made on purpose.
 func TestFixRequirementsUnchanged(t *testing.T) {
 	sum := sha256.Sum256([]byte(baselineRequirements + "\n\n" + fixRequirements))
-	if got := hex.EncodeToString(sum[:]); got != "e375d614fc177451584837574ad7b36646132504f45c14aa640ad27b970ea135" {
+	if got := hex.EncodeToString(sum[:]); got != "749731847fc156aaf35166740816d67a5fa3fc1b7abe349fe374452fae7e9a16" {
 		t.Fatalf("fix requirements sha256 %s", got)
 	}
 }
@@ -1247,6 +1247,26 @@ func TestConvergeLimits(t *testing.T) {
 		}
 	}
 	a.requireExitsConfirmed(t)
+}
+
+// TestCommentRuleInEveryCodeWriter pins the comment rule to every Step that
+// writes code, once each: an implementer without it wrote ticket references
+// into comments that no later Step removed.
+func TestCommentRuleInEveryCodeWriter(t *testing.T) {
+	for _, c := range []struct {
+		step, requirements string
+		want               int
+	}{
+		{"implement", implementRequirements, 1},
+		{"publish", publishRequirements, 1},
+		{"fix", fixRequirements, 1},
+		{"converge", fmt.Sprintf(convergeRequirements, convergeTimeout), 1},
+		{"pre-PR review", reviewRequirements, 0},
+	} {
+		if got := strings.Count(c.requirements, commentCleanup); got != c.want {
+			t.Errorf("%s requirements carry the comment rule %d times, want %d", c.step, got, c.want)
+		}
+	}
 }
 
 // TestConvergeRequirementsStateTimeLimit pins the time limit the converger

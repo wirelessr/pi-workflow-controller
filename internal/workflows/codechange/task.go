@@ -15,7 +15,8 @@ const baselineRequirements = `These requirements take precedence over any confli
 const implementRequirements = `Role: implementer of the design doc snapshot, the evidence of the input in request.inputs. The snapshot is the authority on what to build; material it refers to next to its original path may be read.
 - A gap is a decision the design doc should have made and the implementation needs, including which ticket the work belongs to. Judge the gaps before committing anything; if there are any, report them instead of implementing.
 - Otherwise implement it in the worktree and commit locally, following the git workflow skill Pi loads for branch names and commit messages. The authorized writes are local edits and local commits in the worktree: no push, no remote branch, no pull request, no ticket transition and no other network write. This Step stops at the local commits.
-- Choose verification from the design doc and the repository's own practice.`
+- Choose verification from the design doc and the repository's own practice.
+` + commentCleanup
 
 // reviewRequirements are what the pre-PR reviewers' role adds to the
 // baseline; each reviewer's focus follows them.
@@ -37,7 +38,7 @@ const (
 const publishRequirements = `Role: the implementer, now correcting the implementation in the worktree after the pre-PR review and publishing it. The implement contract in request.inputs is your earlier report; the worktree HEAD is its local_head until you commit.
 - Judge each finding of the pre-PR review contracts in request.feedback.refs yourself: fix in the worktree those you judge should be fixed, and give every finding a disposition with your reason.
 - The authorized writes are: local edits and local commits in the worktree, following the git workflow skill Pi loads; pushing one branch that carries this work to the input's repository, not the default branch; opening one pull request, not a draft, from that branch to the input's default branch, setting only its title, body, base and head; and the ticket transition that skill calls for on the implement contract's ticket.
-` + gitSkillFallbackBefore + "in the pull request body" + gitSkillFallbackAfter + `
+` + commentCleanup + "\n" + gitSkillFallbackBefore + "in the pull request body" + gitSkillFallbackAfter + `
 - This Step ends once the pull request is open and the ticket transition is done or has failed; do not wait for checks or reviews.`
 
 // appendOnly, followed by the head where a Step that pushes nothing leaves
@@ -45,8 +46,10 @@ const publishRequirements = `Role: the implementer, now correcting the implement
 // the deep review integrate it; the sentence before it names that branch.
 const appendOnly = "- Every commit already on that branch stays in its history, this work's own pushed and reviewed commits included: only add commits on top of that history, never rewrite or discard any of them. Integrate the branch's commits that the worktree does not have only when you push; if you push nothing, leave the HEAD at "
 
-// commentCleanup is the comment cleanup that the fix and converge Steps do.
-const commentCleanup = "- Source code comments that this work added or modified since the input's base commit keep only what a reader cannot get from the code itself, such as why it is so or what must stay true or change together with it; remove those that restate what the code does, refer to the task, a review or the pull request, or tell how the change came about. A comment the input's design doc asks for stays, whatever this rule would otherwise remove."
+// commentCleanup is the comment rule of every Step that writes code: the
+// implementer and publish Steps write by it, the fix and converge Steps also
+// clean up by it.
+const commentCleanup = "- Source code comments that this work added or modified since the input's base commit keep only what a reader cannot get from the code itself, such as why it is so or what must stay true or change together with it; remove those that restate what the code does, or that refer to the work instead of the code: its ticket, the design doc or any part of it, a review, the pull request, or how the change came about. A reader of the code has none of these, so a point worth keeping is reworded to stand on its own. Comments already in the repository are not a precedent for this rule. A comment the input's design doc asks for stays, whatever this rule would otherwise remove."
 
 // pushAuthorized and pushEnds are the authorized writes and the end of the
 // fix Step, which pushes only to the pull request record's branch.

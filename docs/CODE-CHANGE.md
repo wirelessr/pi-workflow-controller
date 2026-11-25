@@ -55,7 +55,7 @@ Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，�
                  3. fresh Agent 一輪（私有 skill）：讀快照與上一輪報告，triage、修正、comment 清理、reply／resolve、回覆 top-level comment、push，並自行查最新狀態
                  輸出：本輪報告（逐項狀態、是否宣稱已收斂、外部寫入 receipt）；Controller 核對
                  結束：Agent 宣稱已收斂且本輪沒有任何外部寫入 receipt，或輪數用盡，或某輪執行失敗
-                 「comment 清理」是 C 與 D 每輪 requirements 共用的同一條原則（`commentCleanup`，範圍是 input 的 base commit 以來本次變更新增或修改的 source code 註解，內容以該常數為準）。它是 Agent 的原則性工作，Controller 不判斷註解品質，只核對 push receipt
+                 「comment 清理」是 C 與 D 每輪 requirements 共用的同一條原則（`commentCleanup`，範圍是 input 的 base commit 以來本次變更新增或修改的 source code 註解，內容以該常數為準）；A1 與 A3 的 requirements 也帶同一條，讓寫程式的 Step 從一開始就依它寫。它是 Agent 的原則性工作，Controller 不判斷註解品質，只核對 push receipt
 [Controller]  最後一次快照（套用同一個有界等待），與各階段報告一併成為 final summary（見第 5 節）
 ```
 
