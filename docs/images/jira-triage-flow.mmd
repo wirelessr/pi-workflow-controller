@@ -1,0 +1,117 @@
+flowchart TD
+    subgraph LEG["Legend"]
+        direction LR
+        L1(["Controller step: Go code"])
+        L2{"Controller decision: mechanical condition"}
+        L3["Agent produces work"]
+        L4{{"Agent judges or reviews"}}
+        L5[["Output or terminal outcome"]]
+        L1 ~~~ L2 ~~~ L3 ~~~ L4 ~~~ L5
+    end
+    LEG ~~~ START
+
+    START(["caller prompt: ticket key first, the rest are hints, not authorization"]) --> SK(["expand and record the private skills"])
+    SK --> ATT(["Attach the caller prompt"])
+
+    subgraph S0G["S0: intake and candidate facts"]
+        INT["intake: fetch the whole ticket as raw sources<br/>Go checks completeness"]
+        FACTS["facts: candidate facts and time anchors from text only<br/>each with a resolvable locator, no runtime query"]
+        V0{{"fact-check: independent reader<br/>judges support per item, not truth"}}
+        RET{"items not accepted<br/>and a retry left?"}
+        FB0(["feedback with the reasons"])
+        STATUS(["Attach fact status: items still not accepted<br/>are absent, each with a gap"])
+        INT --> FACTS --> V0 --> RET
+        RET -- yes --> FB0 --> FACTS
+        RET -- no --> STATUS
+    end
+    ATT --> INT
+    STATUS --> VIS0["vision: image requests the facts listed<br/>fresh session per request, transcription only"]
+
+    subgraph RG["Rounds: Investigator keeps one session, no subagents"]
+        BUD{"budget covers one more round<br/>and the report?"}
+        R["round n: Investigator<br/>identity-only runtime until a home stack is confirmed<br/>round 1 also has no investigator skill<br/>declares facts, anchors, identity decisions,<br/>runtime receipts, gap dispositions, status"]
+        RERUN(["timeout or failed compaction of a Step in rounds or S3, not S0:<br/>rerun from the same committed inputs in a fresh session,<br/>accounting not reset"])
+        GO{"Go acceptance of the Step: ids, refs, locators,<br/>anchor recomputation, identity decision equals<br/>its lookup row, runtime receipts, gap dispositions"}
+        FC{{"fresh fact-check of what the round declared<br/>runs only when it declared something to judge"}}
+        LEDG(["rejection ledger: an item rejected up to the limit<br/>is absent with a gap and cannot be redeclared"])
+        PERM(["next round's runtime instruction: identity-only until a supported<br/>confirmed home stack, then open read-only; an unconfirmed or conflict<br/>decision without one returns to identity-only; the audit checks against it, not enforced"])
+        OBS(["Attach the round's session entries and tool calls<br/>from every attempt"])
+        V1{{"audit: fresh validator checks them against the receipts<br/>findings become next-round feedback"}}
+        T1Q{"round 1 and not blocked?"}
+        T1{{"Steward T1<br/>pass or challenge"}}
+        NEXT{"round status"}
+        T3{{"Steward T3, not on the last round<br/>redirect only, not counted as a challenge"}}
+        CHK1{"T1 challenged and a round is left?"}
+        CHK2{"challenge limit spent?"}
+        T2a{{"Steward T2a<br/>pass or challenge"}}
+        CHK3{"verification limit and budget allow another?"}
+        CLAIM(["Attach claim: candidate copied, its own evidence re-bound to the round<br/>bound to the round and to T2a, or to no steward"])
+        PRO{{"pro"}}
+        CON{{"con"}}
+        CROSS{{"cross"}}
+        DEL(["record delivery: a role with exhausted recoverable<br/>failures is unavailable"])
+        T2b{{"Steward T2b<br/>pass or challenge"}}
+        VIS["vision: the round's image requests, only a continue round can list them<br/>fresh session per request, last round records gaps only"]
+        MAXR{"last round?"}
+        SESS(["session capacity check: reuse the session,<br/>or strict close then a fresh one"])
+
+        BUD -- yes --> R
+        R --> GO
+        R -.-> RERUN -.-> R
+        GO -- "invalid: diagnostic, repair in the same session" --> R
+        GO -- valid --> FC
+        FC --> LEDG --> PERM --> OBS --> V1 --> T1Q
+        T1Q -- yes --> T1 --> NEXT
+        T1Q -- no --> NEXT
+        NEXT -- continue --> VIS --> MAXR
+        NEXT -- stuck --> T3 --> MAXR
+        NEXT -- candidate --> CHK1
+        CHK1 -- yes --> MAXR
+        CHK1 -- no --> CHK2
+        CHK2 -- no --> T2a
+        CHK2 -- "yes: skip T2a" --> CHK3
+        T2a -- challenge --> MAXR
+        T2a -- pass --> CHK3
+        CHK3 -- yes --> CLAIM
+        CLAIM --> PRO & CON & CROSS
+        PRO & CON & CROSS --> DEL --> T2b
+        T2b -- "challenge, T2a was run" --> MAXR
+        MAXR -- no --> SESS
+        SESS -- "next round, challenge, audit and rejections as feedback" --> BUD
+    end
+    VIS0 --> BUD
+
+    ENDR(["rounds end at a blocked round, at a T2b pass,<br/>or at a Limit: rounds, run budget,<br/>steward challenges, verifications"])
+    BUD -. no .-> ENDR
+    NEXT -. blocked .-> ENDR
+    CHK3 -. no .-> ENDR
+    T2b -. pass .-> ENDR
+    T2b -. "challenge after T2a was skipped" .-> ENDR
+    MAXR -. yes .-> ENDR
+
+    GAPS(["gaps of every committed contract are collected<br/>fact status, ledger, vision not run, audit, steward and the rest"])
+    STATUS -.-> GAPS
+    LEDG -.-> GAPS
+    FAIL[["run fails, no report: contract still invalid after repairs,<br/>a Step failure that is not a recoverable timeout or retries exhausted,<br/>session identity or close not confirmed, fatal, storage failure"]]
+    RERUN -. retries exhausted .-> FAIL
+    GO -. "repairs exhausted" .-> FAIL
+
+    subgraph S3G["S3: report"]
+        S3["report: fresh Step, no private skills<br/>copies the prompt and the claim object<br/>one disposition per gap, declares completeness"]
+        RND{"Go acceptance of the Step: re-render with the embedded<br/>renderer and compare byte for byte, plus coverage checks"}
+        S3 --> RND
+    end
+    ENDR --> S3
+    GAPS -.-> S3
+    RND -- "mismatch or any failed check: repair in the same session" --> S3
+    RND -- match --> REPORT[["report<br/>incomplete if a limit ended the run, the claim did not pass,<br/>a gap is open or a new gap appeared"]]
+
+    classDef ctl fill:#e8f0fe,stroke:#4a6fa5,color:#000;
+    classDef work fill:#fff4e5,stroke:#c77c02,color:#000;
+    classDef judge fill:#e6f4ea,stroke:#2e7d32,color:#000;
+    classDef out fill:#f1f1f1,stroke:#555555,color:#000;
+    class L1,START,SK,ATT,FB0,STATUS,RERUN,LEDG,PERM,OBS,CLAIM,DEL,SESS,ENDR,GAPS ctl;
+    class L2,RET,BUD,GO,T1Q,NEXT,CHK1,CHK2,CHK3,MAXR,RND ctl;
+    class L3,INT,FACTS,VIS0,R,VIS,S3 work;
+    class L4,V0,FC,V1,T1,T3,T2a,T2b,PRO,CON,CROSS judge;
+    class L5,FAIL,REPORT out;

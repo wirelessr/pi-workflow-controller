@@ -24,6 +24,12 @@ Controller 只負責階段邊界的前置條件、exact committed Refs、確定�
 - 不宣告檔案的 Step 的派送說明：`StepSpec.NoFiles`，verifier 設定；驗收仍由 `checkVerification` 執行。
 - 私有 skill 目錄的受限展開與過期偵測：`triage.PrepareSkills`（見 [WORKFLOW-REUSE](WORKFLOW-REUSE.md) §4）。
 
+## 流程圖
+
+![jira-triage 流程圖](images/jira-triage-flow.png)
+
+圖的原始碼是 [jira-triage-flow.mmd](images/jira-triage-flow.mmd)，依 `internal/workflows/triage` 繪製；與下文敘述不一致時以程式碼為準。圖例的形狀與顏色同時表示執行者：Controller 的 Go 步驟與機械條件、Agent 的產出工作、Agent 的審閱或判讀、輸出與終止結果。重新產生：`cd docs/images && npx -y @mermaid-js/mermaid-cli -i jira-triage-flow.mmd -o jira-triage-flow.png -b white -s 2`。
+
 ## 階段
 
 - S0（`runS0`）：caller prompt 以 Attach 記錄；intake Step 取得整張票並由 Go 驗完整性；facts Step 只從文字來源宣告候選事實與時間錨點，每項附可解析的定位；獨立 fact-check Step 逐項判讀。未被接受的項目以 feedback 有限重試，之後由 Controller 記錄為缺口。

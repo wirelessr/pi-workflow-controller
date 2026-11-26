@@ -1,0 +1,112 @@
+flowchart TD
+    subgraph LEG["Legend"]
+        direction LR
+        L1(["Controller step: Go code"])
+        L2{"Controller decision: mechanical condition"}
+        L3["Agent produces work"]
+        L4{{"Agent judges or reviews"}}
+        L5[["Output or terminal outcome"]]
+        L1 ~~~ L2 ~~~ L3 ~~~ L4 ~~~ L5
+    end
+    LEG ~~~ START
+
+    START(["Prompt: owner/name and a design doc path"]) --> PRE
+
+    subgraph PREP["Controller preparation, before any Pi starts or any external write"]
+        PRE(["check prompt, PWC_PI_CWD, Node TLS, design doc, private skill directory<br/>one repo GET: name, push permission, default branch<br/>git version"])
+        WT(["create the run-owned worktree: detached at the default branch tip<br/>register cleanup"])
+        INP(["Attach input: design doc snapshot, base sha<br/>record the skills digest"])
+        PRE --> WT --> INP
+    end
+
+    subgraph A1G["A1: implement"]
+        A1["implementer: read the design doc, decide whether it is implementable<br/>ready: implement and commit locally, gaps: stop"]
+        R1{"receipt: ready means local head is the worktree HEAD<br/>and a new commit, gaps means HEAD is still the base"}
+        A1 --> R1
+    end
+    INP --> A1
+    R1 -- "gaps" --> GAPS[["design doc gaps: Final is the implement contract<br/>Failed, exit 1, no PR"]]
+
+    subgraph A2G["A2: review before the PR"]
+        SNAP(["Controller-owned snapshot of the A1 head, no remote<br/>own bare repository, alternates to A1 objects"])
+        A2a{{"basic: review of the local diff<br/>read-only by instruction"}}
+        A2b{{"consistency: design doc against the code"}}
+        CHK2{"both required, sessions strictly closed,<br/>worktree HEAD still the A1 head?"}
+        SNAP --> A2a & A2b --> CHK2
+    end
+    R1 -- ready --> SNAP
+
+    subgraph A3G["A3: correct and publish, same implementer session"]
+        A3["implementer: one disposition per finding of both reviews<br/>correct, push one branch, open a non-draft PR<br/>ticket transition, not checked by the Controller"]
+        R3{"receipt: reported head is the worktree HEAD, a new commit or equal to A1 head for no_change<br/>GET: PR matches URL and number, open, not merged, not draft, base is the default branch,<br/>head repo and branch match, reported head at or below the PR head"}
+        PRR(["Attach the pull-request record<br/>strict close, HEAD re-read equals the pushed head"])
+        A3 --> R3 --> PRR
+    end
+    CHK2 -- yes --> A3
+
+    subgraph BG["B: deep review, the code-review flow pinned to the reported head"]
+        BA(["pin a checkout at the reported head<br/>compare if the PR head moved, snapshots, each stage re-verified"])
+        BP["Prepare: sources, requirements, diff context"]
+        B1{{"Code"}}
+        B2{{"Scale and Failure"}}
+        B3{{"Simplicity"}}
+        BV{{"Validation: verify, dedupe, exclude, write the report"}}
+        BA --> BP --> B1 & B2 & B3 --> BV
+    end
+    PRR --> BA
+    BV --> BR{"report status<br/>incomplete or missing ends the run, see the endings"}
+    BR -- "complete or limited: handed on as is" --> CC
+
+    subgraph CG["C: fix"]
+        CC(["before dispatch: HEAD is the reported head"])
+        C["fresh fixer: triage every confirmed finding, one disposition each<br/>fix, comment cleanup, push on top of the reviewed head<br/>or report no_change"]
+        RC{"receipt: new commit built on the reviewed head, or no_change<br/>PR still open at that head or below it<br/>strict close, HEAD re-read"}
+        CC --> C --> RC
+    end
+
+    subgraph DG["D: convergence rounds, a Go loop with one fresh Child scope per round"]
+        ADM{"round cap and run deadline reserve<br/>allow another round?"}
+        WAIT(["await checks and statuses: all terminal and stable for the settle window,<br/>bounded, a timeout is recorded and the round goes on<br/>Attach the snapshot: identities and states only"])
+        OPEN{"PR still open and not merged?"}
+        SKL(["expand the private converge skill fresh for this round"])
+        PD(["before dispatch: HEAD is the last verified head"])
+        CV["converger, fresh session: read the snapshot and last report<br/>triage, fix, comment cleanup, reply or resolve threads,<br/>reply to comments, rerun Actions, push"]
+        RCV{"receipts: push head, thread actions, reruns, comment replies<br/>strict close, PR read again<br/>a mismatch or unverifiable receipt, or a failed pre-dispatch HEAD check,<br/>ends the run, see the endings"}
+        TERM{"claims converged, no_change, no thread action, rerun<br/>or comment reply, and PR head equals the snapshot head?"}
+        ADM -- yes --> WAIT --> OPEN
+        OPEN -- yes --> SKL --> PD --> CV --> RCV
+        RCV -- ok --> TERM
+        TERM -- "no: next round" --> ADM
+        XIT(["round ends early, the summary still follows"])
+        OPEN -. "no" .-> XIT
+        WAIT -. "state read failed" .-> XIT
+        RCV -. "Step failed, post-round read failed, or PR not open after it" .-> XIT
+    end
+    RC -- ok --> ADM
+
+    ENDR(["rounds end, named by kind:<br/>converged, rounds exhausted, not admitted, PR not open,<br/>state read failed, round failed"])
+    TERM -- yes --> ENDR
+    XIT -.-> ENDR
+    ADM -. no .-> ENDR
+
+    FIN(["final snapshot with the same bounded wait<br/>Attach summary: every report and the last snapshot side by side<br/>Agent claims and Controller observations are shown, none judged"])
+    ENDR --> FIN
+    FIN --> OUT[["summary is the Final<br/>converged and the final snapshot recorded: Succeeded, worktree removed<br/>any other end, a missing final snapshot included: Failed, exit 1<br/>worktree kept only if it may hold unpushed work"]]
+
+    subgraph ENDS["Endings that have no summary: the worktree is kept only if it may hold unpushed work, otherwise removed"]
+        EXT[["Final with the original error, listing what exists externally<br/>A3 or C failed after dispatch: the branch and PR that exist<br/>a round failed its receipt or identity check: that round's record,<br/>or the last accepted report when it failed before dispatch<br/>no final snapshot, no summary<br/>the Controller undoes nothing"]]
+        EARLY[["run fails with no later Step, no summary<br/>preparation or input error: no Pi started<br/>an A1 Step or receipt failed, A2 snapshot or a reviewer failed, or the HEAD moved: no PR yet, no Final<br/>B incomplete: its report is the Final, B without a report: the pull-request record<br/>A3 failed before dispatch: no Final; C failed before dispatch: the pull-request record"]]
+        NOFIN[["cancel, run deadline or fatal at any point: no Final"]]
+        EXT ~~~ EARLY ~~~ NOFIN
+    end
+    OUT ~~~ ENDS
+
+    classDef ctl fill:#e8f0fe,stroke:#4a6fa5,color:#000;
+    classDef work fill:#fff4e5,stroke:#c77c02,color:#000;
+    classDef judge fill:#e6f4ea,stroke:#2e7d32,color:#000;
+    classDef out fill:#f1f1f1,stroke:#555555,color:#000;
+    class L1,START,PRE,WT,INP,SNAP,PRR,CC,BA,WAIT,SKL,PD,XIT,ENDR,FIN ctl;
+    class L2,R1,CHK2,R3,BR,RC,ADM,OPEN,RCV,TERM ctl;
+    class L3,A1,A3,BP,C,CV work;
+    class L4,A2a,A2b,B1,B2,B3,BV judge;
+    class L5,GAPS,OUT,EXT,EARLY,NOFIN out;

@@ -32,6 +32,12 @@ Workflow 以一份已核可的 design doc 為輸入，由 Controller 派工，�
 
 模型 ID 以 source 現有宣告為準：`glm-5p3`、`glm-5p3-flash`、`deepseek-v4p1-flash`（均為 `accounts/fireworks/models/` 前綴，triage 已使用）。deepseek 已確認為輕層模型，目前沒有 code-change 角色使用它。
 
+## 流程圖
+
+![code-change 流程圖](images/code-change-flow.png)
+
+圖的原始碼是 [code-change-flow.mmd](images/code-change-flow.mmd)，依 `internal/workflows/codechange` 繪製；與下文敘述不一致時以程式碼為準。圖例的形狀與顏色同時表示執行者：Controller 的 Go 步驟與機械條件、Agent 的產出工作、Agent 的審閱或判讀、輸出與終止結果。重新產生：`cd docs/images && npx -y @mermaid-js/mermaid-cli -i code-change-flow.mmd -o code-change-flow.png -b white -s 2`。
+
 ## 3. 流程
 
 ```
